@@ -11,29 +11,6 @@ Dual-host plugin marketplace for Codex and Claude Code.
 | `inline-discussion` | `1.5.3` | Browser UI for markdown docs with threaded AI conversations. Requires the `inline-discussion` CLI on PATH (installed by `./install.sh`). | `plugins/inline-discussion` | Codex, Claude Code |
 | `project-context-curator` | `0.1.0` | Durable repository domain context for fresh agent sessions. | `plugins/project-context-curator` | Codex, Claude Code |
 
-## Host Manifests
-
-- Codex marketplace: `.agents/plugins/marketplace.json`
-- Claude Code marketplace: `.claude-plugin/marketplace.json`
-
-## Versioning
-
-Canonical marketplace and plugin versions live in `plugin-versions.json`. Do not
-hand-edit version fields in host manifests; use the helper so Codex and Claude
-plugin manifests stay aligned.
-
-```bash
-./scripts/plugin-versioning.py list
-./scripts/plugin-versioning.py check
-./scripts/plugin-versioning.py sync
-./scripts/plugin-versioning.py bump reviewers patch
-./scripts/plugin-versioning.py set inline-discussion 0.2.0
-```
-
-`check` verifies `plugin-versions.json`, `.claude-plugin/marketplace.json`, and
-all plugin host manifests. Local `./install.sh` runs the same check before
-installing from a checkout.
-
 ## Install
 
 One-line installer with GitHub CLI:
@@ -74,6 +51,29 @@ gh/curl one-liner, it clones the marketplace into
 checkout. If neither `gh` nor `git` can authenticate (e.g. private repo without
 credentials), CLI tool install is skipped with a warning and plugin install
 still proceeds.
+
+## Host Manifests
+
+- Codex marketplace: `.agents/plugins/marketplace.json`
+- Claude Code marketplace: `.claude-plugin/marketplace.json`
+
+## Versioning
+
+Canonical marketplace and plugin versions live in `plugin-versions.json`. Do not
+hand-edit version fields in host manifests; use the helper so Codex and Claude
+plugin manifests stay aligned.
+
+```bash
+./scripts/plugin-versioning.py list
+./scripts/plugin-versioning.py check
+./scripts/plugin-versioning.py sync
+./scripts/plugin-versioning.py bump reviewers patch
+./scripts/plugin-versioning.py set inline-discussion 0.2.0
+```
+
+`check` verifies `plugin-versions.json`, `.claude-plugin/marketplace.json`, and
+all plugin host manifests. Local `./install.sh` runs the same check before
+installing from a checkout.
 
 Manual Codex CLI install:
 
