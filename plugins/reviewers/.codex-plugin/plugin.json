@@ -1,0 +1,39 @@
+{
+  "name": "reviewers",
+  "version": "0.7.0",
+  "description": "PR finalization, reviewer-team, and Slack review-request workflows for Claude Code and Codex.",
+  "author": {
+    "name": "apohl79"
+  },
+  "homepage": "https://github.com/apohl79/e47-agent-lab",
+  "repository": "https://github.com/apohl79/e47-agent-lab",
+  "keywords": [
+    "pull-requests",
+    "code-review",
+    "review-requests",
+    "slack",
+    "quality-gates",
+    "automation"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Reviewers",
+    "shortDescription": "Run reviewers, finalize PRs, and request review.",
+    "longDescription": "Reviewers adds skills for parallel reviewer-team runs, focused fallback security review, getting pull requests into a ready or merged state, and sending concise PR review requests to configured Slack channels.",
+    "developerName": "apohl79",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Write",
+      "Interactive"
+    ],
+    "brandColor": "#2563EB",
+    "defaultPrompt": [
+      "Finalize this PR with reviewers.",
+      "Run the reviewers team on this change.",
+      "Check this PR for review and quality-gate issues.",
+      "Send a PR review request to Slack.",
+      "Manage PR review Slack channels."
+    ]
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "name": "inline-discussion",
+  "version": "1.5.3",
+  "description": "Inline-discussion browser UI for markdown docs with threaded AI conversations.",
+  "author": {
+    "name": "apohl79"
+  },
+  "homepage": "https://github.com/apohl79/e47-agent-lab",
+  "repository": "https://github.com/apohl79/e47-agent-lab",
+  "keywords": [
+    "markdown",
+    "review",
+    "discussion",
+    "annotation"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Inline Discussion",
+    "shortDescription": "Review markdown docs with inline discussion threads.",
+    "longDescription": "Inline Discussion opens a local browser UI for markdown documents, lets you attach threaded AI conversations or notes to individual blocks, and writes closed thread conclusions back into the document.",
+    "developerName": "apohl79",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "brandColor": "#2563EB",
+    "defaultPrompt": [
+      "Discuss the previous response inline.",
+      "Open docs/architecture.md in inline discussion."
+    ]
+  }
+}

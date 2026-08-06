@@ -1,0 +1,717 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$( cd -- "$( dirname -- "$(readlink -f "${BASH_SOURCE[0]}")" )" &> /dev/null && pwd )"
+SERVER_DIR="$( cd "$SCRIPT_DIR/.." && pwd )"
+
+# Best-effort URL opener for the quick-mode shortcut. macOS uses `open`,
+# Linux uses `xdg-open`, WSL uses `wslview`/`explorer.exe`. Failure is
+# non-fatal — we still print the URL on stdout for the user to copy.
+open_url() {
+  local url="$1"
+  [[ -n "$url" ]] || return 0
+  local cmd=""
+  if command -v open >/dev/null 2>&1; then
+    cmd="open"
+  elif command -v xdg-open >/dev/null 2>&1; then
+    cmd="xdg-open"
+  elif command -v wslview >/dev/null 2>&1; then
+    cmd="wslview"
+  fi
+  if [[ -n "$cmd" ]]; then
+    "$cmd" "$url" >/dev/null 2>&1 &
+    disown 2>/dev/null || true
+  fi
+}
+
+# Python filter used by the quick-mode Codex agent shortcut. Reads
+# `codex exec --json` on stdin and emits a focused progress feed on stdout:
+#   - `URL: <url>` as soon as an agent message contains the server URL line
+#   - `↳ <short line>` for each interesting item (shell commands run, skill
+#     calls invoked, terminal errors)
+#   - the final agent message verbatim
+# Token counters, reasoning traces, and the codex skill-description-warning
+# are dropped. The filter exits with the same non-zero code if the agent
+# emits an error event.
+# shellcheck disable=SC2034
+read -r -d '' INLINE_DISCUSSION_AGENT_FILTER <<'PYEOF' || true
+import json, re, sys
+
+URL_RE = re.compile(r"https?://127\.0\.0\.1:\d+/?")
+SKILL_DROP_PREFIXES = (
+    "Skill descriptions were shortened",
+)
+SHELL_WRAPPER_RE = re.compile(r"^/[^\s]*?(?:sh|zsh|bash|fish)\s+-l?c\s+", re.IGNORECASE)
+final_text = None
+exit_code = 0
+
+def emit(line: str) -> None:
+    sys.stdout.write(line + "\n")
+    sys.stdout.flush()
+
+def short(s: str, n: int = 100) -> str:
+    s = " ".join(s.split())
+    return s if len(s) <= n else s[: n - 1] + "…"
+
+def clean_command(cmd: str) -> str:
+    """Strip the `/bin/zsh -lc "..."` wrapper Codex emits around every shell
+    command so the user sees the inner command instead of the wrapper."""
+    cmd = cmd.strip()
+    m = SHELL_WRAPPER_RE.match(cmd)
+    if m:
+        cmd = cmd[m.end():]
+    # Strip a surrounding single- or double-quote pair if Codex quoted the
+    # whole inner command.
+    if len(cmd) >= 2 and cmd[0] == cmd[-1] and cmd[0] in ("'", '"'):
+        cmd = cmd[1:-1]
+    return cmd.strip()
+
+for raw in sys.stdin:
+    raw = raw.strip()
+    if not raw:
+        continue
+    try:
+        ev = json.loads(raw)
+    except json.JSONDecodeError:
+        continue
+    t = ev.get("type")
+    item = ev.get("item") or {}
+    it = item.get("type") if isinstance(item, dict) else None
+
+    if t == "item.started" and it == "command_execution":
+        cmd = item.get("command") or ""
+        if isinstance(cmd, list):
+            cmd = " ".join(str(c) for c in cmd)
+        emit(f"\u21B3 {short(clean_command(str(cmd)))}")
+        continue
+    if t == "item.started" and it in ("skill_call", "tool_use", "tool_call"):
+        name = item.get("name") or item.get("skill") or ""
+        emit(f"\u21B3 {short(str(name))}")
+        continue
+    if t == "item.completed" and it == "agent_message":
+        text = (item.get("text") or "").strip()
+        if not text:
+            continue
+        # The URL line is what the user really wants to see first.
+        m = URL_RE.search(text)
+        if m:
+            emit(f"URL: {m.group(0)}")
+        if text.startswith(SKILL_DROP_PREFIXES):
+            continue
+        final_text = text
+        continue
+    if t == "item.completed" and it == "error":
+        msg = (item.get("message") or "").strip()
+        if msg.startswith(SKILL_DROP_PREFIXES):
+            continue
+        sys.stderr.write(f"codex error: {short(msg, 200)}\n")
+        exit_code = 1
+        continue
+
+if final_text and not URL_RE.search(final_text):
+    # Re-emit the final summary at the end. If it already had the URL we
+    # already showed it above; avoid duplicating in that case.
+    emit(final_text)
+
+sys.exit(exit_code)
+PYEOF
+
+usage() {
+  cat >&2 <<'EOF'
+Usage:
+  inline-discussion [-a [codex|claude]|--agent[=codex|claude]] <doc>                     # quick: launch a discussion on <doc>, hold until Finish
+  inline-discussion start --doc <path> [--main-jsonl <path>] [--main-session-id <id>] [--main-session-socket <path>] --session-dir <path> [--agent claude|codex] [--cwd <path>] [--hold]
+  inline-discussion sessions [--socket <path>]
+  inline-discussion wait  --session-dir <path> [--idle-exit-seconds <seconds>]
+  inline-discussion watch --session-dir <path> --codex-thread-id <id> --doc <path> [--cwd <path>]
+
+  <doc>  Shortcut: equivalent to
+           inline-discussion start --doc <doc> --session-dir ${TMPDIR:-/tmp}/inline-discussion/<slug> \
+             --agent codex --cwd "$PWD" --hold
+         No main-session JSONL is passed — the agent runs with an empty
+         main-transcript preamble, appropriate when the CLI is invoked
+         outside a host (Codex/Claude) session.
+
+  -a, --agent  Bootstrap a main-agent session and let the inline-discussion
+               plugin's /inline-discussion:discuss skill drive the launcher
+               from inside that session. Defaults to Codex for backwards
+               compatibility; pass `-a claude` or `--agent=claude` to use
+               Claude. Requires the selected host CLI and the
+               inline-discussion plugin installed.
+  start  Boot the server detached, print the URL on stdout, exit 0.
+         Writes url.txt and server.pid into --session-dir.
+         With --hold, print the URL and keep the launcher alive until the server exits.
+         With --main-session-id, Apply and Finish hand control back through the
+         running Codex app-server session instead of the active host turn.
+  wait   Block until Apply, Pause, or Finish writes a signal file. Exits 0 and prints
+         the signal file path. With --idle-exit-seconds, exits 124 if no
+         signal has arrived yet and the server is still alive.
+  watch  Compatibility command for detached Codex signal handling. The discuss
+         skill keeps Apply in the active main-agent loop instead.
+EOF
+  exit 1
+}
+
+ensure_runtime_build() {
+  local install_marker="$SERVER_DIR/node_modules/.inline-discussion-install-complete"
+  if [[ ! -f "$install_marker" ]]; then
+    command -v npm >/dev/null 2>&1 \
+      || { echo "npm required to install server deps (missing $install_marker)" >&2; exit 5; }
+    echo "inline-discussion: installing server dependencies (first launch)…" >&2
+    (cd "$SERVER_DIR" && npm ci --silent --no-audit --no-fund --include=dev --ignore-scripts) >&2 \
+      || { echo "npm ci failed" >&2; exit 5; }
+    : > "$install_marker"
+  fi
+
+  local dist_marker="$SERVER_DIR/dist/index.html"
+  local needs_build=0
+  if [[ ! -f "$dist_marker" || ! -f "$SERVER_DIR/dist/server.js" || ! -f "$SERVER_DIR/dist/session-control.js" ]]; then
+    needs_build=1
+  elif find "$SERVER_DIR/src" -type f -newer "$dist_marker" -print -quit 2>/dev/null | grep -q .; then
+    needs_build=1
+  fi
+  if (( needs_build )); then
+    command -v npm >/dev/null 2>&1 \
+      || { echo "npm required to rebuild dist/" >&2; exit 5; }
+    echo "inline-discussion: rebuilding dist/ (src/ newer than dist/)…" >&2
+    (cd "$SERVER_DIR" && npm run --silent build) >&2 \
+      || { echo "npm run build failed" >&2; exit 5; }
+  fi
+}
+
+agent_shortcut_prompt() {
+  local abs_doc="$1"
+  printf '/inline-discussion:discuss %s\n\nWhile waiting for Apply, Pause, or Finish, never stop just because no signal has arrived yet. Keep waiting until Apply, Pause, Finish, explicit user cancellation, or server failure.\n\nAfter Pause or Finish, print a one-line summary of the discussion and exit. Do not ask any follow-up questions and do not invoke any further tools.' "$abs_doc"
+}
+
+validate_agent_shortcut_doc_path() {
+  local abs_doc="$1"
+  command -v node >/dev/null 2>&1 \
+    || { echo "node required for --agent mode (path validation)" >&2; exit 5; }
+  if ! node -e '
+const path = process.argv[1] ?? "";
+for (const ch of path) {
+  const code = ch.charCodeAt(0);
+  if (code < 0x20 || code === 0x7f) {
+    process.exit(1);
+  }
+}
+' "$abs_doc"; then
+    echo "doc path contains control characters; refusing to launch agent mode" >&2
+    exit 2
+  fi
+}
+
+run_codex_agent_shortcut() {
+  local abs_doc="$1"
+  command -v codex >/dev/null 2>&1 \
+    || { echo "codex CLI required for --agent codex" >&2; exit 5; }
+  command -v python3 >/dev/null 2>&1 \
+    || { echo "python3 required for --agent codex (event filter)" >&2; exit 5; }
+
+  # codex exec runs non-interactively: it boots a one-shot agent, hands it
+  # the prompt, and exits when the agent's turn returns. Inside that turn,
+  # /inline-discussion:discuss invokes the skill, which calls back into
+  # this same CLI (`inline-discussion start ... --hold`) to boot the
+  # server, opens the browser, and loops on `inline-discussion wait`.
+  # When the user clicks Finish, the server writes result.json, the
+  # launcher's --hold returns, the skill processes the result and exits,
+  # and `codex exec` exits with it — so the main agent finishes alongside
+  # the browser session.
+  #
+  # The trailing instructions suppress the skill's interactive
+  # "how do you want to proceed?" prompt, which would otherwise hang
+  # codex exec waiting for user input there is no channel to deliver.
+  #
+  # We pipe `codex exec --json` through a small Python filter so the user
+  # sees a quiet, focused progress feed instead of the raw codex output:
+  #
+  #   Invoking Codex agent...
+  #   ↳ <short progress line per internal step>
+  #   URL: http://127.0.0.1:<port>/
+  #   <skill's final one-line summary>
+  #
+  # Everything else (event envelopes, reasoning, token counters, the
+  # initial skill-description-truncation notice) is swallowed.
+  echo "Invoking Codex agent..." >&2
+  set -o pipefail
+  if [[ "${INLINE_DISCUSSION_UNSAFE_AGENT_MODE:-}" == "1" ]]; then
+    echo "WARNING: unsafe agent mode enabled; approvals and sandbox are bypassed" >&2
+    codex --dangerously-bypass-approvals-and-sandbox exec --json \
+      "$(agent_shortcut_prompt "$abs_doc")" \
+      2> >(grep -v '^Reading additional input from stdin' >&2) \
+      | python3 -u -c "$INLINE_DISCUSSION_AGENT_FILTER"
+    return
+  fi
+  codex exec --json \
+    "$(agent_shortcut_prompt "$abs_doc")" \
+    2> >(grep -v '^Reading additional input from stdin' >&2) \
+    | python3 -u -c "$INLINE_DISCUSSION_AGENT_FILTER"
+}
+
+run_claude_agent_shortcut() {
+  local abs_doc="$1"
+  command -v claude >/dev/null 2>&1 \
+    || { echo "claude CLI required for --agent claude" >&2; exit 5; }
+
+  # Claude Code's print mode starts a one-shot main-agent session. Unsafe
+  # permission bypass is opt-in because this shortcut runs on user documents.
+  echo "Invoking Claude agent..." >&2
+  if [[ "${INLINE_DISCUSSION_UNSAFE_AGENT_MODE:-}" == "1" ]]; then
+    echo "WARNING: unsafe agent mode enabled; permissions are bypassed" >&2
+    claude --dangerously-skip-permissions -p "$(agent_shortcut_prompt "$abs_doc")"
+    return
+  fi
+  claude -p "$(agent_shortcut_prompt "$abs_doc")"
+}
+
+do_start() {
+  local doc="" main_jsonl="" main_session_id="" main_session_socket="" session_dir="" agent="claude" agent_cwd="$PWD" hold="false"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --doc) doc="$2"; shift 2;;
+      --main-jsonl) main_jsonl="$2"; shift 2;;
+      --main-session-id) main_session_id="$2"; shift 2;;
+      --main-session-socket) main_session_socket="$2"; shift 2;;
+      --session-dir) session_dir="$2"; shift 2;;
+      --agent) agent="$2"; shift 2;;
+      --cwd) agent_cwd="$2"; shift 2;;
+      --hold) hold="true"; shift;;
+      *) echo "unknown arg: $1" >&2; exit 1;;
+    esac
+  done
+
+  [[ -n "$doc" ]] || { echo "--doc required" >&2; exit 2; }
+  [[ -n "$session_dir" ]] || { echo "--session-dir required" >&2; exit 1; }
+
+  [[ -f "$doc" ]] || { echo "doc missing at $doc" >&2; exit 2; }
+  local real_doc
+  real_doc="$(cd "$(dirname "$doc")" && pwd -P)/$(basename "$doc")"
+
+  # --main-jsonl is optional; when provided, it must exist. The server treats
+  # a missing/empty IND_MAIN_JSONL as an empty transcript (used by the quick
+  # `inline-discussion <doc>` shortcut and any standalone invocation).
+  if [[ -n "$main_jsonl" ]]; then
+    [[ -f "$main_jsonl" ]] || { echo "main-jsonl missing at $main_jsonl" >&2; exit 3; }
+  fi
+  [[ "$agent" == "claude" || "$agent" == "codex" ]] || { echo "--agent must be claude or codex" >&2; exit 2; }
+  [[ -d "$agent_cwd" ]] || { echo "--cwd directory missing at $agent_cwd" >&2; exit 2; }
+  local real_agent_cwd
+  real_agent_cwd="$(cd "$agent_cwd" && pwd -P)"
+
+  node -v | awk -F. '{gsub(/[^0-9]/, "", $1); exit ($1+0 >= 20) ? 0 : 1}' \
+    || { echo "Node >= 20 required (got $(node -v))" >&2; exit 5; }
+  if [[ "$agent" == "codex" ]]; then
+    command -v codex >/dev/null 2>&1 \
+      || { echo "codex CLI required for --agent $agent" >&2; exit 5; }
+  fi
+
+  ensure_runtime_build
+
+  mkdir -p "$session_dir"
+  chmod 700 "$session_dir"
+
+  # Stale artefacts from a previous run would confuse `wait` — remove them
+  # before (re)booting. Includes leftover apply-N.json signal files that the
+  # main agent might not have consumed on a previous abort.
+  local watcher_pid_file="$session_dir/codex-watcher.pid"
+  if [[ -f "$watcher_pid_file" ]] && kill -0 "$(cat "$watcher_pid_file" 2>/dev/null)" 2>/dev/null; then
+    kill "$(cat "$watcher_pid_file")" 2>/dev/null || true
+  fi
+  rm -f "$watcher_pid_file" "$session_dir/codex-watcher.log"
+  rm -f "$session_dir/url.txt" "$session_dir/server.pid" "$session_dir/result.json" "$session_dir/pause.json"
+  rm -f "$session_dir"/apply-*.json
+  : > "$session_dir/server.log"
+  # server.log captures the server's stdout/stderr, which can include doc
+  # content via error traces. Restrict it to the user (main-transcript.json
+  # already does the same).
+  chmod 600 "$session_dir/server.log" 2>/dev/null || true
+
+  export IND_DOC="$real_doc"
+  if [[ -n "$main_jsonl" ]]; then
+    export IND_MAIN_JSONL="$main_jsonl"
+  else
+    unset IND_MAIN_JSONL
+  fi
+  if [[ -n "$main_session_id" ]]; then
+    export IND_MAIN_SESSION_ID="$main_session_id"
+  else
+    unset IND_MAIN_SESSION_ID
+  fi
+  if [[ -n "$main_session_socket" ]]; then
+    export IND_MAIN_SESSION_SOCKET="$main_session_socket"
+  else
+    unset IND_MAIN_SESSION_SOCKET
+  fi
+  export IND_SESSION_DIR="$session_dir"
+  export IND_STATIC_DIR="$SERVER_DIR/dist"
+  export IND_AGENT="$agent"
+  export IND_AGENT_CWD="$real_agent_cwd"
+
+  # Detach via nohup + disown so the server survives this launcher exiting.
+  # stdout+stderr both go to server.log; the URL is the first stdout line.
+  # stdin is closed so the child can't inherit this shell's tty.
+  # IND_SERVER_JS overrides the server entrypoint (used by the launcher smoke test).
+  local server_js="${IND_SERVER_JS:-$SERVER_DIR/dist/server.js}"
+  nohup node "$server_js" >"$session_dir/server.log" 2>&1 </dev/null &
+  local server_pid=$!
+  disown "$server_pid" 2>/dev/null || true
+  echo "$server_pid" > "$session_dir/server.pid"
+  chmod 600 "$session_dir/server.pid"
+
+  # Poll server.log for the URL line. The server prints one line to stdout
+  # after it's listening; anything earlier is startup noise on stderr, which
+  # also lands in server.log — so read the FIRST line that looks like a URL.
+  local url="" deadline=$((SECONDS + 30))
+  while (( SECONDS < deadline )); do
+    if [[ -s "$session_dir/server.log" ]]; then
+      url="$(grep -m1 '^http://' "$session_dir/server.log" 2>/dev/null || true)"
+      [[ -n "$url" ]] && break
+    fi
+    if ! kill -0 "$server_pid" 2>/dev/null; then
+      # Server died before emitting a URL — surface its log and bail.
+      tail -n 30 "$session_dir/server.log" >&2 || true
+      rm -f "$session_dir/server.pid"
+      exit 7
+    fi
+    sleep 0.1
+  done
+
+  if [[ -z "$url" ]]; then
+    echo "server did not emit URL within 30s" >&2
+    tail -n 30 "$session_dir/server.log" >&2 || true
+    kill "$server_pid" 2>/dev/null || true
+    rm -f "$session_dir/server.pid"
+    exit 7
+  fi
+
+  echo "$url" > "$session_dir/url.txt"
+  chmod 600 "$session_dir/url.txt"
+  echo "$url"
+
+  if [[ "$hold" == "true" ]]; then
+    while kill -0 "$server_pid" 2>/dev/null; do
+      sleep 0.5
+    done
+  fi
+}
+
+do_sessions() {
+  local socket=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --socket) socket="$2"; shift 2;;
+      *) echo "unknown arg: $1" >&2; exit 1;;
+    esac
+  done
+
+  command -v node >/dev/null 2>&1 || { echo "node required" >&2; exit 5; }
+  ensure_runtime_build
+  local session_control_js="${IND_SESSION_CONTROL_JS:-$SERVER_DIR/dist/session-control.js}"
+  [[ -f "$session_control_js" ]] || { echo "session-control bundle missing at $session_control_js" >&2; exit 5; }
+  if [[ -n "$socket" ]]; then
+    IND_MAIN_SESSION_SOCKET="$socket" node "$session_control_js"
+  else
+    node "$session_control_js"
+  fi
+}
+
+notify_apply_monitoring() {
+  local session_dir="$1"
+  local url_file="$session_dir/url.txt"
+  [[ -f "$url_file" ]] || return 0
+  local url
+  url="$(cat "$url_file" 2>/dev/null || true)"
+  [[ -n "$url" ]] || return 0
+  node -e 'fetch(process.argv[1], { method: "POST" }).catch(() => {})' "${url%/}/api/apply/monitoring" >/dev/null 2>&1 || true
+}
+
+do_wait() {
+  local session_dir="" idle_exit_seconds=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --session-dir) session_dir="$2"; shift 2;;
+      --idle-exit-seconds) idle_exit_seconds="$2"; shift 2;;
+      *) echo "unknown arg: $1" >&2; exit 1;;
+    esac
+  done
+
+  [[ -n "$session_dir" ]] || { echo "--session-dir required" >&2; exit 1; }
+  if [[ -n "$idle_exit_seconds" ]]; then
+    [[ "$idle_exit_seconds" =~ ^[0-9]+$ ]] || { echo "--idle-exit-seconds must be a positive integer" >&2; exit 2; }
+    (( idle_exit_seconds > 0 )) || { echo "--idle-exit-seconds must be a positive integer" >&2; exit 2; }
+  fi
+  [[ -f "$session_dir/server.pid" ]] || { echo "no server.pid in $session_dir — was start run?" >&2; exit 1; }
+
+  local server_pid
+  server_pid="$(cat "$session_dir/server.pid")"
+  notify_apply_monitoring "$session_dir"
+  local idle_deadline=0
+  if [[ -n "$idle_exit_seconds" ]]; then
+    idle_deadline=$((SECONDS + idle_exit_seconds))
+  fi
+
+  # Poll the session dir for result.json (Finish), pause.json (Pause), or apply-N.json
+  # (Apply). Print the first matching path, exit 0. Also bail if the
+  # server PID disappears without producing either file. In heartbeat mode,
+  # return 124 before host command/session timeouts can kill the wait; callers
+  # should treat that as "still waiting" and immediately call wait again.
+  local found=""
+  while :; do
+    if [[ -f "$session_dir/result.json" ]]; then
+      found="$session_dir/result.json"
+      break
+    fi
+    if [[ -f "$session_dir/pause.json" ]]; then
+      found="$session_dir/pause.json"
+      break
+    fi
+    # apply-*.json — pick the lowest-numbered one in case of multiple.
+    local first_apply
+    first_apply="$(ls -1 "$session_dir"/apply-*.json 2>/dev/null | sort -V | head -n1 || true)"
+    if [[ -n "$first_apply" ]]; then
+      found="$first_apply"
+      break
+    fi
+    if ! kill -0 "$server_pid" 2>/dev/null; then
+      echo "server died without producing a signal file" >&2
+      tail -n 30 "$session_dir/server.log" >&2 || true
+      rm -f "$session_dir/server.pid"
+      exit 7
+    fi
+    if [[ -n "$idle_exit_seconds" && "$SECONDS" -ge "$idle_deadline" ]]; then
+      echo "no signal yet in $session_dir; server still alive" >&2
+      exit 124
+    fi
+    sleep 0.2
+  done
+
+  # If we found a Finish or Pause, the server will (or has) called process.exit;
+  # remove server.pid so a stale file doesn't confuse later wait calls.
+  if [[ "$(basename "$found")" == "result.json" || "$(basename "$found")" == "pause.json" ]]; then
+    # Wait briefly for the server to exit cleanly after finish or pause.
+    local deadline=$((SECONDS + 5))
+    while (( SECONDS < deadline )); do
+      kill -0 "$server_pid" 2>/dev/null || break
+      sleep 0.1
+    done
+    rm -f "$session_dir/server.pid"
+  fi
+
+  echo "$found"
+}
+
+notify_apply_failure() {
+  local session_dir="$1" message="$2"
+  local url_file="$session_dir/url.txt"
+  [[ -f "$url_file" ]] || return 0
+  local url
+  url="$(cat "$url_file" 2>/dev/null || true)"
+  [[ -n "$url" ]] || return 0
+  node -e '
+const [url, message] = process.argv.slice(1);
+fetch(url, {
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify({ error: message }),
+}).catch(() => {});
+' "${url%/}/api/apply/failed" "$message" >/dev/null 2>&1 || true
+}
+
+do_watch_foreground() {
+  local session_dir="" codex_thread_id="" doc="" agent_cwd="$PWD"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --session-dir) session_dir="$2"; shift 2;;
+      --codex-thread-id) codex_thread_id="$2"; shift 2;;
+      --doc) doc="$2"; shift 2;;
+      --cwd) agent_cwd="$2"; shift 2;;
+      *) echo "unknown arg: $1" >&2; exit 1;;
+    esac
+  done
+
+  [[ -n "$session_dir" ]] || { echo "--session-dir required" >&2; exit 1; }
+  [[ -n "$codex_thread_id" ]] || { echo "--codex-thread-id required" >&2; exit 1; }
+  [[ -n "$doc" ]] || { echo "--doc required" >&2; exit 1; }
+  [[ -f "$doc" ]] || { echo "doc missing at $doc" >&2; exit 2; }
+  [[ -d "$agent_cwd" ]] || { echo "--cwd directory missing at $agent_cwd" >&2; exit 2; }
+  command -v codex >/dev/null 2>&1 \
+    || { echo "codex CLI required for watch" >&2; exit 5; }
+  validate_agent_shortcut_doc_path "$doc"
+
+  local signal_path prompt exit_code
+  while :; do
+    signal_path="$(do_wait --session-dir "$session_dir")"
+    case "$(basename "$signal_path")" in
+      result.json|pause.json) exit 0;;
+      apply-*.json)
+        prompt=$(printf '/inline-discussion:apply %s\n\nApply the pending inline-discussion signal for %s. Work only on this Apply event, use the browser progress API, and finish the turn when the event is complete.' "$signal_path" "$doc")
+        set +e
+        (
+          cd "$agent_cwd"
+          codex exec resume --skip-git-repo-check "$codex_thread_id" "$prompt"
+        )
+        exit_code=$?
+        set -e
+        if (( exit_code != 0 )); then
+          notify_apply_failure "$session_dir" "Codex could not resume the discussion thread (exit $exit_code)."
+        fi
+        ;;
+      *) echo "unexpected discussion signal: $signal_path" >&2; exit 1;;
+    esac
+  done
+}
+
+do_watch() {
+  local foreground="false"
+  if [[ "${1:-}" == "--foreground" ]]; then
+    foreground="true"
+    shift
+  fi
+
+  if [[ "$foreground" == "true" ]]; then
+    do_watch_foreground "$@"
+    return
+  fi
+
+  local session_dir="" args=("$@") index=0
+  while (( index < ${#args[@]} )); do
+    if [[ "${args[$index]}" == "--session-dir" ]]; then
+      session_dir="${args[$((index + 1))]:-}"
+      break
+    fi
+    ((index += 1))
+  done
+  [[ -n "$session_dir" ]] || { echo "--session-dir required" >&2; exit 1; }
+  mkdir -p "$session_dir"
+
+  local watcher_pid_file="$session_dir/codex-watcher.pid"
+  if [[ -f "$watcher_pid_file" ]] && kill -0 "$(cat "$watcher_pid_file" 2>/dev/null)" 2>/dev/null; then
+    echo "Codex watcher already running" >&2
+    exit 1
+  fi
+  rm -f "$watcher_pid_file"
+  nohup bash "$SCRIPT_DIR/inline-discussion" watch --foreground "$@" \
+    >"$session_dir/codex-watcher.log" 2>&1 </dev/null &
+  local watcher_pid=$!
+  disown "$watcher_pid" 2>/dev/null || true
+  echo "$watcher_pid" > "$watcher_pid_file"
+  echo "$watcher_pid"
+}
+
+do_quick() {
+  local doc="" main_agent=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -a|--agent)
+        main_agent="codex"
+        shift
+        if [[ $# -gt 0 && ( "$1" == "codex" || "$1" == "claude" ) ]]; then
+          main_agent="$1"
+          shift
+        fi
+        ;;
+      --agent=codex|--agent=claude)
+        main_agent="${1#--agent=}"
+        shift
+        ;;
+      --agent=*)
+        echo "--agent must be claude or codex" >&2
+        exit 2
+        ;;
+      --)
+        shift
+        while [[ $# -gt 0 ]]; do
+          [[ -z "$doc" ]] || { echo "extra positional: $1" >&2; usage; }
+          doc="$1"
+          shift
+        done
+        break
+        ;;
+      -*) echo "unknown option: $1" >&2; usage;;
+      *)
+        [[ -z "$doc" ]] || { echo "extra positional: $1" >&2; usage; }
+        doc="$1"; shift;;
+    esac
+  done
+
+  [[ -n "$doc" ]] || { echo "doc required" >&2; usage; }
+  [[ -f "$doc" ]] || { echo "doc missing at $doc" >&2; exit 2; }
+
+  if [[ -n "$main_agent" ]]; then
+    # Absolutise the doc path so the host agent sees the same file regardless of how
+    # the user invoked the launcher.
+    local abs_doc
+    abs_doc="$(cd "$(dirname "$doc")" && pwd -P)/$(basename "$doc")"
+
+    # Reject control characters in the absolute doc path. The path is
+    # interpolated into the agent prompt, and a filename containing a
+    # newline / NUL / ESC could append agent instructions to the prompt.
+    # `printf %q` would shell-escape but not prompt-escape; rejection is
+    # the cleanest guard since these characters are not legitimate in
+    # discussion document filenames.
+    validate_agent_shortcut_doc_path "$abs_doc"
+    if [[ "$main_agent" == "claude" ]]; then
+      run_claude_agent_shortcut "$abs_doc"
+    else
+      run_codex_agent_shortcut "$abs_doc"
+    fi
+    exit $?
+  fi
+
+  # Quick mode writes server.pid / url.txt / server.log / main-transcript.json
+  # and possibly result.json + apply-N.json into the session dir, and
+  # do_start truncates server.log + removes those names on (re)boot. Using
+  # $PWD here would clobber any user-owned files of those names in the cwd
+  # the user happens to be in (and litter that directory). Use a per-doc
+  # subdir under $TMPDIR instead.
+  local session_dir slug
+  slug="$(basename "$doc")"
+  # Sanitise: keep [A-Za-z0-9._-] only; collapse anything else into '-'.
+  slug="$(printf '%s' "$slug" | tr -c 'A-Za-z0-9._-' '-')"
+  [[ -n "$slug" ]] || slug="doc"
+  session_dir="${TMPDIR:-/tmp}/inline-discussion/${slug}"
+  mkdir -p "$session_dir"
+  chmod 700 "$session_dir"
+
+  # No --main-jsonl: the server treats a missing/empty IND_MAIN_JSONL as an
+  # empty main-transcript preamble, which is what the standalone shortcut
+  # wants. Boot the server detached (no --hold) so we can open the browser
+  # and then sit on the pid ourselves — this lets us auto-open the URL,
+  # which `do_start --hold` does not do.
+  do_start \
+    --doc "$doc" \
+    --session-dir "$session_dir" \
+    --agent codex \
+    --cwd "$(pwd -P)"
+
+  local url server_pid
+  url="$(cat "$session_dir/url.txt" 2>/dev/null || true)"
+  server_pid="$(cat "$session_dir/server.pid" 2>/dev/null || true)"
+  if [[ -n "$url" ]]; then
+    open_url "$url"
+  fi
+
+  if [[ -n "$server_pid" ]]; then
+    # Forward Ctrl-C cleanly: kill the server, then exit.
+    trap '[[ -n "'"$server_pid"'" ]] && kill "'"$server_pid"'" 2>/dev/null; exit 130' INT TERM
+    # Block here until the server exits (Finish in the browser, or signal).
+    while kill -0 "$server_pid" 2>/dev/null; do
+      sleep 0.5
+    done
+  fi
+}
+
+[[ $# -ge 1 ]] || usage
+case "$1" in
+  start)     shift; do_start "$@" ;;
+  sessions)  shift; do_sessions "$@" ;;
+  wait)      shift; do_wait "$@" ;;
+  watch)     shift; do_watch "$@" ;;
+  -h|--help) usage ;;
+  *)
+    # Anything else is the quick-launch shortcut. It parses its own flags
+    # (-a/--agent) and the <doc> positional.
+    do_quick "$@"
+    ;;
+esac

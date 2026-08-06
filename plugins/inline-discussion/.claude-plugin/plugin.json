@@ -1,0 +1,8 @@
+{
+  "name": "inline-discussion",
+  "version": "1.5.3",
+  "description": "Inline-discussion browser UI for markdown docs",
+  "author": {
+    "name": "apohl79"
+  }
+}
