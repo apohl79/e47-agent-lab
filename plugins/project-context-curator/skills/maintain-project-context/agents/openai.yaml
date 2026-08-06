@@ -1,0 +1,4 @@
+interface:
+  display_name: Maintain Project Context
+  short_description: Capture durable project context.
+  default_prompt: "Maintain project context for this repository while working: proactively store durable repo/user-confirmed insights, ask concise questions when meaning is unclear, and update docs/context files."

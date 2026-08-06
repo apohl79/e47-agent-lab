@@ -1,0 +1,44 @@
+{
+  "name": "e47",
+  "interface": {
+    "displayName": "E47"
+  },
+  "plugins": [
+    {
+      "name": "reviewers",
+      "source": {
+        "source": "local",
+        "path": "./plugins/reviewers"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "inline-discussion",
+      "source": {
+        "source": "local",
+        "path": "./plugins/inline-discussion"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "project-context-curator",
+      "source": {
+        "source": "local",
+        "path": "./plugins/project-context-curator"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

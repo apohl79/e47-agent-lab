@@ -1,0 +1,19 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "description": "Activate repository project-context curation",
+            "command": "sh -c 'exec python3 \"${CLAUDE_PLUGIN_ROOT:-.}/hooks/project-context-hook.py\" session-start'",
+            "async": false,
+            "timeout": 10,
+            "statusMessage": "Checking project context"
+          }
+        ]
+      }
+    ]
+  }
+}

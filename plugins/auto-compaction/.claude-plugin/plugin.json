@@ -1,0 +1,8 @@
+{
+  "name": "auto-compaction",
+  "version": "0.1.0",
+  "description": "Claude Code auto-compaction gate with setup skill and checkpoint hooks.",
+  "author": {
+    "name": "apohl79"
+  }
+}

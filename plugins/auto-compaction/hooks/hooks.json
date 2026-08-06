@@ -1,0 +1,40 @@
+{
+  "hooks": {
+    "PreCompact": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "description": "compaction-gate: defer auto-compaction to a model-chosen safe point (always active in Claude Code; fail-open; no-op under Codex)",
+            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/precompact-gate.py"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "description": "Inject the context-checkpoint contract each session (always active in Claude Code; no-op under Codex)",
+            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/sessionstart-checkpoint-contract.py"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "description": "Nudge the model to checkpoint when context is in the deferral band (always active in Claude Code; no-op under Codex)",
+            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/userpromptsubmit-checkpoint-nudge.py"
+          }
+        ]
+      }
+    ]
+  }
+}

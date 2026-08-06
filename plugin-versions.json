@@ -1,0 +1,35 @@
+{
+  "marketplace": {
+    "name": "e47",
+    "version": "1.1.0"
+  },
+  "plugins": {
+    "reviewers": {
+      "version": "0.7.0",
+      "hosts": [
+        "codex",
+        "claude"
+      ]
+    },
+    "auto-compaction": {
+      "version": "0.1.0",
+      "hosts": [
+        "claude"
+      ]
+    },
+    "inline-discussion": {
+      "version": "1.5.3",
+      "hosts": [
+        "codex",
+        "claude"
+      ]
+    },
+    "project-context-curator": {
+      "version": "0.1.0",
+      "hosts": [
+        "codex",
+        "claude"
+      ]
+    }
+  }
+}

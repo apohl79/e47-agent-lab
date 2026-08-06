@@ -1,0 +1,35 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "e47",
+  "version": "1.1.0",
+  "description": "E47 Claude Code and Codex plugin marketplace.",
+  "owner": {
+    "name": "apohl79"
+  },
+  "plugins": [
+    {
+      "name": "reviewers",
+      "description": "PR finalization, reviewer-team, and Slack review-request workflows for Claude Code and Codex.",
+      "source": "./plugins/reviewers",
+      "category": "workflow"
+    },
+    {
+      "name": "auto-compaction",
+      "description": "Claude Code auto-compaction gate with setup skill and checkpoint hooks.",
+      "source": "./plugins/auto-compaction",
+      "category": "workflow"
+    },
+    {
+      "name": "inline-discussion",
+      "description": "Inline-discussion browser UI for markdown docs with threaded AI conversations.",
+      "source": "./plugins/inline-discussion",
+      "category": "workflow"
+    },
+    {
+      "name": "project-context-curator",
+      "description": "Proactively maintains durable repository domain context for fresh agent sessions.",
+      "source": "./plugins/project-context-curator",
+      "category": "workflow"
+    }
+  ]
+}
