@@ -392,6 +392,8 @@ button.primary:hover {
   white-space: normal;
 }
 
+#doc pre.mermaid[data-processed] { cursor: zoom-in; }
+
 #doc pre.mermaid svg,
 .msg.assistant pre.mermaid svg {
   display: block;

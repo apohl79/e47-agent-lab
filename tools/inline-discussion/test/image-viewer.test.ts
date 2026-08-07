@@ -85,3 +85,40 @@ test('image viewer remains delegated when the document HTML is refreshed', () =>
   assert.ok(document.querySelector('.image-viewer-backdrop'));
   dom.window.close();
 });
+
+test('clicking a rendered mermaid diagram opens it in the viewer', () => {
+  const dom = setupDom();
+  const { document } = dom.window;
+  globalThis.XMLSerializer = dom.window.XMLSerializer;
+  const root = document.getElementById('doc');
+  assert.ok(root);
+  installImageViewer(root);
+  root.innerHTML = '<pre class="mermaid" data-block-id="a" data-processed="true">'
+    + '<svg viewBox="0 0 300 150"><text>Node</text></svg></pre>';
+
+  const label = root.querySelector('text');
+  assert.ok(label);
+  dispatch(document, label, 'click');
+
+  const viewerImage = document.querySelector<HTMLImageElement>('.image-viewer-image');
+  assert.ok(viewerImage);
+  assert.equal(viewerImage.alt, 'Diagram');
+  assert.match(viewerImage.getAttribute('src') ?? '', /^data:image\/svg\+xml;charset=utf-8,/);
+  dom.window.close();
+});
+
+test('an unrendered mermaid block is not clickable', () => {
+  const dom = setupDom();
+  const { document } = dom.window;
+  const root = document.getElementById('doc');
+  assert.ok(root);
+  installImageViewer(root);
+  root.innerHTML = '<pre class="mermaid" data-block-id="a">flowchart LR\n  A --&gt; B</pre>';
+
+  const diagram = root.querySelector('.mermaid');
+  assert.ok(diagram);
+  dispatch(document, diagram, 'click');
+
+  assert.equal(document.querySelector('.image-viewer-backdrop'), null);
+  dom.window.close();
+});
