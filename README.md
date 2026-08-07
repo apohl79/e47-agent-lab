@@ -13,13 +13,7 @@ Dual-host plugin marketplace for Codex and Claude Code.
 
 ## Install
 
-One-line installer with GitHub CLI:
-
-```bash
-bash -c "$(gh api 'repos/apohl79/e47-agent-lab/contents/install.sh?ref=main' --header 'Accept: application/vnd.github.raw')"
-```
-
-One-line installer with curl:
+One-line installer:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/apohl79/e47-agent-lab/main/install.sh | bash
@@ -43,14 +37,14 @@ user bin dir (`~/bin` if it exists, otherwise `~/.local/bin`). Currently:
   expects this CLI on `PATH`).
 
 The launcher needs the source tree on disk. When `./install.sh` is invoked from
-a local checkout, it links straight into that checkout. When run via the
-gh/curl one-liner, it clones the marketplace into
-  `~/.local/share/e47-agent-lab` (using `gh repo clone` when available, with a
-`git clone https://github.com/<slug>.git` fallback) and links from there.
+a local checkout, it links straight into that checkout. When run via the curl
+one-liner, it clones the marketplace into `~/.local/share/e47-agent-lab` and
+links from there. It uses `git clone https://github.com/<slug>.git`, or
+`gh repo clone` when `gh` is already available.
 `./install.sh uninstall` removes the installed symlinks and that managed
-checkout. If neither `gh` nor `git` can authenticate (e.g. private repo without
-credentials), CLI tool install is skipped with a warning and plugin install
-still proceeds.
+checkout. If neither `gh` nor `git` can clone the repository (e.g. a private
+repo without credentials), CLI tool install is skipped with a warning and
+plugin install still proceeds.
 
 ## Host Manifests
 

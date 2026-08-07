@@ -1,10 +1,7 @@
 #!/usr/bin/env bash
 # Install script for the e47 marketplace.
 #
-# One-line install with gh:
-#   bash -c "$(gh api 'repos/apohl79/e47-agent-lab/contents/install.sh?ref=main' --header 'Accept: application/vnd.github.raw')"
-#
-# One-line install with curl:
+# One-line install:
 #   curl -fsSL https://raw.githubusercontent.com/apohl79/e47-agent-lab/main/install.sh | bash
 
 set -euo pipefail
@@ -51,7 +48,7 @@ CLI_TOOL_REGISTRY=(
 )
 
 # Cache directory for the installer-managed checkout used by CLI tool symlinks
-# when install.sh runs via the curl/gh one-liner (no local checkout in $PWD).
+# when install.sh runs via the curl one-liner (no local checkout in $PWD).
 # Fully managed by this installer — safe to wipe to force a refresh. Defer
 # expansion of $HOME so an unset $HOME (e.g. `env -u HOME bash install.sh
 # --help`) doesn't fail under `set -u`; the actual users (install/remove)
@@ -445,9 +442,9 @@ ensure_cli_tools_checkout() {
     local dir="$CLI_TOOLS_CHECKOUT_DIR"
     mkdir -p "$(dirname "$dir")"
 
-    # Prefer `gh repo clone` for GitHub slugs because the curl/gh one-liner
-    # already requires gh auth and that path works for private repos. Fall back
-    # to `git clone` for explicit URLs or when gh isn't available.
+    # Prefer `gh repo clone` for GitHub slugs when gh is already available; the
+    # public curl one-liner does not require it. Fall back to `git clone` for
+    # explicit URLs or when gh isn't available.
     if [ -d "$dir/.git" ]; then
         # Refuse to reuse a checkout whose origin points somewhere other than
         # the requested marketplace source. A stale or attacker-preseeded
