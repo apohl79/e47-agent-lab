@@ -82,6 +82,12 @@ test('renderDoc applies syntax highlighting class to code blocks', () => {
   assert.match(html, /class="[^"]*hljs[^"]*language-js/);
 });
 
+test('renderDoc marks Mermaid fences for browser-side rendering', () => {
+  const { html } = renderDoc('```mermaid\nflowchart LR\n  A --> B\n```\n');
+  assert.match(html, /<pre class="mermaid"[^>]*>flowchart LR/);
+  assert.doesNotMatch(html, /language-mermaid/);
+});
+
 test('renderDoc preserves <details> and <summary> through sanitisation', () => {
   const md = 'Anchor.\n\n<details><summary>Summary text</summary>\n\nBody.\n\n</details>\n';
   const { html } = renderDoc(md);

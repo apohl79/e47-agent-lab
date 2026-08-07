@@ -6,6 +6,7 @@ import type { Block, BlockKind } from './types.ts';
 import hljs from 'highlight.js';
 import DOMPurify from 'isomorphic-dompurify';
 import { JSDOM } from 'jsdom';
+import { escapeHtml } from './html.ts';
 
 const KIND_MAP: Record<string, BlockKind | undefined> = {
   heading: 'heading',
@@ -83,6 +84,9 @@ export function parseDoc(markdown: string): RawParsedDoc {
 const renderer = new marked.Renderer();
 renderer.code = function (code: string, infostring: string | undefined, _escaped: boolean): string {
   const lang = (infostring ?? '').trim().split(/\s+/)[0] || undefined;
+  if (lang?.toLowerCase() === 'mermaid') {
+    return `<pre class="mermaid">${escapeHtml(code)}</pre>\n`;
+  }
   const language = lang && hljs.getLanguage(lang) ? lang : undefined;
   const highlighted = language
     ? hljs.highlight(code, { language }).value
