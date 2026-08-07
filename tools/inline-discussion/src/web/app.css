@@ -385,6 +385,21 @@ button.primary:hover {
   font-size: inherit;
 }
 
+#doc pre.mermaid,
+.msg.assistant pre.mermaid {
+  padding: 12px 14px;
+  text-align: center;
+  white-space: normal;
+}
+
+#doc pre.mermaid svg,
+.msg.assistant pre.mermaid svg {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 0 auto;
+}
+
 #doc pre.source-line {
   margin: 0;
   padding: 0 18px;

@@ -2,6 +2,7 @@
 import DOMPurify from 'dompurify';
 import { Marked } from 'marked';
 import hljs from 'highlight.js/lib/common';
+import mermaid from 'mermaid';
 import type { AgentActivity, ApplyProgress, ApplyTask, Highlight, Thread } from '../types.ts';
 import {
   composerKeyAction,
@@ -28,6 +29,9 @@ const msgMarked = new Marked({
   renderer: {
     code(code: string, infostring?: string): string {
       const lang = (infostring ?? '').trim().split(/\s+/)[0] || undefined;
+      if (lang?.toLowerCase() === 'mermaid') {
+        return `<pre class="mermaid">${escapeHtml(code)}</pre>\n`;
+      }
       const language = lang && hljs.getLanguage(lang) ? lang : undefined;
       const highlighted = language
         ? hljs.highlight(code, { language }).value
@@ -38,10 +42,37 @@ const msgMarked = new Marked({
   },
 });
 
+mermaid.initialize({
+  startOnLoad: false,
+  securityLevel: 'strict',
+  theme: 'neutral',
+});
+
+let mermaidRenderQueue: Promise<void> = Promise.resolve();
+
+function scheduleMermaidRender(): void {
+  queueMicrotask(() => {
+    const nodes = [...document.querySelectorAll<HTMLElement>('.mermaid:not([data-processed])')];
+    if (nodes.length === 0) return;
+    mermaidRenderQueue = mermaidRenderQueue.then(async () => {
+      const pending = nodes.filter((node) => node.isConnected && !node.dataset.processed);
+      if (pending.length === 0) return;
+      try {
+        await mermaid.run({ nodes: pending, suppressErrors: true });
+      } catch (error) {
+        console.warn('Failed to render Mermaid diagram', error);
+      } finally {
+        installBlockPluses();
+      }
+    });
+  });
+}
+
 const ACTIVITY_TEXT_LIMIT = 256;
 
 function renderMarkdown(text: string): string {
   const raw = msgMarked.parse(text) as string;
+  scheduleMermaidRender();
   return DOMPurify.sanitize(raw, {
     ADD_TAGS: ['details', 'summary'] as string[],
     ADD_ATTR: ['checked', 'disabled', 'type'] as string[],
@@ -715,6 +746,7 @@ function renderDoc(html: string): void {
     ADD_ATTR: ['data-block-id', 'data-thread-id', 'checked', 'disabled', 'type'] as string[],
   });
   document.getElementById('doc')!.innerHTML = clean;
+  scheduleMermaidRender();
 }
 
 function scrollToLine(line: number | null | undefined): void {

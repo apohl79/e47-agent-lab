@@ -1,8 +1,9 @@
 # inline-discussion
 
 Standalone HTTP server that backs the `inline-discussion` plugin. Renders a
-markdown file to HTML, watches it on disk, streams updates over SSE, and hosts
-threaded AI conversations + Apply/Finish workflow on top of the document.
+markdown file (including Mermaid diagrams) to HTML, watches it on disk, streams
+updates over SSE, and hosts threaded AI conversations + Apply/Finish workflow on
+top of the document.
 
 Extracted from the `plugins/inline-discussion/server/` tree so the same binary
 can also be invoked from outside the marketplace skill.
