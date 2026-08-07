@@ -116,6 +116,11 @@ inline-discussion wait  --session-dir <path> [--idle-exit-seconds <seconds>]
   Markdown path in `documentPaths` for the host agent to scan. Apply
   availability is session-wide and stays synchronized across open document
   views. Paths may be project-root-relative or absolute.
+- Mermaid diagrams follow the active theme: switching light/dark re-renders
+  each diagram so its palette matches the page instead of keeping the baked
+  light-mode colours. Clicking a rendered diagram (or any document image)
+  opens it in the image viewer with zoom, drag-to-pan, wheel zoom, `+`/`-`/`0`
+  keys, and Escape to close.
 
 ## Tests
 

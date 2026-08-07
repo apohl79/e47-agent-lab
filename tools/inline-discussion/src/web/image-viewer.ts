@@ -1,3 +1,5 @@
+import { svgToDataUrl } from './svg-source.ts';
+
 const MIN_ZOOM = 0.5;
 const MAX_ZOOM = 5;
 const ZOOM_STEP = 0.25;
@@ -5,6 +7,7 @@ const ZOOM_STEP = 0.25;
 export type ImageViewerController = Readonly<{
   close: () => void;
   open: (image: HTMLImageElement) => void;
+  openSvg: (svg: SVGElement, label: string) => void;
 }>;
 
 export function installImageViewer(root: HTMLElement): ImageViewerController {
@@ -22,7 +25,7 @@ export function installImageViewer(root: HTMLElement): ImageViewerController {
   let dragStartY = 0;
   let dragOriginX = 0;
   let dragOriginY = 0;
-  let trigger: HTMLImageElement | null = null;
+  let trigger: HTMLElement | null = null;
 
   const render = (): void => {
     if (!viewerImage || !zoomLabel || !zoomIn || !zoomOut) return;
@@ -159,12 +162,12 @@ export function installImageViewer(root: HTMLElement): ImageViewerController {
     doc.body.appendChild(backdrop);
   };
 
-  const open = (image: HTMLImageElement): void => {
+  const show = (source: string, alt: string, focusTarget: HTMLElement | null): void => {
     if (!backdrop) createViewer();
     if (!viewerImage) return;
-    trigger = image;
-    viewerImage.src = image.currentSrc || image.getAttribute('src') || '';
-    viewerImage.alt = image.alt;
+    trigger = focusTarget;
+    viewerImage.src = source;
+    viewerImage.alt = alt;
     reset();
     doc.body.classList.add('image-viewer-open');
     doc.addEventListener('keydown', onKeyDown, true);
@@ -172,15 +175,30 @@ export function installImageViewer(root: HTMLElement): ImageViewerController {
     closeButton?.focus();
   };
 
+  const open = (image: HTMLImageElement): void => {
+    show(image.currentSrc || image.getAttribute('src') || '', image.alt, image);
+  };
+
+  const openSvg = (svg: SVGElement, label: string): void => {
+    show(svgToDataUrl(svg), label, svg.closest<HTMLElement>('.mermaid'));
+  };
+
   const onRootClick = (event: MouseEvent): void => {
     const view = doc.defaultView;
     if (!view || !(event.target instanceof view.Element)) return;
     const image = event.target.closest('img');
-    if (!image || !root.contains(image)) return;
+    if (image && root.contains(image)) {
+      event.preventDefault();
+      open(image as HTMLImageElement);
+      return;
+    }
+    const diagram = event.target.closest('.mermaid[data-processed]');
+    const svg = diagram?.querySelector('svg');
+    if (!diagram || !svg || !root.contains(diagram)) return;
     event.preventDefault();
-    open(image as HTMLImageElement);
+    openSvg(svg, 'Diagram');
   };
 
   root.addEventListener('click', onRootClick);
-  return { open, close };
+  return { open, openSvg, close };
 }

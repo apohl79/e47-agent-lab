@@ -18,6 +18,14 @@ import { updateBlockNoteIndicator } from './block-note-indicator.ts';
 import { isArchivedThreadDuplicate } from './thread-dedup.ts';
 import { findThreadDetails } from './thread-details.ts';
 import { installImageViewer } from './image-viewer.ts';
+import {
+  awaitsMermaidRender,
+  captureDiagramSource,
+  mermaidThemeFor,
+  pendingDiagrams,
+  renderedDiagrams,
+  restoreDiagramSource,
+} from './mermaid-diagrams.ts';
 import { installShiftArrowTextareaSelection } from './textarea-selection.ts';
 
 // Dedicated marked instance for rendering thread messages. GFM on so tables +
@@ -42,18 +50,23 @@ const msgMarked = new Marked({
   },
 });
 
-mermaid.initialize({
-  startOnLoad: false,
-  securityLevel: 'strict',
-  theme: 'neutral',
-});
+function initializeMermaid(): void {
+  mermaid.initialize({
+    startOnLoad: false,
+    securityLevel: 'strict',
+    theme: mermaidThemeFor(document.documentElement.dataset.theme),
+  });
+}
+
+initializeMermaid();
 
 let mermaidRenderQueue: Promise<void> = Promise.resolve();
 
 function scheduleMermaidRender(): void {
   queueMicrotask(() => {
-    const nodes = [...document.querySelectorAll<HTMLElement>('.mermaid:not([data-processed])')];
+    const nodes = pendingDiagrams(document);
     if (nodes.length === 0) return;
+    for (const node of nodes) captureDiagramSource(node);
     mermaidRenderQueue = mermaidRenderQueue.then(async () => {
       const pending = nodes.filter((node) => node.isConnected && !node.dataset.processed);
       if (pending.length === 0) return;
@@ -66,6 +79,16 @@ function scheduleMermaidRender(): void {
       }
     });
   });
+}
+
+// Rendered SVGs bake in their palette, so a theme switch has to re-run mermaid
+// against the stashed source rather than restyling the existing output.
+function syncMermaidTheme(): void {
+  initializeMermaid();
+  const rendered = renderedDiagrams(document);
+  if (rendered.length === 0) return;
+  for (const node of rendered) restoreDiagramSource(node);
+  scheduleMermaidRender();
 }
 
 const ACTIVITY_TEXT_LIMIT = 256;
@@ -700,6 +723,7 @@ function applyTheme(): void {
   const btn = document.getElementById('theme-toggle')!;
   btn.textContent = document.documentElement.dataset.theme === 'dark' ? '☀' : '☾';
   btn.setAttribute('aria-label', `Theme: ${t}`);
+  syncMermaidTheme();
 }
 
 function applyWidth(): void {
@@ -1005,6 +1029,7 @@ function attachOwnerToQuoteMark(mark: HTMLElement, owner: MarkOwner): void {
 function installBlockPluses(): void {
   for (const el of document.querySelectorAll<HTMLElement>('[data-block-id]')) {
     if (el.querySelector('.block-plus')) continue;
+    if (awaitsMermaidRender(el)) continue;
     const btn = document.createElement('button');
     btn.className = 'block-plus';
     btn.setAttribute('aria-label', 'Start thread on this block');
