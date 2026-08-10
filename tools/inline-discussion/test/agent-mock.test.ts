@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { codexAgentFactory, mockAgentFactory, dispatchSdkMessage, type DispatchState, type StreamChunk } from '../src/agent.ts';
+import { appendTurnContext, codexAgentFactory, mockAgentFactory, dispatchSdkMessage, type DispatchState, type StreamChunk } from '../src/agent.ts';
 
 function chunkLabel(c: StreamChunk): string {
   if (c.type === 'status') return `status:${c.status ?? ''}`;
@@ -31,6 +31,14 @@ test('mockAgentFactory streams a scripted reply and records messages', async () 
   assert.equal(snap.length, 2);
   assert.equal(snap[0]!.role, 'user');
   assert.equal(snap[1]!.role, 'assistant');
+});
+
+test('appendTurnContext makes the document and anchor explicit without replacing the query', () => {
+  const payload = appendTurnContext('Explain ALT B.', 'Document under discussion: docs/sap-oem-voice-auth.md\nAnchor block: 97ed12e755');
+  assert.match(payload, /^Explain ALT B\./);
+  assert.match(payload, /<inline-discussion-turn-context>/);
+  assert.match(payload, /docs\/sap-oem-voice-auth\.md/);
+  assert.match(payload, /97ed12e755/);
 });
 
 test('codexAgentFactory streams app-server deltas and records replies', async () => {

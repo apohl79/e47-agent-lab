@@ -315,7 +315,21 @@ function createThreadAgent(state: ServerState, thread: Thread): ThreadAgent {
   ]
     .filter(Boolean)
     .join('\n\n');
-  return state.agentFactory({ systemPreamble: preamble, tools: ['Read', 'Grep', 'Glob', 'WebSearch'] });
+  return state.agentFactory({
+    systemPreamble: preamble,
+    tools: ['Read', 'Grep', 'Glob', 'WebSearch'],
+    turnContext: buildTurnContext(state, thread),
+  });
+}
+
+function buildTurnContext(state: ServerState, thread: Thread): string {
+  const quote = thread.anchor.quote?.replace(/\s+/g, ' ').trim();
+  return [
+    `Document under discussion: ${threadDocumentPath(state, thread)}`,
+    `Anchor block: ${thread.anchor.blockId}`,
+    `Anchor excerpt: ${quote ? quote.slice(0, 500) : '(entire block)'}`,
+    'Use the supplied discussion-document context before announcing repository searches.',
+  ].join('\n');
 }
 
 async function archiveAllOpenThreads(state: ServerState): Promise<FinishResult['conclusions']> {
