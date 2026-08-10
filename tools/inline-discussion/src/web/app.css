@@ -1379,7 +1379,7 @@ blockquote.quote,
 
 /* ---------- In-text thread span underline (ranges) ---------- */
 
-#doc [data-thread-id] {
+#doc .quote-highlight[data-thread-id] {
   background: color-mix(in srgb, var(--accent) 18%, transparent);
   border-bottom: 2px solid var(--accent);
   padding: 0 1px;
