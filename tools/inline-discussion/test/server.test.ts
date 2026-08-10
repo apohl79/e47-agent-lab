@@ -179,6 +179,37 @@ test('POST /api/threads/:id/interrupt interrupts the active agent turn', async (
   await close();
 });
 
+test('POST /api/threads/:id/messages steers an active agent turn immediately', async () => {
+  const { docPath, sessionDir, prefsPath } = scratchSession('# Title\n\nPara.\n');
+  let release: (() => void) | null = null;
+  let steered: string | null = null;
+  const agentFactory: AgentFactory = () => ({
+    async *send() {
+      await new Promise<void>((resolve) => { release = resolve; });
+      yield { type: 'done', text: 'finished' };
+    },
+    async *proposeConclusion() { yield { type: 'done', text: '' }; },
+    snapshot: () => [],
+    steer: async (text) => { steered = text; release?.(); },
+  });
+  const { port, close } = await createServer({
+    docPath, sessionDir, prefsPath, agentFactory, shutdownOnFinish: false,
+  });
+  const boot = await (await fetch(`http://127.0.0.1:${port}/api/bootstrap`)).json() as { blockIds: string[] };
+  const created = await fetch(`http://127.0.0.1:${port}/api/threads`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ anchor: { blockId: boot.blockIds[1] }, message: 'start', kind: 'thread' }),
+  });
+  const { threadId } = await created.json() as { threadId: string };
+  const response = await fetch(`http://127.0.0.1:${port}/api/threads/${threadId}/messages`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ message: 'steer now' }),
+  });
+  assert.equal(response.status, 202);
+  assert.equal(steered, 'steer now');
+  await close();
+});
+
 test('GET absolute source path with a line number renders highlighted source and targets that line', async () => {
   const root = mkdtempSync(join(tmpdir(), 'ind-source-'));
   mkdirSync(join(root, '.git'));
