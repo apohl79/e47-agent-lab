@@ -172,7 +172,12 @@ class CodexAppServerClient {
 
   async *runTurn(input: string): AsyncIterable<StreamChunk> {
     const startedAt = Date.now();
-    await this.ensureThread();
+    try {
+      await this.ensureThread();
+    } catch (error) {
+      this.rejectPendingSteers(error instanceof Error ? error : new Error(String(error)));
+      throw error;
+    }
     const threadId = this.threadId!;
     this.notifications = [];
     logDiagnostic('codex.turn.start.request', {
@@ -190,6 +195,7 @@ class CodexAppServerClient {
       });
       logDiagnostic('codex.turn.start.response', { provider: 'codex', threadId });
     } catch (error) {
+      this.rejectPendingSteers(error instanceof Error ? error : new Error(String(error)));
       logDiagnostic('codex.turn.start.error', {
         provider: 'codex',
         threadId,
@@ -250,13 +256,10 @@ class CodexAppServerClient {
   }
 
   async steer(input: string): Promise<void> {
-    if (!this.threadId) {
-      throw new Error('codex app-server has no active turn to steer');
-    }
-    if (!this.activeTurnId) {
+    if (!this.threadId || !this.activeTurnId) {
       logDiagnostic('codex.turn.steer.deferred', {
         provider: 'codex',
-        threadId: this.threadId,
+        threadId: this.threadId ?? undefined,
         inputLength: input.length,
       });
       await new Promise<void>((resolve, reject) => {
@@ -432,8 +435,12 @@ class CodexAppServerClient {
   private failAll(err: Error): void {
     for (const pending of this.pending.values()) pending.reject(err);
     this.pending.clear();
-    for (const pending of this.pendingSteers.splice(0)) pending.reject(err);
+    this.rejectPendingSteers(err);
     this.resolveNotificationWaiters(null);
+  }
+
+  private rejectPendingSteers(error: Error): void {
+    for (const pending of this.pendingSteers.splice(0)) pending.reject(error);
   }
 
   private async *consumeTurn(threadId: string): AsyncIterable<StreamChunk> {
