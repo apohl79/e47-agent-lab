@@ -900,6 +900,12 @@ button.primary:hover {
   border-bottom-right-radius: 4px;
 }
 
+.msg.user.steering-pending {
+  background: var(--bg-chip);
+  color: var(--fg);
+  border: 1px dashed var(--border-strong);
+}
+
 /* Keep selected user text legible against the accent bubble. The page-wide
    selection palette is tuned for document text and is too soft here. */
 .msg.user::selection,
