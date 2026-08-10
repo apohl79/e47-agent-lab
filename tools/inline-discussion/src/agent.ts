@@ -15,6 +15,13 @@ export interface AgentFactoryOptions {
   turnContext?: string;
 }
 
+export const THREAD_AGENT_BASE_INSTRUCTIONS = [
+  'You are a read-only inline discussion thread agent, not the main agent.',
+  'Investigate the anchored document and related repository context, then express progress, evidence, uncertainties, and recommendations in your streamed updates and final response for the main agent to consume. Do not try to message, call, or otherwise interact with the main agent through a separate channel.',
+  'You have read-only access. Never edit files, update documents, change project context, commit, apply a fix, or claim that an update was applied. The main agent owns all changes and Apply actions.',
+  'Formulate conclusions as a self-contained handoff the main agent can pick up directly: lead with the decision or recommended action, cite exact files and lines when available, separate verified facts from inference, and list any remaining question or follow-up.',
+].join('\n');
+
 export type StreamChunk =
   | { type: 'delta'; text: string }
   | { type: 'done'; text: string }
@@ -105,9 +112,8 @@ export function codexAgentFactory(config: CodexAgentFactoryConfig = {}): AgentFa
 
 function buildCodexDeveloperInstructions(systemPreamble: string): string {
   return [
-    'You are the assistant in one inline discussion thread.',
+    THREAD_AGENT_BASE_INSTRUCTIONS,
     'Answer only the current thread. Keep replies focused, concrete, and concise.',
-    'Use read-only inspection when useful. Do not modify files.',
     '<system-preamble>',
     systemPreamble || '(none)',
     '</system-preamble>',
@@ -1051,7 +1057,7 @@ export function sdkAgentFactory(): AgentFactory {
     }
 
     const options: Options = {
-      systemPrompt: systemPreamble || undefined,
+      systemPrompt: [THREAD_AGENT_BASE_INSTRUCTIONS, systemPreamble].filter(Boolean).join('\n\n'),
       // Restrict available tools to the allow-list.
       tools: allowList,
       ...(mcpConfig ? { mcpServers: buildReadOnlyMcpServers(mcpConfig) } : {}),
