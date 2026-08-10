@@ -1016,7 +1016,7 @@ function attachOwnerToQuoteMark(mark: HTMLElement, owner: MarkOwner): void {
   if (!current.includes(owner.threadId)) current.push(owner.threadId);
   mark.dataset.threadIds = current.join(',');
   // Keep data-thread-id in sync with the first owner so the CSS selector
-  // `#doc [data-thread-id]` and any external readers still match.
+  // `#doc .quote-highlight[data-thread-id]` and any external readers still match.
   if (!mark.dataset.threadId) mark.dataset.threadId = owner.threadId;
   if (mark.dataset.threadClickBound) return;
   mark.dataset.threadClickBound = '1';
