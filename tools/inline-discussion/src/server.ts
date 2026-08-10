@@ -142,6 +142,7 @@ export async function createServer(opts: ServerOptions): Promise<ServerHandle> {
     highlights: new Map(),
     archivedThreads: [],
     agents: new Map(),
+    activeReplies: new Map(),
     agentFactory: opts.agentFactory,
     mainTranscript,
     sseClients: new Set(),
@@ -212,6 +213,7 @@ interface ServerState {
   highlights: Map<string, Highlight>;
   archivedThreads: Thread[];
   agents: Map<string, ThreadAgent>;
+  activeReplies: Map<string, { interrupted: boolean }>;
   agentFactory: AgentFactory;
   mainTranscript: string;
   sseClients: Set<ServerResponse>;
@@ -749,6 +751,10 @@ async function handle(state: ServerState, req: IncomingMessage, res: ServerRespo
       blockIds: rendered.blockIds,
       title: rendered.title,
       threads: documentThreads(state, documentPath),
+      activeThreads: [...state.activeReplies.keys()].filter((id) => {
+        const thread = state.liveThreads.get(id);
+        return thread !== undefined && threadDocumentPath(state, thread) === documentPath;
+      }),
       highlights: documentHighlights(state, documentPath),
       archivedThreads,
       applying: state.applying,
@@ -887,6 +893,31 @@ async function handle(state: ServerState, req: IncomingMessage, res: ServerRespo
     res.statusCode = 202;
     res.end();
     runStreamReply(state, threadId, agent, body.message);
+    return;
+  }
+
+  const interruptMatch = url.pathname.match(/^\/api\/threads\/([^/]+)\/interrupt$/);
+  if (req.method === 'POST' && interruptMatch) {
+    const threadId = interruptMatch[1]!;
+    const thread = state.liveThreads.get(threadId);
+    if (!thread) { res.statusCode = 404; res.end('thread not found'); return; }
+    const agent = state.agents.get(threadId);
+    const active = state.activeReplies.get(threadId);
+    if (!agent || !active) { res.statusCode = 409; res.end('no active turn'); return; }
+    if (!agent.interrupt) { res.statusCode = 501; res.end('agent does not support interruption'); return; }
+    active.interrupted = true;
+    try {
+      await agent.interrupt?.();
+    } catch (error) {
+      active.interrupted = false;
+      const message = error instanceof Error ? error.message : String(error);
+      res.statusCode = 502;
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ ok: false, error: message }));
+      return;
+    }
+    res.statusCode = 202;
+    res.end();
     return;
   }
 
@@ -1947,6 +1978,7 @@ async function streamReply(
   agent: ThreadAgent,
   userText: string,
   opts: StreamReplyOpts = {},
+  active: { interrupted: boolean },
 ): Promise<void> {
   // Record the user message eagerly so it survives an agent failure mid-stream.
   // If the agent throws before emitting `done`, `runStreamReply` catches the error
@@ -1957,17 +1989,38 @@ async function streamReply(
     thread.messages.push({ role: 'user', text: userText, ts: new Date().toISOString() });
     writeLiveSession(state);
   }
-  for await (const chunk of agent.send(userText)) {
-    if (chunk.type === 'delta') {
-      broadcastDocumentEvent(state, 'thread.message.delta', documentPath, { threadId, delta: chunk.text });
-    } else if (chunk.type === 'status') {
-      broadcastDocumentEvent(state, 'thread.message.status', documentPath, { threadId, status: chunk.status });
-    } else if (chunk.type === 'activity') {
-      broadcastDocumentEvent(state, 'thread.message.activity', documentPath, { threadId, activity: chunk.activity });
-    } else {
-      thread.messages.push({ role: 'assistant', text: chunk.text, ts: new Date().toISOString() });
-      writeLiveSession(state);
-      pushDocumentEvent(state, 'thread.message.done', documentPath, { threadId, message: { role: 'assistant', text: chunk.text } });
+  const startedAt = Date.now();
+  let interruptedEventSent = false;
+  const heartbeat = setInterval(() => {
+    const elapsed = Math.floor((Date.now() - startedAt) / 1000);
+    broadcastDocumentEvent(state, 'thread.message.status', documentPath, {
+      threadId,
+      status: `Still working (${elapsed}s). Press Esc to interrupt.`,
+    });
+  }, 10_000);
+  heartbeat.unref?.();
+  try {
+    for await (const chunk of agent.send(userText)) {
+      if (chunk.type === 'delta') {
+        broadcastDocumentEvent(state, 'thread.message.delta', documentPath, { threadId, delta: chunk.text });
+      } else if (chunk.type === 'status') {
+        broadcastDocumentEvent(state, 'thread.message.status', documentPath, { threadId, status: chunk.status });
+      } else if (chunk.type === 'activity') {
+        broadcastDocumentEvent(state, 'thread.message.activity', documentPath, { threadId, activity: chunk.activity });
+      } else if (chunk.type === 'interrupted') {
+        pushDocumentEvent(state, 'thread.message.interrupted', documentPath, { threadId });
+        interruptedEventSent = true;
+        return;
+      } else {
+        thread.messages.push({ role: 'assistant', text: chunk.text, ts: new Date().toISOString() });
+        writeLiveSession(state);
+        pushDocumentEvent(state, 'thread.message.done', documentPath, { threadId, message: { role: 'assistant', text: chunk.text } });
+      }
+    }
+  } finally {
+    clearInterval(heartbeat);
+    if (active.interrupted && !interruptedEventSent) {
+      pushDocumentEvent(state, 'thread.message.interrupted', documentPath, { threadId });
     }
   }
 }
@@ -1979,12 +2032,18 @@ function runStreamReply(
   userText: string,
   opts: StreamReplyOpts = {},
 ): void {
-  streamReply(state, threadId, agent, userText, opts).catch((err) => {
+  const active = { interrupted: false };
+  state.activeReplies.set(threadId, active);
+  streamReply(state, threadId, agent, userText, opts, active).catch((err) => {
     const message = err instanceof Error ? err.message : String(err);
     const thread = state.liveThreads.get(threadId);
     const documentPath = thread ? threadDocumentPath(state, thread) : state.docPath;
-    pushDocumentEvent(state, 'thread.message.error', documentPath, { threadId, error: message });
-    broadcastDocumentEvent(state, 'server.error', documentPath, { threadId, err: message });
+    if (!active.interrupted) {
+      pushDocumentEvent(state, 'thread.message.error', documentPath, { threadId, error: message });
+      broadcastDocumentEvent(state, 'server.error', documentPath, { threadId, err: message });
+    }
+  }).finally(() => {
+    if (state.activeReplies.get(threadId) === active) state.activeReplies.delete(threadId);
   });
 }
 

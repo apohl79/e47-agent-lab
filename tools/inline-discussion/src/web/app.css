@@ -1096,6 +1096,11 @@ button.primary:hover {
   border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent);
 }
 
+.msg.assistant.interrupted {
+  color: var(--muted);
+  border: 1px dashed var(--border);
+}
+
 .agent-status {
   display: inline-flex;
   align-items: center;
@@ -1139,6 +1144,23 @@ button.primary:hover {
 @keyframes cursor-blink { 0%, 100% { opacity: 0.1; } 50% { opacity: 0.8; } }
 
 /* ---------- Reply + composer ---------- */
+
+.queued-messages:empty { display: none; }
+.queued-messages {
+  display: grid;
+  gap: 5px;
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.queued-label { font-weight: 600; }
+.queued-query {
+  padding: 6px 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--fg) 4%, transparent);
+  white-space: pre-wrap;
+}
 
 .reply-row {
   display: grid;

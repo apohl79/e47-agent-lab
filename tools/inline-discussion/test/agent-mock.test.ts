@@ -9,6 +9,7 @@ import { codexAgentFactory, mockAgentFactory, dispatchSdkMessage, type DispatchS
 function chunkLabel(c: StreamChunk): string {
   if (c.type === 'status') return `status:${c.status ?? ''}`;
   if (c.type === 'activity') return `activity:${c.activity.kind}:${c.activity.title}:${c.activity.text}`;
+  if (c.type === 'interrupted') return 'interrupted';
   return `${c.type}:${c.text}`;
 }
 
@@ -259,6 +260,13 @@ test('dispatchSdkMessage falls back to accumulated deltas on non-success result'
   }
   const done = all.find(isDone)!;
   assert.equal(done.text, 'hello world');
+});
+
+test('dispatchSdkMessage maps an interrupted SDK result to an interrupted chunk', () => {
+  const state: DispatchState = { accumulated: '' };
+  const result = dispatchSdkMessage({ type: 'result', subtype: 'interrupted' }, state);
+  assert.deepEqual(result.chunks, [{ type: 'interrupted' }]);
+  assert.equal(result.endOfTurn, true);
 });
 
 test('dispatchSdkMessage inserts paragraph break at new text-block boundaries (tool-pause spacing)', () => {
