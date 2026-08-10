@@ -163,13 +163,12 @@ export function replaceThreadDetails(docPath: string, input: AppendThreadInput):
  * the opener closes the block.
  */
 function findDetailsBlock(source: string, threadId: string): { start: number; end: number } {
-  // `formatDetails` emits openers in a single fixed shape
-  // `<details data-thread-id="...">`, so a literal search matches unambiguously
-  // and avoids the ReDoS risk of a dynamic RegExp.
-  const opener = `<details data-thread-id="${escapeHtml(threadId)}">`;
-  const start = source.indexOf(opener);
+  // `formatDetails` emits data-thread-id first and may append anchor metadata,
+  // so matching the fixed opener prefix remains unambiguous without a RegExp.
+  const openerPrefix = `<details data-thread-id="${escapeHtml(threadId)}"`;
+  const start = source.indexOf(openerPrefix);
   if (start === -1) throw new Error(`<details> with data-thread-id="${threadId}" not found in doc`);
-  const closeIdx = source.indexOf('</details>', start + opener.length);
+  const closeIdx = source.indexOf('</details>', start + openerPrefix.length);
   if (closeIdx === -1) throw new Error(`unterminated <details> for thread-id="${threadId}"`);
   return { start, end: closeIdx + '</details>'.length };
 }
