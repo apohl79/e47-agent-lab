@@ -108,6 +108,7 @@ interface Bootstrap {
   blockIds: string[];
   title: string;
   threads: Thread[];
+  activeThreads?: string[];
   highlights?: Highlight[];
   archivedThreads: Thread[];
   applying?: boolean;
@@ -145,6 +146,23 @@ const state = {
   sourceView: false,
   documentPath: '',
 };
+
+interface TurnState {
+  active: boolean;
+  queued: string[];
+  startedAt: number;
+  heartbeat: number | null;
+}
+
+const turnStates = new Map<string, TurnState>();
+
+function getTurnState(threadId: string): TurnState {
+  const existing = turnStates.get(threadId);
+  if (existing) return existing;
+  const created: TurnState = { active: false, queued: [], startedAt: 0, heartbeat: null };
+  turnStates.set(threadId, created);
+  return created;
+}
 
 const NOTE_OVERLAY_HIDE_MS = 1000;
 const noteOverlayTimers = new Map<string, number>();
@@ -416,6 +434,11 @@ async function init(): Promise<void> {
   }
   scrollToLine(boot.targetLine);
   for (const t of boot.threads) state.threads.set(t.id, t);
+  for (const id of boot.activeThreads ?? []) {
+    const turn = getTurnState(id);
+    turn.active = true;
+    turn.startedAt = Date.now();
+  }
   for (const h of boot.highlights ?? []) state.highlights.set(h.id, h);
   for (const t of boot.archivedThreads) state.archived.set(t.id, t);
   renderExistingThreads();
@@ -463,6 +486,7 @@ async function init(): Promise<void> {
   listenDocumentEvent(es, 'thread.message.status', onStatus);
   listenDocumentEvent(es, 'thread.message.activity', onActivity);
   listenDocumentEvent(es, 'thread.message.done', onDone);
+  listenDocumentEvent(es, 'thread.message.interrupted', onInterrupted);
   listenDocumentEvent(es, 'thread.message.error', onMessageError);
   listenDocumentEvent(es, 'thread.conclusion.proposed', onConclusion);
   listenDocumentEvent(es, 'thread.closed', onClosed);
@@ -1204,6 +1228,11 @@ function onHighlightDeleted(evt: { highlightId: string }): void {
 
 function onThreadCreated(evt: { threadId: string; thread: Thread }): void {
   state.threads.set(evt.threadId, evt.thread);
+  if (evt.thread.kind === 'thread') {
+    const turn = getTurnState(evt.threadId);
+    turn.active = true;
+    turn.startedAt = Date.now();
+  }
   renderThread(evt.thread);
   applyQuoteHighlights();
   recomputeApplyEnabled();
@@ -1498,10 +1527,13 @@ async function createThread(
   };
   state.threads.set(threadId, thread);
   state.activeThreadId = threadId;
+  const turn = getTurnState(threadId);
+  turn.active = kind === 'thread';
+  turn.startedAt = Date.now();
   renderThread(thread);
   if (kind === 'thread') {
     const card = document.getElementById(`thread-${threadId}`);
-    if (card) showStreamingPlaceholder(card);
+    if (card) showStreamingPlaceholder(card, threadId);
   }
   applyQuoteHighlights();
   recomputeApplyEnabled();
@@ -1509,11 +1541,104 @@ async function createThread(
 
 // Marks the trailing `.streaming` div as a visible assistant bubble so the
 // blinking-cursor caret renders even before any delta has arrived.
-function showStreamingPlaceholder(card: HTMLElement): void {
+function showStreamingPlaceholder(card: HTMLElement, threadId?: string): void {
   const streamEl = card.querySelector<HTMLElement>('.streaming');
   if (!streamEl) return;
+  if (threadId) startTurnHeartbeat(card, threadId);
   streamEl.classList.add('msg', 'assistant');
   renderStreamingMessage(streamEl);
+}
+
+function startTurnHeartbeat(card: HTMLElement, threadId: string): void {
+  const turn = getTurnState(threadId);
+  turn.active = true;
+  if (!turn.startedAt) turn.startedAt = Date.now();
+  if (turn.heartbeat !== null) window.clearInterval(turn.heartbeat);
+  const update = (): void => {
+    if (!turn.active) return;
+    const stream = card.querySelector<HTMLElement>('.streaming');
+    if (!stream) return;
+    const elapsed = Math.floor((Date.now() - turn.startedAt) / 1000);
+    stream.dataset.heartbeatStatus = `Working (${elapsed}s). Press Esc to interrupt.`;
+    if (!stream.dataset.agentStatus) renderStreamingMessage(stream);
+  };
+  update();
+  turn.heartbeat = window.setInterval(update, 5_000);
+}
+
+function stopTurnHeartbeat(threadId: string, stream?: HTMLElement): void {
+  const turn = getTurnState(threadId);
+  turn.active = false;
+  if (turn.heartbeat !== null) window.clearInterval(turn.heartbeat);
+  turn.heartbeat = null;
+  if (stream) delete stream.dataset.heartbeatStatus;
+}
+
+function renderQueuedQueries(card: HTMLElement, threadId: string): void {
+  const area = card.querySelector<HTMLElement>('.queued-messages');
+  if (!area) return;
+  const queued = getTurnState(threadId).queued;
+  area.replaceChildren();
+  if (queued.length === 0) return;
+  const label = document.createElement('div');
+  label.className = 'queued-label';
+  label.textContent = `Queued ${queued.length} ${queued.length === 1 ? 'query' : 'queries'} · press ↑ to edit newest`;
+  area.appendChild(label);
+  for (const text of queued) {
+    const item = document.createElement('div');
+    item.className = 'queued-query';
+    item.textContent = text;
+    area.appendChild(item);
+  }
+}
+
+function queueReply(card: HTMLElement, threadId: string, text: string): void {
+  getTurnState(threadId).queued.push(text);
+  renderQueuedQueries(card, threadId);
+}
+
+async function submitReply(card: HTMLElement, threadId: string, text: string): Promise<void> {
+  const turn = getTurnState(threadId);
+  if (turn.active) {
+    queueReply(card, threadId, text);
+    return;
+  }
+  turn.active = true;
+  turn.startedAt = Date.now();
+  appendMsg(card, 'user', text);
+  const current = state.threads.get(threadId);
+  if (current) current.messages.push({ role: 'user', text, ts: new Date().toISOString() });
+  showStreamingPlaceholder(card, threadId);
+  try {
+    const r = await fetch(`/api/threads/${threadId}/messages`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ message: text }),
+    });
+    if (!r.ok) throw new Error(`server responded ${r.status}`);
+  } catch (err) {
+    onMessageError({ threadId, error: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+function drainQueued(threadId: string, card: HTMLElement): void {
+  const turn = getTurnState(threadId);
+  const next = turn.queued.shift();
+  renderQueuedQueries(card, threadId);
+  if (next) void submitReply(card, threadId, next);
+}
+
+async function interruptThread(threadId: string, card: HTMLElement): Promise<void> {
+  const turn = getTurnState(threadId);
+  if (!turn.active || card.dataset.interrupting === '1') return;
+  card.dataset.interrupting = '1';
+  onStatus({ threadId, status: 'Interrupting…' });
+  try {
+    const r = await fetch(`/api/threads/${threadId}/interrupt`, { method: 'POST' });
+    if (!r.ok) throw new Error(`server responded ${r.status}`);
+  } catch (err) {
+    delete card.dataset.interrupting;
+    onMessageError({ threadId, error: err instanceof Error ? err.message : String(err) });
+  }
 }
 
 // Sizes a textarea to its content up to the CSS max-height. Called on `input`
@@ -1559,6 +1684,7 @@ function renderThread(thread: Thread): void {
       </div>
     </div>
     <div class="messages"></div>
+    <div class="queued-messages" aria-live="polite"></div>
     <div class="reply-row">
       <textarea class="reply" rows="1" placeholder="Reply…  Enter to send, Shift+Enter for newline"></textarea>
       <button class="btn btn-primary send">Send</button>
@@ -1579,26 +1705,14 @@ function renderThread(thread: Thread): void {
   const streamEl = document.createElement('div');
   streamEl.className = 'streaming';
   messagesEl.appendChild(streamEl);
+  renderQueuedQueries(card, thread.id);
+  if (getTurnState(thread.id).active) showStreamingPlaceholder(card, thread.id);
   (card.querySelector('.send') as HTMLButtonElement).addEventListener('click', async () => {
     const input = card!.querySelector<HTMLTextAreaElement>('.reply')!;
     const text = input.value.trim(); if (!text) return;
     input.value = '';
     autogrowTextarea(input);
-    appendMsg(card!, 'user', text);
-    const current = state.threads.get(thread.id);
-    if (current) current.messages.push({ role: 'user', text, ts: new Date().toISOString() });
-    // Show the empty assistant bubble + blinking cursor immediately so the
-    // user sees the request is in flight before the first stream delta lands.
-    showStreamingPlaceholder(card!);
-    try {
-      const r = await fetch(`/api/threads/${thread.id}/messages`, {
-        method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ message: text }),
-      });
-      if (!r.ok) throw new Error(`server responded ${r.status}`);
-    } catch (err) {
-      onMessageError({ threadId: thread.id, error: err instanceof Error ? err.message : String(err) });
-    }
+    await submitReply(card!, thread.id, text);
   });
   const replyTa = card.querySelector('.reply') as HTMLTextAreaElement;
   installShiftArrowTextareaSelection(replyTa);
@@ -1608,8 +1722,26 @@ function renderThread(thread: Thread): void {
       e.preventDefault();
       (card!.querySelector('.send') as HTMLButtonElement).click();
     }
+    if (e.key === 'ArrowUp' && getTurnState(thread.id).queued.length > 0 &&
+      (replyTa.value.length === 0 || replyTa.selectionStart === 0)) {
+      e.preventDefault();
+      const queued = getTurnState(thread.id).queued.pop()!;
+      replyTa.value = queued;
+      autogrowTextarea(replyTa);
+      renderQueuedQueries(card!, thread.id);
+      replyTa.selectionStart = replyTa.selectionEnd = replyTa.value.length;
+    }
   });
   replyTa.addEventListener('input', () => autogrowTextarea(replyTa));
+  if (!card.dataset.turnControlsBound) {
+    card.dataset.turnControlsBound = '1';
+    card.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape' && getTurnState(thread.id).active) {
+        event.preventDefault();
+        void interruptThread(thread.id, card!);
+      }
+    });
+  }
   const toNoteBtn = card.querySelector('.to-note-btn') as HTMLButtonElement;
   toNoteBtn.addEventListener('click', async () => {
     const ok = await modalConfirm({
@@ -1934,6 +2066,9 @@ function onDelta(evt: { threadId: string; delta: string }): void {
   if (!stream.classList.contains('msg')) {
     stream.classList.add('msg', 'assistant');
   }
+  const turn = getTurnState(evt.threadId);
+  turn.active = true;
+  if (!turn.startedAt) turn.startedAt = Date.now();
   // Accumulate the raw markdown in a dataset attr and re-render on every
   // delta. marked tolerates half-finished markdown (unclosed fences, dangling
   // list markers, etc.), so partial renders degrade gracefully.
@@ -1951,6 +2086,9 @@ function onStatus(evt: { threadId: string; status: string | null }): void {
   if (!stream.classList.contains('msg')) {
     stream.classList.add('msg', 'assistant');
   }
+  const turn = getTurnState(evt.threadId);
+  turn.active = true;
+  if (!turn.startedAt) turn.startedAt = Date.now();
   if (evt.status && evt.status.trim()) stream.dataset.agentStatus = evt.status;
   else delete stream.dataset.agentStatus;
   renderStreamingMessage(stream);
@@ -1959,7 +2097,7 @@ function onStatus(evt: { threadId: string; status: string | null }): void {
 function renderStreamingMessage(stream: HTMLElement): void {
   const raw = stream.dataset.raw ?? '';
   stream.innerHTML = raw ? renderMarkdown(raw) : '';
-  const status = stream.dataset.agentStatus;
+  const status = stream.dataset.agentStatus ?? stream.dataset.heartbeatStatus;
   if (!status) return;
 
   const statusEl = document.createElement('div');
@@ -1984,6 +2122,7 @@ function onDone(evt: { threadId: string; message: { role: 'assistant'; text: str
     stream.classList.add('msg', 'assistant');
   }
   // Replace the streaming text with the markdown-rendered final message.
+  stopTurnHeartbeat(evt.threadId, stream);
   delete stream.dataset.raw;
   delete stream.dataset.agentStatus;
   stream.innerHTML = renderMarkdown(evt.message.text);
@@ -1995,6 +2134,24 @@ function onDone(evt: { threadId: string; message: { role: 'assistant'; text: str
     thread.messages.push({ role: 'assistant', text: evt.message.text, ts: new Date().toISOString() });
     syncCloseWithLastButton(card, thread);
   }
+  drainQueued(evt.threadId, card);
+}
+
+function onInterrupted(evt: { threadId: string }): void {
+  const card = document.getElementById(`thread-${evt.threadId}`);
+  if (!card) return;
+  const stream = card.querySelector<HTMLElement>('.streaming');
+  if (!stream) return;
+  stopTurnHeartbeat(evt.threadId, stream);
+  stream.classList.add('msg', 'assistant', 'interrupted');
+  stream.classList.remove('streaming');
+  delete stream.dataset.raw;
+  delete stream.dataset.agentStatus;
+  stream.textContent = 'Turn interrupted. Press Enter to send another query.';
+  const next = document.createElement('div'); next.className = 'streaming';
+  card.querySelector('.messages')!.appendChild(next);
+  delete card.dataset.interrupting;
+  drainQueued(evt.threadId, card);
 }
 
 function onMessageError(evt: { threadId: string; error: string }): void {
@@ -2009,9 +2166,12 @@ function onMessageError(evt: { threadId: string; error: string }): void {
   stream.classList.add('error');
   delete stream.dataset.raw;
   delete stream.dataset.agentStatus;
+  stopTurnHeartbeat(evt.threadId, stream);
   stream.textContent = `⚠ Agent reply failed: ${evt.error}`;
   const next = document.createElement('div'); next.className = 'streaming';
   card.querySelector('.messages')!.appendChild(next);
+  delete card.dataset.interrupting;
+  drainQueued(evt.threadId, card);
 }
 
 function getLastAssistantMessage(thread: Thread): { text: string } | null {

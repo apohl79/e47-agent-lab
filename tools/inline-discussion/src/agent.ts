@@ -16,6 +16,7 @@ export interface AgentFactoryOptions {
 export type StreamChunk =
   | { type: 'delta'; text: string }
   | { type: 'done'; text: string }
+  | { type: 'interrupted' }
   | { type: 'status'; status: string | null }
   | { type: 'activity'; activity: AgentActivity };
 
@@ -23,6 +24,7 @@ export interface ThreadAgent {
   send(userText: string): AsyncIterable<StreamChunk>;
   proposeConclusion(): AsyncIterable<StreamChunk>;
   snapshot(): ThreadMessage[];
+  interrupt?(): Promise<void>;
   close?(): Promise<void>;
 }
 
@@ -78,7 +80,7 @@ export function codexAgentFactory(config: CodexAgentFactoryConfig = {}): AgentFa
         else if (chunk.type === 'done') answer = chunk.text;
         yield chunk;
       }
-      if (kind === 'message') {
+      if (kind === 'message' && answer) {
         messages.push({ role: 'user', text: userText, ts: new Date().toISOString() });
         messages.push({ role: 'assistant', text: answer, ts: new Date().toISOString() });
       }
@@ -88,6 +90,7 @@ export function codexAgentFactory(config: CodexAgentFactoryConfig = {}): AgentFa
       send: (t) => runOnce(t, 'message'),
       proposeConclusion: () => runOnce('', 'conclusion'),
       snapshot: () => [...messages],
+      interrupt: () => client.interrupt(),
       close: () => client.close(),
     } satisfies ThreadAgent;
   };
@@ -128,6 +131,8 @@ class CodexAppServerClient {
   private nextId = 1;
   private initialized: Promise<void> | null = null;
   private threadId: string | null = null;
+  private activeTurnId: string | null = null;
+  private interruptRequested = false;
   private stderr = '';
   private pending = new Map<number, {
     resolve: (value: unknown) => void;
@@ -154,6 +159,8 @@ class CodexAppServerClient {
   }
 
   async close(): Promise<void> {
+    this.interruptRequested = false;
+    this.activeTurnId = null;
     this.resolveNotificationWaiters(null);
     for (const pending of this.pending.values()) {
       pending.reject(new Error('codex app-server closed'));
@@ -165,6 +172,16 @@ class CodexAppServerClient {
       this.child.kill();
     }
     this.child = null;
+  }
+
+  async interrupt(): Promise<void> {
+    this.interruptRequested = true;
+    if (!this.threadId || !this.activeTurnId) return;
+    try {
+      await this.request('turn/interrupt', { threadId: this.threadId, turnId: this.activeTurnId });
+    } finally {
+      this.interruptRequested = false;
+    }
   }
 
   private async ensureThread(): Promise<void> {
@@ -320,7 +337,14 @@ class CodexAppServerClient {
       if (notification.method === 'turn/started') {
         const turn = isRecord(params['turn']) ? params['turn'] : null;
         const id = typeof turn?.['id'] === 'string' ? turn['id'] : null;
-        if (id) turnId = id;
+        if (id) {
+          turnId = id;
+          this.activeTurnId = id;
+          if (this.interruptRequested) {
+            this.interruptRequested = false;
+            await this.request('turn/interrupt', { threadId, turnId: id });
+          }
+        }
         continue;
       }
 
@@ -417,7 +441,10 @@ class CodexAppServerClient {
           yield { type: 'status', status: null };
         }
         const answer = finalText || completedItemText;
-        yield { type: 'done', text: answer };
+        const status = stringField(turn ?? {}, 'status');
+        this.activeTurnId = null;
+        if (status === 'interrupted') yield { type: 'interrupted' };
+        else yield { type: 'done', text: answer };
         return;
       } else if (notification.method === 'error') {
         const message = typeof params['message'] === 'string' ? params['message'] : 'codex app-server error';
@@ -616,7 +643,8 @@ export function dispatchSdkMessage(evt: unknown, state: DispatchState): Dispatch
         : subtype === 'success' && typeof e['result'] === 'string' && e['result']
           ? (e['result'] as string)
           : '';
-    chunks.push({ type: 'done', text: finalText });
+    if (subtype === 'interrupted') chunks.push({ type: 'interrupted' });
+    else chunks.push({ type: 'done', text: finalText });
     state.accumulated = '';
     state.status = null;
     return { chunks, endOfTurn: true };
@@ -850,8 +878,8 @@ export function sdkAgentFactory(): AgentFactory {
           if (chunkQueue.length > 0) {
             const c = chunkQueue.shift()!;
             yield c;
-            if (c.type === 'done') {
-              if (kind === 'message') {
+            if (c.type === 'done' || c.type === 'interrupted') {
+              if (c.type === 'done' && kind === 'message') {
                 messages.push({ role: 'user', text: userText, ts: new Date().toISOString() });
                 messages.push({ role: 'assistant', text: c.text, ts: new Date().toISOString() });
               }
@@ -862,8 +890,8 @@ export function sdkAgentFactory(): AgentFactory {
           const c = await new Promise<StreamChunk | null>((r) => { resolveChunk = r; });
           if (!c) return;
           yield c;
-          if (c.type === 'done') {
-            if (kind === 'message') {
+          if (c.type === 'done' || c.type === 'interrupted') {
+            if (c.type === 'done' && kind === 'message') {
               messages.push({ role: 'user', text: userText, ts: new Date().toISOString() });
               messages.push({ role: 'assistant', text: c.text, ts: new Date().toISOString() });
             }
@@ -879,6 +907,7 @@ export function sdkAgentFactory(): AgentFactory {
       send: (t) => runOnce(t, 'message'),
       proposeConclusion: () => runOnce('', 'conclusion'),
       snapshot: () => [...messages],
+      interrupt: async () => { await sdkIter.interrupt(); },
       close: async () => {
         push(null);
         if (!sdkDone) await sdkLoop;
