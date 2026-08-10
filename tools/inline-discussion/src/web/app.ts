@@ -1605,7 +1605,25 @@ async function submitReply(card: HTMLElement, threadId: string, text: string): P
   const turn = getTurnState(threadId);
   if (turn.active) {
     queueReply(card, threadId, text);
-    appendMsg(card, 'user', text);
+    const currentStream = card.querySelector<HTMLElement>('.streaming');
+    if (currentStream) {
+      const raw = currentStream.dataset.raw ?? '';
+      currentStream.querySelector('.interrupt-btn')?.remove();
+      currentStream.classList.remove('streaming');
+      delete currentStream.dataset.heartbeatStatus;
+      delete currentStream.dataset.agentStatus;
+      delete currentStream.dataset.raw;
+      if (raw) currentStream.innerHTML = renderMarkdown(raw);
+      else currentStream.remove();
+    }
+    const pendingUser = appendMsg(card, 'user', text);
+    pendingUser.classList.add('steering-pending');
+    const nextStream = document.createElement('div');
+    nextStream.className = 'streaming';
+    nextStream.dataset.threadId = threadId;
+    card.querySelector('.messages')!.appendChild(nextStream);
+    turn.startedAt = Date.now();
+    showStreamingPlaceholder(card, threadId);
     const current = state.threads.get(threadId);
     if (current) current.messages.push({ role: 'user', text, ts: new Date().toISOString() });
     try {
@@ -1614,6 +1632,7 @@ async function submitReply(card: HTMLElement, threadId: string, text: string): P
         body: JSON.stringify({ message: text }),
       });
       if (!r.ok) throw new Error(`server responded ${r.status}`);
+      pendingUser.classList.remove('steering-pending');
       const index = turn.queued.indexOf(text);
       if (index >= 0) turn.queued.splice(index, 1);
       renderQueuedQueries(card, threadId);
@@ -2089,13 +2108,14 @@ function openConclusionEditor(thread: Thread, details: HTMLDetailsElement): void
   });
 }
 
-function appendMsg(card: HTMLElement, role: 'user' | 'assistant', text: string): void {
+function appendMsg(card: HTMLElement, role: 'user' | 'assistant', text: string): HTMLElement {
   const container = card.querySelector('.messages')!;
   const div = document.createElement('div');
   div.className = `msg ${role}`;
   if (role === 'assistant') div.innerHTML = renderMarkdown(text);
   else div.textContent = text;
   container.insertBefore(div, container.querySelector('.streaming'));
+  return div;
 }
 
 function onDelta(evt: { threadId: string; delta: string }): void {
