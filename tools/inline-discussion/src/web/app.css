@@ -925,6 +925,7 @@ button.primary:hover {
   position: relative;
   min-height: 48px;
   padding-bottom: 42px;
+  border-radius: var(--radius);
 }
 
 .msg.assistant.streaming .interrupt-btn {
