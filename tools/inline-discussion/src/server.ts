@@ -11,6 +11,7 @@ import { appendThreadDetails, removeAllArchivedBlocks, removeArchivedBlockByInde
 import type { AgentFactory, ThreadAgent } from './agent.ts';
 import { codexAgentFactory, sdkAgentFactory } from './agent.ts';
 import { createAppServerSessionBridge, type MainSessionBridge } from './main-session.ts';
+import { logDiagnostic } from './diagnostics.ts';
 import type {
   Block,
   Thread,
@@ -905,12 +906,21 @@ async function handle(state: ServerState, req: IncomingMessage, res: ServerRespo
     const active = state.activeReplies.get(threadId);
     if (!agent || !active) { res.statusCode = 409; res.end('no active turn'); return; }
     if (!agent.interrupt) { res.statusCode = 501; res.end('agent does not support interruption'); return; }
+    logDiagnostic('thread.turn.interrupt.request', {
+      threadId,
+      provider: agent.provider ?? 'unknown',
+    });
     active.interrupted = true;
     try {
       await agent.interrupt?.();
     } catch (error) {
       active.interrupted = false;
       const message = error instanceof Error ? error.message : String(error);
+      logDiagnostic('thread.turn.interrupt.error', {
+        threadId,
+        provider: agent.provider ?? 'unknown',
+        error: message,
+      });
       res.statusCode = 502;
       res.setHeader('content-type', 'application/json');
       res.end(JSON.stringify({ ok: false, error: message }));
@@ -918,6 +928,10 @@ async function handle(state: ServerState, req: IncomingMessage, res: ServerRespo
     }
     res.statusCode = 202;
     res.end();
+    logDiagnostic('thread.turn.interrupt.accepted', {
+      threadId,
+      provider: agent.provider ?? 'unknown',
+    });
     return;
   }
 
@@ -1985,14 +1999,32 @@ async function streamReply(
   // and the transcript still reflects what the user actually sent.
   const thread = state.liveThreads.get(threadId)!;
   const documentPath = threadDocumentPath(state, thread);
+  const startedAt = Date.now();
+  let lastChunkAt = startedAt;
+  let chunkCount = 0;
+  let deltaCount = 0;
+  let terminal: 'completed' | 'interrupted' | 'unknown' = 'unknown';
+  logDiagnostic('thread.turn.start', {
+    threadId,
+    provider: agent.provider ?? 'unknown',
+    inputLength: userText.length,
+    recordUser: opts.recordUser !== false,
+  });
   if (opts.recordUser !== false) {
     thread.messages.push({ role: 'user', text: userText, ts: new Date().toISOString() });
     writeLiveSession(state);
   }
-  const startedAt = Date.now();
   let interruptedEventSent = false;
   const heartbeat = setInterval(() => {
     const elapsed = Math.floor((Date.now() - startedAt) / 1000);
+    logDiagnostic('thread.turn.heartbeat', {
+      threadId,
+      provider: agent.provider ?? 'unknown',
+      elapsedMs: Date.now() - startedAt,
+      sinceLastChunkMs: Date.now() - lastChunkAt,
+      chunkCount,
+      deltaCount,
+    });
     broadcastDocumentEvent(state, 'thread.message.status', documentPath, {
       threadId,
       status: `Still working (${elapsed}s). Press Esc to interrupt.`,
@@ -2001,17 +2033,56 @@ async function streamReply(
   heartbeat.unref?.();
   try {
     for await (const chunk of agent.send(userText)) {
+      chunkCount += 1;
+      lastChunkAt = Date.now();
       if (chunk.type === 'delta') {
+        deltaCount += 1;
+        if (deltaCount === 1 || deltaCount % 25 === 0) {
+          logDiagnostic('thread.turn.delta', {
+            threadId,
+            provider: agent.provider ?? 'unknown',
+            deltaCount,
+            chunkCount,
+          });
+        }
         broadcastDocumentEvent(state, 'thread.message.delta', documentPath, { threadId, delta: chunk.text });
       } else if (chunk.type === 'status') {
+        logDiagnostic('thread.turn.status', {
+          threadId,
+          provider: agent.provider ?? 'unknown',
+          hasStatus: Boolean(chunk.status),
+        });
         broadcastDocumentEvent(state, 'thread.message.status', documentPath, { threadId, status: chunk.status });
       } else if (chunk.type === 'activity') {
+        logDiagnostic('thread.turn.activity', {
+          threadId,
+          provider: agent.provider ?? 'unknown',
+          kind: chunk.activity.kind,
+          title: chunk.activity.title,
+        });
         broadcastDocumentEvent(state, 'thread.message.activity', documentPath, { threadId, activity: chunk.activity });
       } else if (chunk.type === 'interrupted') {
+        terminal = 'interrupted';
+        logDiagnostic('thread.turn.interrupted', {
+          threadId,
+          provider: agent.provider ?? 'unknown',
+          elapsedMs: Date.now() - startedAt,
+          chunkCount,
+          deltaCount,
+        });
         pushDocumentEvent(state, 'thread.message.interrupted', documentPath, { threadId });
         interruptedEventSent = true;
         return;
       } else {
+        terminal = 'completed';
+        logDiagnostic('thread.turn.complete', {
+          threadId,
+          provider: agent.provider ?? 'unknown',
+          elapsedMs: Date.now() - startedAt,
+          outputLength: chunk.text.length,
+          chunkCount,
+          deltaCount,
+        });
         thread.messages.push({ role: 'assistant', text: chunk.text, ts: new Date().toISOString() });
         writeLiveSession(state);
         pushDocumentEvent(state, 'thread.message.done', documentPath, { threadId, message: { role: 'assistant', text: chunk.text } });
@@ -2020,8 +2091,26 @@ async function streamReply(
   } finally {
     clearInterval(heartbeat);
     if (active.interrupted && !interruptedEventSent) {
+      terminal = 'interrupted';
+      logDiagnostic('thread.turn.interrupted', {
+        threadId,
+        provider: agent.provider ?? 'unknown',
+        elapsedMs: Date.now() - startedAt,
+        chunkCount,
+        deltaCount,
+        source: 'stream-closed-after-request',
+      });
       pushDocumentEvent(state, 'thread.message.interrupted', documentPath, { threadId });
     }
+    logDiagnostic('thread.turn.end', {
+      threadId,
+      provider: agent.provider ?? 'unknown',
+      terminal,
+      elapsedMs: Date.now() - startedAt,
+      sinceLastChunkMs: Date.now() - lastChunkAt,
+      chunkCount,
+      deltaCount,
+    });
   }
 }
 
@@ -2039,6 +2128,11 @@ function runStreamReply(
     const thread = state.liveThreads.get(threadId);
     const documentPath = thread ? threadDocumentPath(state, thread) : state.docPath;
     if (!active.interrupted) {
+      logDiagnostic('thread.turn.error', {
+        threadId,
+        provider: agent.provider ?? 'unknown',
+        error: message,
+      });
       pushDocumentEvent(state, 'thread.message.error', documentPath, { threadId, error: message });
       broadcastDocumentEvent(state, 'server.error', documentPath, { threadId, err: message });
     }
