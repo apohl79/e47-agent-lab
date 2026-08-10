@@ -1553,8 +1553,6 @@ function showStreamingPlaceholder(card: HTMLElement, threadId?: string): void {
 function startTurnHeartbeat(card: HTMLElement, threadId: string): void {
   const turn = getTurnState(threadId);
   turn.active = true;
-  const interrupt = card.querySelector<HTMLButtonElement>('.interrupt-btn');
-  if (interrupt) interrupt.hidden = false;
   if (!turn.startedAt) turn.startedAt = Date.now();
   if (turn.heartbeat !== null) window.clearInterval(turn.heartbeat);
   const update = (): void => {
@@ -1575,9 +1573,9 @@ function stopTurnHeartbeat(threadId: string, stream?: HTMLElement): void {
   if (turn.heartbeat !== null) window.clearInterval(turn.heartbeat);
   turn.heartbeat = null;
   const card = document.getElementById(`thread-${threadId}`);
-  const interrupt = card?.querySelector<HTMLButtonElement>('.interrupt-btn');
-  if (interrupt) interrupt.hidden = true;
-  if (stream) delete stream.dataset.heartbeatStatus;
+  const activeStream = stream ?? card?.querySelector<HTMLElement>('.streaming');
+  if (activeStream) ensureInterruptButton(activeStream);
+  if (activeStream) delete activeStream.dataset.heartbeatStatus;
 }
 
 function renderQueuedQueries(card: HTMLElement, threadId: string): void {
@@ -1737,7 +1735,6 @@ function renderThread(thread: Thread): void {
     <div class="reply-row">
       <textarea class="reply" rows="1" placeholder="Reply…  Enter to send, Shift+Enter for newline"></textarea>
       <button class="btn btn-primary send">Send</button>
-      <button class="btn btn-ghost interrupt-btn" hidden>Interrupt</button>
       <div class="thread-close-actions">
         <button class="btn btn-ghost summarize-thread-btn">Summarize thread</button>
         <button class="btn btn-ghost close-with-last-btn">Close with last response</button>
@@ -1754,12 +1751,10 @@ function renderThread(thread: Thread): void {
   }
   const streamEl = document.createElement('div');
   streamEl.className = 'streaming';
+  streamEl.dataset.threadId = thread.id;
   messagesEl.appendChild(streamEl);
   renderQueuedQueries(card, thread.id);
   if (getTurnState(thread.id).active) showStreamingPlaceholder(card, thread.id);
-  (card.querySelector('.interrupt-btn') as HTMLButtonElement).addEventListener('click', () => {
-    void interruptThread(thread.id, card!);
-  });
   (card.querySelector('.send') as HTMLButtonElement).addEventListener('click', async () => {
     const input = card!.querySelector<HTMLTextAreaElement>('.reply')!;
     const text = input.value.trim(); if (!text) return;
@@ -2142,13 +2137,32 @@ function renderStreamingMessage(stream: HTMLElement): void {
   const raw = stream.dataset.raw ?? '';
   stream.innerHTML = raw ? renderMarkdown(raw) : '';
   const status = stream.dataset.agentStatus ?? stream.dataset.heartbeatStatus;
-  if (!status) return;
+  if (status) {
+    const statusEl = document.createElement('div');
+    statusEl.className = 'agent-status';
+    statusEl.textContent = status;
+    stream.appendChild(statusEl);
+    stream.append(document.createElement('br'), document.createElement('br'));
+  }
+  ensureInterruptButton(stream);
+}
 
-  const statusEl = document.createElement('div');
-  statusEl.className = 'agent-status';
-  statusEl.textContent = status;
-  stream.appendChild(statusEl);
-  stream.append(document.createElement('br'), document.createElement('br'));
+function ensureInterruptButton(stream: HTMLElement): void {
+  const threadId = stream.dataset.threadId;
+  if (!threadId) return;
+  let button = stream.querySelector<HTMLButtonElement>('.interrupt-btn');
+  if (!button) {
+    button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'btn btn-ghost interrupt-btn';
+    button.textContent = 'Interrupt';
+    button.addEventListener('click', () => {
+      const card = document.getElementById(`thread-${threadId}`);
+      if (card) void interruptThread(threadId, card);
+    });
+    stream.appendChild(button);
+  }
+  button.hidden = !getTurnState(threadId).active;
 }
 
 function onActivity(evt: { threadId: string; activity: AgentActivity }): void {
@@ -2172,6 +2186,7 @@ function onDone(evt: { threadId: string; message: { role: 'assistant'; text: str
   stream.innerHTML = renderMarkdown(evt.message.text);
   stream.classList.remove('streaming');
   const next = document.createElement('div'); next.className = 'streaming';
+  next.dataset.threadId = evt.threadId;
   card.querySelector('.messages')!.appendChild(next);
   const thread = state.threads.get(evt.threadId);
   if (thread) {
@@ -2193,6 +2208,7 @@ function onInterrupted(evt: { threadId: string }): void {
   delete stream.dataset.agentStatus;
   stream.textContent = 'Turn interrupted. Press Enter to send another query.';
   const next = document.createElement('div'); next.className = 'streaming';
+  next.dataset.threadId = evt.threadId;
   card.querySelector('.messages')!.appendChild(next);
   delete card.dataset.interrupting;
   drainQueued(evt.threadId, card);
@@ -2213,6 +2229,7 @@ function onMessageError(evt: { threadId: string; error: string }): void {
   stopTurnHeartbeat(evt.threadId, stream);
   stream.textContent = `⚠ Agent reply failed: ${evt.error}`;
   const next = document.createElement('div'); next.className = 'streaming';
+  next.dataset.threadId = evt.threadId;
   card.querySelector('.messages')!.appendChild(next);
   delete card.dataset.interrupting;
   drainQueued(evt.threadId, card);
