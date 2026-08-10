@@ -1667,16 +1667,17 @@ async function interruptThread(threadId: string, card: HTMLElement): Promise<voi
 }
 
 function activeInterruptTarget(): { threadId: string; card: HTMLElement } | null {
-  const preferred = state.activeThreadId;
-  if (preferred && getTurnState(preferred).active) {
-    const card = document.getElementById(`thread-${preferred}`);
-    if (card) return { threadId: preferred, card };
+  const focusedCard = document.activeElement?.closest<HTMLElement>('.thread-card');
+  if (focusedCard?.id.startsWith('thread-')) {
+    const threadId = focusedCard.id.slice('thread-'.length);
+    if (threadId && getTurnState(threadId).active) return { threadId, card: focusedCard };
   }
-  for (const [threadId, turn] of turnStates) {
-    if (!turn.active) continue;
-    const card = document.getElementById(`thread-${threadId}`);
-    if (card) return { threadId, card };
-  }
+
+  const active = [...turnStates.entries()].filter(([, turn]) => turn.active);
+  if (active.length !== 1) return null;
+  const [threadId] = active[0]!;
+  const card = document.getElementById(`thread-${threadId}`);
+  if (card) return { threadId, card };
   return null;
 }
 
