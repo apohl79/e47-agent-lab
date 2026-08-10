@@ -682,6 +682,83 @@ function truncateForError(s: string): string {
 // Tools permitted in inline-discussion threads. WebFetch excluded (SSRF risk).
 const ALLOWED_TOOLS = ['Read', 'Grep', 'Glob', 'WebSearch'] as const;
 
+// MCP is opt-in and restricted to tool names that the connected server has
+// declared as read-only. The gateway form is supported because it prefixes
+// upstream names with the connector name.
+const READ_ONLY_MCP_TOOLS = new Set([
+  'notion-search',
+  'notion-fetch',
+  'notion-download-attachment',
+  'notion-get-comments',
+  'notion-get-async-task',
+  'notion-get-teams',
+  'notion-get-users',
+  'notion-query-data-sources',
+  'notion-query-database-view',
+  'notion-query-meeting-notes',
+  'notion-list-private-pages',
+  'notion-list-shared-pages',
+  'notion-list-favorite-pages',
+  'notion-list-recent-pages',
+  'notion-search-agents',
+  'notion__notion-search',
+  'notion__notion-fetch',
+  'notion__notion-download-attachment',
+  'notion__notion-get-comments',
+  'notion__notion-get-async-task',
+  'notion__notion-get-teams',
+  'notion__notion-get-users',
+  'notion__notion-query-data-sources',
+  'notion__notion-query-database-view',
+  'notion__notion-query-meeting-notes',
+  'notion__notion-list-private-pages',
+  'notion__notion-list-shared-pages',
+  'notion__notion-list-favorite-pages',
+  'notion__notion-list-recent-pages',
+  'notion__notion-search-agents',
+]);
+
+export type ReadOnlyMcpConfig = Readonly<{
+  serverName: string;
+  url: string;
+  toolNames: readonly string[];
+}>;
+
+export function readOnlyMcpConfigFromEnv(env: NodeJS.ProcessEnv = process.env): ReadOnlyMcpConfig | null {
+  const url = env.IND_MCP_URL?.trim() ?? '';
+  if (!url) return null;
+  const requested = (env.IND_MCP_READONLY_TOOLS ?? 'notion-search,notion-fetch')
+    .split(',')
+    .map((name) => name.trim())
+    .filter(Boolean);
+  const toolNames = requested.filter((name) => READ_ONLY_MCP_TOOLS.has(name));
+  const rejected = requested.filter((name) => !READ_ONLY_MCP_TOOLS.has(name));
+  if (rejected.length > 0) {
+    logDiagnostic('claude.mcp.config.rejected-tools', {
+      provider: 'claude',
+      tools: rejected.join(','),
+    });
+  }
+  return toolNames.length > 0
+    ? Object.freeze({
+        serverName: env.IND_MCP_SERVER_NAME?.trim() || 'inline-readonly-mcp',
+        url,
+        toolNames: Object.freeze(toolNames),
+      })
+    : null;
+}
+
+function buildReadOnlyMcpServers(config: ReadOnlyMcpConfig): NonNullable<Options['mcpServers']> {
+  return {
+    [config.serverName]: {
+      type: 'http',
+      url: config.url,
+      tools: config.toolNames.map((name) => ({ name, permission_policy: 'always_allow' as const })),
+      alwaysLoad: true,
+    },
+  };
+}
+
 export interface DispatchState {
   accumulated: string;
   status?: string | null;
@@ -876,6 +953,10 @@ export function sdkAgentFactory(): AgentFactory {
   return ({ systemPreamble, tools, turnContext }) => {
     const messages: ThreadMessage[] = [];
     const allowList = tools.filter((t) => (ALLOWED_TOOLS as readonly string[]).includes(t));
+    const mcpConfig = readOnlyMcpConfigFromEnv();
+    const mcpToolNames = new Set(
+      mcpConfig?.toolNames.map((name) => `mcp__${mcpConfig.serverName}__${name}`) ?? [],
+    );
 
     // Push-based user-message queue drives multi-turn sessions via a single persistent query.
     let resolveNext: ((m: unknown) => void) | null = null;
@@ -906,14 +987,18 @@ export function sdkAgentFactory(): AgentFactory {
       systemPrompt: systemPreamble || undefined,
       // Restrict available tools to the allow-list.
       tools: allowList,
+      ...(mcpConfig ? { mcpServers: buildReadOnlyMcpServers(mcpConfig) } : {}),
       // Extra enforcement: deny anything outside the allow-list with a clear message.
       canUseTool: async (toolName, input, _opts) => {
-        if ((ALLOWED_TOOLS as readonly string[]).includes(toolName)) {
+        if ((ALLOWED_TOOLS as readonly string[]).includes(toolName) || mcpToolNames.has(toolName)) {
           return { behavior: 'allow', updatedInput: input };
         }
         return {
           behavior: 'deny',
-          message: `Tool '${toolName}' not allowed in inline-discussion. Allowed: ${allowList.join(', ')}.`,
+          message: `Tool '${toolName}' not allowed in inline-discussion. Allowed: ${[
+            ...allowList,
+            ...mcpToolNames,
+          ].join(', ')}.`,
         };
       },
       includePartialMessages: true,
