@@ -1015,6 +1015,12 @@ export function sdkAgentFactory(): AgentFactory {
     const messages: ThreadMessage[] = [];
     const allowList = tools.filter((t) => (ALLOWED_TOOLS as readonly string[]).includes(t));
     const mcpConfig = readOnlyMcpConfigFromEnv();
+    logDiagnostic(mcpConfig ? 'claude.mcp.config.enabled' : 'claude.mcp.config.disabled', {
+      provider: 'claude',
+      serverName: mcpConfig?.serverName,
+      toolCount: mcpConfig?.toolNames.length ?? 0,
+      reason: mcpConfig ? undefined : 'IND_MCP_URL or an allowed read-only tool is missing',
+    });
     const mcpToolNames = new Set(
       mcpConfig?.toolNames.map((name) => `mcp__${mcpConfig.serverName}__${name}`) ?? [],
     );
