@@ -407,6 +407,7 @@ init().catch((err) => console.error(err));
 
 async function init(): Promise<void> {
   await loadAndApplyPrefs();
+  document.addEventListener('keydown', onGlobalKeyDown);
   document.getElementById('back-to-discussion')!.addEventListener('click', backToDiscussion);
   document.getElementById('theme-toggle')!.addEventListener('click', toggleTheme);
   document.getElementById('width-toggle')!.addEventListener('click', toggleWidth);
@@ -1552,6 +1553,8 @@ function showStreamingPlaceholder(card: HTMLElement, threadId?: string): void {
 function startTurnHeartbeat(card: HTMLElement, threadId: string): void {
   const turn = getTurnState(threadId);
   turn.active = true;
+  const interrupt = card.querySelector<HTMLButtonElement>('.interrupt-btn');
+  if (interrupt) interrupt.hidden = false;
   if (!turn.startedAt) turn.startedAt = Date.now();
   if (turn.heartbeat !== null) window.clearInterval(turn.heartbeat);
   const update = (): void => {
@@ -1559,7 +1562,7 @@ function startTurnHeartbeat(card: HTMLElement, threadId: string): void {
     const stream = card.querySelector<HTMLElement>('.streaming');
     if (!stream) return;
     const elapsed = Math.floor((Date.now() - turn.startedAt) / 1000);
-    stream.dataset.heartbeatStatus = `Working (${elapsed}s). Press Esc to interrupt.`;
+    stream.dataset.heartbeatStatus = `Working (${elapsed}s). Press Interrupt or Esc.`;
     if (!stream.dataset.agentStatus) renderStreamingMessage(stream);
   };
   update();
@@ -1571,6 +1574,9 @@ function stopTurnHeartbeat(threadId: string, stream?: HTMLElement): void {
   turn.active = false;
   if (turn.heartbeat !== null) window.clearInterval(turn.heartbeat);
   turn.heartbeat = null;
+  const card = document.getElementById(`thread-${threadId}`);
+  const interrupt = card?.querySelector<HTMLButtonElement>('.interrupt-btn');
+  if (interrupt) interrupt.hidden = true;
   if (stream) delete stream.dataset.heartbeatStatus;
 }
 
@@ -1601,6 +1607,25 @@ async function submitReply(card: HTMLElement, threadId: string, text: string): P
   const turn = getTurnState(threadId);
   if (turn.active) {
     queueReply(card, threadId, text);
+    appendMsg(card, 'user', text);
+    const current = state.threads.get(threadId);
+    if (current) current.messages.push({ role: 'user', text, ts: new Date().toISOString() });
+    try {
+      const r = await fetch(`/api/threads/${threadId}/messages`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ message: text }),
+      });
+      if (!r.ok) throw new Error(`server responded ${r.status}`);
+      const index = turn.queued.indexOf(text);
+      if (index >= 0) turn.queued.splice(index, 1);
+      renderQueuedQueries(card, threadId);
+    } catch (err) {
+      const stream = card.querySelector<HTMLElement>('.streaming');
+      if (stream) {
+        stream.dataset.agentStatus = `Steering failed: ${err instanceof Error ? err.message : String(err)}`;
+        renderStreamingMessage(stream);
+      }
+    }
     return;
   }
   turn.active = true;
@@ -1620,11 +1645,11 @@ async function submitReply(card: HTMLElement, threadId: string, text: string): P
   }
 }
 
-function drainQueued(threadId: string, card: HTMLElement): void {
-  const turn = getTurnState(threadId);
-  const next = turn.queued.shift();
-  renderQueuedQueries(card, threadId);
-  if (next) void submitReply(card, threadId, next);
+function drainQueued(threadId: string, _card: HTMLElement): void {
+  // Queued entries are submitted to the active provider immediately. They
+  // remain visible only until the steering request is acknowledged, so a
+  // completed turn must never replay them as a second ordinary turn.
+  if (getTurnState(threadId).queued.length === 0) return;
 }
 
 async function interruptThread(threadId: string, card: HTMLElement): Promise<void> {
@@ -1639,6 +1664,29 @@ async function interruptThread(threadId: string, card: HTMLElement): Promise<voi
     delete card.dataset.interrupting;
     onMessageError({ threadId, error: err instanceof Error ? err.message : String(err) });
   }
+}
+
+function activeInterruptTarget(): { threadId: string; card: HTMLElement } | null {
+  const preferred = state.activeThreadId;
+  if (preferred && getTurnState(preferred).active) {
+    const card = document.getElementById(`thread-${preferred}`);
+    if (card) return { threadId: preferred, card };
+  }
+  for (const [threadId, turn] of turnStates) {
+    if (!turn.active) continue;
+    const card = document.getElementById(`thread-${threadId}`);
+    if (card) return { threadId, card };
+  }
+  return null;
+}
+
+function onGlobalKeyDown(event: KeyboardEvent): void {
+  if (event.key !== 'Escape' || event.defaultPrevented) return;
+  if (document.querySelector('.modal-backdrop, .image-viewer-backdrop')) return;
+  const target = activeInterruptTarget();
+  if (!target) return;
+  event.preventDefault();
+  void interruptThread(target.threadId, target.card);
 }
 
 // Sizes a textarea to its content up to the CSS max-height. Called on `input`
@@ -1688,6 +1736,7 @@ function renderThread(thread: Thread): void {
     <div class="reply-row">
       <textarea class="reply" rows="1" placeholder="Reply…  Enter to send, Shift+Enter for newline"></textarea>
       <button class="btn btn-primary send">Send</button>
+      <button class="btn btn-ghost interrupt-btn" hidden>Interrupt</button>
       <div class="thread-close-actions">
         <button class="btn btn-ghost summarize-thread-btn">Summarize thread</button>
         <button class="btn btn-ghost close-with-last-btn">Close with last response</button>
@@ -1707,6 +1756,9 @@ function renderThread(thread: Thread): void {
   messagesEl.appendChild(streamEl);
   renderQueuedQueries(card, thread.id);
   if (getTurnState(thread.id).active) showStreamingPlaceholder(card, thread.id);
+  (card.querySelector('.interrupt-btn') as HTMLButtonElement).addEventListener('click', () => {
+    void interruptThread(thread.id, card!);
+  });
   (card.querySelector('.send') as HTMLButtonElement).addEventListener('click', async () => {
     const input = card!.querySelector<HTMLTextAreaElement>('.reply')!;
     const text = input.value.trim(); if (!text) return;
@@ -1733,15 +1785,6 @@ function renderThread(thread: Thread): void {
     }
   });
   replyTa.addEventListener('input', () => autogrowTextarea(replyTa));
-  if (!card.dataset.turnControlsBound) {
-    card.dataset.turnControlsBound = '1';
-    card.addEventListener('keydown', (event) => {
-      if (event.key === 'Escape' && getTurnState(thread.id).active) {
-        event.preventDefault();
-        void interruptThread(thread.id, card!);
-      }
-    });
-  }
   const toNoteBtn = card.querySelector('.to-note-btn') as HTMLButtonElement;
   toNoteBtn.addEventListener('click', async () => {
     const ok = await modalConfirm({

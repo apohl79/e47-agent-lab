@@ -24,6 +24,7 @@ export type StreamChunk =
 
 export interface ThreadAgent {
   send(userText: string): AsyncIterable<StreamChunk>;
+  steer?(userText: string): Promise<void>;
   proposeConclusion(): AsyncIterable<StreamChunk>;
   snapshot(): ThreadMessage[];
   provider?: string;
@@ -92,6 +93,7 @@ export function codexAgentFactory(config: CodexAgentFactoryConfig = {}): AgentFa
 
     return {
       send: (t) => runOnce(t, 'message'),
+      steer: (t) => client.steer(appendTurnContext(t, turnContext)),
       proposeConclusion: () => runOnce('', 'conclusion'),
       snapshot: () => [...messages],
       provider: 'codex',
@@ -150,6 +152,11 @@ class CodexAppServerClient {
   private initialized: Promise<void> | null = null;
   private threadId: string | null = null;
   private activeTurnId: string | null = null;
+  private pendingSteers: Array<{
+    input: string;
+    resolve: () => void;
+    reject: (error: Error) => void;
+  }> = [];
   private interruptRequested = false;
   private stderr = '';
   private pending = new Map<number, {
@@ -207,6 +214,7 @@ class CodexAppServerClient {
   async close(): Promise<void> {
     this.interruptRequested = false;
     this.activeTurnId = null;
+    for (const pending of this.pendingSteers.splice(0)) pending.reject(new Error('codex app-server closed'));
     this.resolveNotificationWaiters(null);
     for (const pending of this.pending.values()) {
       pending.reject(new Error('codex app-server closed'));
@@ -239,6 +247,39 @@ class CodexAppServerClient {
     } finally {
       this.interruptRequested = false;
     }
+  }
+
+  async steer(input: string): Promise<void> {
+    if (!this.threadId) {
+      throw new Error('codex app-server has no active turn to steer');
+    }
+    if (!this.activeTurnId) {
+      logDiagnostic('codex.turn.steer.deferred', {
+        provider: 'codex',
+        threadId: this.threadId,
+        inputLength: input.length,
+      });
+      await new Promise<void>((resolve, reject) => {
+        this.pendingSteers.push({ input, resolve, reject });
+      });
+      return;
+    }
+    await this.sendSteer(input, this.threadId, this.activeTurnId);
+  }
+
+  private async sendSteer(input: string, threadId: string, turnId: string): Promise<void> {
+    logDiagnostic('codex.turn.steer.request', {
+      provider: 'codex',
+      threadId,
+      turnId,
+      inputLength: input.length,
+    });
+    await this.request('turn/steer', {
+      threadId,
+      input: [{ type: 'text', text: input, text_elements: [] }],
+      expectedTurnId: turnId,
+    });
+    logDiagnostic('codex.turn.steer.response', { provider: 'codex', threadId, turnId });
   }
 
   private async ensureThread(): Promise<void> {
@@ -391,6 +432,7 @@ class CodexAppServerClient {
   private failAll(err: Error): void {
     for (const pending of this.pending.values()) pending.reject(err);
     this.pending.clear();
+    for (const pending of this.pendingSteers.splice(0)) pending.reject(err);
     this.resolveNotificationWaiters(null);
   }
 
@@ -439,6 +481,15 @@ class CodexAppServerClient {
           if (this.interruptRequested) {
             this.interruptRequested = false;
             await this.request('turn/interrupt', { threadId, turnId: id });
+          }
+          const pendingSteers = this.pendingSteers.splice(0);
+          for (const pending of pendingSteers) {
+            try {
+              await this.sendSteer(pending.input, threadId, id);
+              pending.resolve();
+            } catch (error) {
+              pending.reject(error instanceof Error ? error : new Error(String(error)));
+            }
           }
         }
         continue;
@@ -539,6 +590,9 @@ class CodexAppServerClient {
         const answer = finalText || completedItemText;
         const status = stringField(turn ?? {}, 'status');
         this.activeTurnId = null;
+        for (const pending of this.pendingSteers.splice(0)) {
+          pending.reject(new Error('codex turn completed before steering was accepted'));
+        }
         logDiagnostic('codex.turn.completed', {
           provider: 'codex',
           threadId,
@@ -1008,6 +1062,7 @@ export function sdkAgentFactory(): AgentFactory {
     const sdkIter = query({ prompt: userStream() as any, options });
     let sdkDone = false;
     let turnSequence = 0;
+    let pendingSteers = 0;
 
     // Per-turn chunk queue shared between background sdkLoop and foreground runOnce.
     let chunkQueue: StreamChunk[] = [];
@@ -1081,8 +1136,12 @@ export function sdkAgentFactory(): AgentFactory {
         while (true) {
           if (chunkQueue.length > 0) {
             const c = chunkQueue.shift()!;
-            yield c;
             if (c.type === 'done' || c.type === 'interrupted') {
+              if (c.type === 'done' && pendingSteers > 0) {
+                pendingSteers -= 1;
+                continue;
+              }
+              yield c;
               logDiagnostic(c.type === 'done' ? 'claude.turn.completed' : 'claude.turn.interrupted', {
                 provider: 'claude',
                 turnId,
@@ -1092,14 +1151,20 @@ export function sdkAgentFactory(): AgentFactory {
                 messages.push({ role: 'user', text: userText, ts: new Date().toISOString() });
                 messages.push({ role: 'assistant', text: c.text, ts: new Date().toISOString() });
               }
+              if (c.type === 'interrupted') pendingSteers = 0;
               return;
             }
+            yield c;
             continue;
           }
           const c = await new Promise<StreamChunk | null>((r) => { resolveChunk = r; });
           if (!c) return;
-          yield c;
           if (c.type === 'done' || c.type === 'interrupted') {
+            if (c.type === 'done' && pendingSteers > 0) {
+              pendingSteers -= 1;
+              continue;
+            }
+            yield c;
             logDiagnostic(c.type === 'done' ? 'claude.turn.completed' : 'claude.turn.interrupted', {
               provider: 'claude',
               turnId,
@@ -1109,8 +1174,10 @@ export function sdkAgentFactory(): AgentFactory {
               messages.push({ role: 'user', text: userText, ts: new Date().toISOString() });
               messages.push({ role: 'assistant', text: c.text, ts: new Date().toISOString() });
             }
+            if (c.type === 'interrupted') pendingSteers = 0;
             return;
           }
+          yield c;
         }
       } finally {
         releaseLock();
@@ -1119,6 +1186,20 @@ export function sdkAgentFactory(): AgentFactory {
 
     return {
       send: (t) => runOnce(t, 'message'),
+      steer: async (t) => {
+        pendingSteers += 1;
+        push({
+          type: 'user',
+          message: { role: 'user', content: appendTurnContext(t, turnContext) },
+          parent_tool_use_id: null,
+          session_id: '',
+        });
+        logDiagnostic('claude.turn.steer.request', {
+          provider: 'claude',
+          inputLength: t.length,
+          pendingSteers,
+        });
+      },
       proposeConclusion: () => runOnce('', 'conclusion'),
       snapshot: () => [...messages],
       provider: 'claude',

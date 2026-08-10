@@ -905,6 +905,37 @@ async function handle(state: ServerState, req: IncomingMessage, res: ServerRespo
     if (!agent) { res.statusCode = 404; res.end('thread not found'); return; }
     if (!requireJsonContentType(req, res)) return;
     const body = await readJson(req) as { message: string };
+
+    const active = state.activeReplies.get(threadId);
+    if (active) {
+      if (!agent.steer) { res.statusCode = 501; res.end('agent does not support steering'); return; }
+      try {
+        await agent.steer(body.message);
+        const thread = state.liveThreads.get(threadId);
+        if (thread) {
+          thread.messages.push({ role: 'user', text: body.message, ts: new Date().toISOString() });
+          writeLiveSession(state);
+        }
+        logDiagnostic('thread.turn.steer.accepted', {
+          threadId,
+          provider: agent.provider ?? 'unknown',
+          inputLength: body.message.length,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logDiagnostic('thread.turn.steer.error', {
+          threadId,
+          provider: agent.provider ?? 'unknown',
+          error: message,
+        });
+        res.statusCode = 409;
+        res.end(message);
+        return;
+      }
+      res.statusCode = 202;
+      res.end();
+      return;
+    }
     res.statusCode = 202;
     res.end();
     runStreamReply(state, threadId, agent, body.message);
@@ -2041,7 +2072,7 @@ async function streamReply(
     });
     broadcastDocumentEvent(state, 'thread.message.status', documentPath, {
       threadId,
-      status: `Still working (${elapsed}s). Press Esc to interrupt.`,
+      status: `Still working (${elapsed}s). Press Interrupt or Esc.`,
     });
   }, 10_000);
   heartbeat.unref?.();
