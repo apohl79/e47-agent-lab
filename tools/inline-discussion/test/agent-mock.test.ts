@@ -10,6 +10,7 @@ import {
   dispatchSdkMessage,
   mockAgentFactory,
   readOnlyMcpConfigFromEnv,
+  THREAD_AGENT_BASE_INSTRUCTIONS,
   type DispatchState,
   type StreamChunk,
 } from '../src/agent.ts';
@@ -61,6 +62,13 @@ test('readOnlyMcpConfigFromEnv accepts only the read-only Notion tool set', () =
     url: 'http://127.0.0.1:3100/mcp',
     toolNames: ['notion__notion-search', 'notion__notion-fetch'],
   });
+});
+
+test('thread agent base instructions define the read-only main-agent handoff', () => {
+  assert.match(THREAD_AGENT_BASE_INSTRUCTIONS, /read-only inline discussion thread agent/i);
+  assert.match(THREAD_AGENT_BASE_INSTRUCTIONS, /main agent/i);
+  assert.match(THREAD_AGENT_BASE_INSTRUCTIONS, /Never edit files/);
+  assert.match(THREAD_AGENT_BASE_INSTRUCTIONS, /self-contained handoff/);
 });
 
 test('codexAgentFactory streams app-server deltas and records replies', async () => {
@@ -156,6 +164,7 @@ rl.on('line', (line) => {
     if (msg.params.approvalPolicy !== 'never') return fail(msg.id, 'approval policy missing');
     if (msg.params.sandbox !== 'read-only') return fail(msg.id, 'read-only thread sandbox missing');
     if (!String(msg.params.developerInstructions).includes('preamble')) return fail(msg.id, 'developer instructions missing');
+    if (!String(msg.params.developerInstructions).includes('read-only inline discussion thread agent')) return fail(msg.id, 'thread role instructions missing');
     send({ id: msg.id, result: { thread: { id: threadId } } });
     send({ method: 'thread/started', params: { threadId } });
     return;
