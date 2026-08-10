@@ -398,7 +398,13 @@ class CodexAppServerClient {
       if (notificationThreadId && notificationThreadId !== threadId) continue;
       const notificationCount = (notificationCounts.get(notification.method) ?? 0) + 1;
       notificationCounts.set(notification.method, notificationCount);
-      if (notification.method !== 'item/agentMessage/delta' || notificationCount % 100 === 0) {
+      const lifecycleNotification =
+        notification.method === 'turn/started' ||
+        notification.method === 'turn/completed' ||
+        notification.method === 'item/started' ||
+        notification.method === 'item/completed' ||
+        notification.method === 'error';
+      if (lifecycleNotification || notificationCount % 100 === 0) {
         logDiagnostic('codex.turn.notification', {
           provider: 'codex',
           threadId,
