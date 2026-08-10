@@ -14,6 +14,8 @@
   --border-strong: #8894a7;
   --accent:     #1d4ed8;
   --accent-fg:  #ffffff;
+  --user-selection-bg: #0f2a56;
+  --user-selection-fg: #ffffff;
   --accent-soft: #d5deee;
   --success:    #047857;
   --success-soft: #bfeada;
@@ -48,6 +50,8 @@
   --border-strong: #56697A;             /* base5 grey                */
   --accent:        #5EC4FF;             /* doom bright blue (cursor) */
   --accent-fg:     #1A2128;
+  --user-selection-bg: #d9f4ff;
+  --user-selection-fg: #10212b;
   --accent-soft:   rgba(94, 196, 255, 0.18);
   --success:       #8BD49C;             /* doom green                */
   --success-soft:  rgba(139, 212, 156, 0.18);
@@ -894,6 +898,14 @@ button.primary:hover {
   background: var(--accent);
   color: var(--accent-fg);
   border-bottom-right-radius: 4px;
+}
+
+/* Keep selected user text legible against the accent bubble. The page-wide
+   selection palette is tuned for document text and is too soft here. */
+.msg.user::selection,
+.msg.user *::selection {
+  background: var(--user-selection-bg);
+  color: var(--user-selection-fg);
 }
 
 .msg.assistant {
