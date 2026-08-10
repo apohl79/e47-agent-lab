@@ -128,3 +128,12 @@ inline-discussion wait  --session-dir <path> [--idle-exit-seconds <seconds>]
 npm test
 npm run typecheck
 ```
+
+### Read-only MCP access
+
+MCP is disabled unless `IND_MCP_URL` is set. When enabled, the Claude thread
+agent connects to that HTTP MCP endpoint and exposes only the exact read-only
+Notion tool names in `IND_MCP_READONLY_TOOLS` (default: `notion-search,notion-fetch`).
+For the local gateway, use `IND_MCP_SERVER_NAME=gateway` and names such as
+`notion__notion-search,notion__notion-fetch`. Unknown or write-capable names are
+rejected before the agent starts.

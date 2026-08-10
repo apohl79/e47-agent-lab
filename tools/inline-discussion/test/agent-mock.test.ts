@@ -4,7 +4,15 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { appendTurnContext, codexAgentFactory, mockAgentFactory, dispatchSdkMessage, type DispatchState, type StreamChunk } from '../src/agent.ts';
+import {
+  appendTurnContext,
+  codexAgentFactory,
+  dispatchSdkMessage,
+  mockAgentFactory,
+  readOnlyMcpConfigFromEnv,
+  type DispatchState,
+  type StreamChunk,
+} from '../src/agent.ts';
 
 function chunkLabel(c: StreamChunk): string {
   if (c.type === 'status') return `status:${c.status ?? ''}`;
@@ -39,6 +47,20 @@ test('appendTurnContext makes the document and anchor explicit without replacing
   assert.match(payload, /<inline-discussion-turn-context>/);
   assert.match(payload, /docs\/sap-oem-voice-auth\.md/);
   assert.match(payload, /97ed12e755/);
+});
+
+test('readOnlyMcpConfigFromEnv accepts only the read-only Notion tool set', () => {
+  assert.equal(readOnlyMcpConfigFromEnv({}), null);
+  const config = readOnlyMcpConfigFromEnv({
+    IND_MCP_URL: 'http://127.0.0.1:3100/mcp',
+    IND_MCP_SERVER_NAME: 'gateway',
+    IND_MCP_READONLY_TOOLS: 'notion__notion-search,notion__notion-fetch,notion__notion-create-pages',
+  });
+  assert.deepEqual(config, {
+    serverName: 'gateway',
+    url: 'http://127.0.0.1:3100/mcp',
+    toolNames: ['notion__notion-search', 'notion__notion-fetch'],
+  });
 });
 
 test('codexAgentFactory streams app-server deltas and records replies', async () => {
