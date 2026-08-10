@@ -18,6 +18,7 @@ import { updateBlockNoteIndicator } from './block-note-indicator.ts';
 import { isArchivedThreadDuplicate } from './thread-dedup.ts';
 import { findThreadDetails } from './thread-details.ts';
 import { installImageViewer } from './image-viewer.ts';
+import { blockPlusHost } from './block-plus-host.ts';
 import {
   awaitsMermaidRender,
   captureDiagramSource,
@@ -1028,8 +1029,9 @@ function attachOwnerToQuoteMark(mark: HTMLElement, owner: MarkOwner): void {
 
 function installBlockPluses(): void {
   for (const el of document.querySelectorAll<HTMLElement>('[data-block-id]')) {
-    if (el.querySelector('.block-plus')) continue;
     if (awaitsMermaidRender(el)) continue;
+    const host = blockPlusHost(el);
+    if (host.querySelector('.block-plus')) continue;
     const btn = document.createElement('button');
     btn.className = 'block-plus';
     btn.setAttribute('aria-label', 'Start thread on this block');
@@ -1038,7 +1040,7 @@ function installBlockPluses(): void {
       e.stopPropagation();
       openComposer(el.dataset.blockId!, undefined);
     });
-    el.appendChild(btn);
+    host.appendChild(btn);
   }
   installRangeSelection();
 }

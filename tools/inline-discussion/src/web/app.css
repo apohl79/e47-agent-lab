@@ -483,6 +483,18 @@ button.primary:hover {
 
 [data-block-id] { position: relative; }
 
+.block-shell {
+  position: relative;
+}
+
+#doc > .block-shell {
+  margin: 1.1em 0;
+}
+
+#doc > .block-shell > pre {
+  margin: 0;
+}
+
 .block-plus {
   position: absolute;
   right: -44px;
@@ -522,6 +534,7 @@ button.primary:hover {
 }
 
 [data-block-id]:hover > .block-plus,
+.block-shell:hover > .block-plus,
 .block-plus:hover {
   opacity: 1;
   visibility: visible;
