@@ -137,3 +137,17 @@ Notion tool names in `IND_MCP_READONLY_TOOLS` (default: `notion-search,notion-fe
 For the local gateway, use `IND_MCP_SERVER_NAME=gateway` and names such as
 `notion__notion-search,notion__notion-fetch`. Unknown or write-capable names are
 rejected before the agent starts.
+
+Example using the local read-only gateway session:
+
+```bash
+IND_MCP_URL=http://127.0.0.1:3100/mcp \
+IND_MCP_SERVER_NAME=gateway \
+IND_MCP_READONLY_TOOLS=notion__notion-search,notion__notion-fetch \
+./bin/inline-discussion start --doc ../../docs/sap-oem-voice-auth.md \
+  --session-dir "$TMPDIR/inline-discussion/sap-oem" --agent claude --hold
+```
+
+The server logs `claude.mcp.config.enabled` or `claude.mcp.config.disabled` at
+agent startup, so a missing `IND_MCP_URL` is distinguishable from an MCP
+transport failure.
