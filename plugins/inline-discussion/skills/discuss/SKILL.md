@@ -101,7 +101,7 @@ back into that same main session through the generic app-server protocol.
     ```
 
     Wait only for `<session-dir>/url.txt` (not for a browser signal), then
-    publish the URL and perform the same-pane cmux browser-tab steps below.
+    publish the URL and perform the cmux browser-open step below.
     If the URL does not appear within 30 seconds, inspect `server.log` and
     report the startup failure. The server sends Apply and Finish prompts back
     into the listed main session, so the user can continue that session after
@@ -143,23 +143,13 @@ back into that same main session through the generic app-server protocol.
 
    **Codex active-session rule.** In legacy mode, keep this main Codex turn open after publishing the URL. The same turn owns the `inline-discussion wait` heartbeat loop, reads each signal, and handles Apply directly. Do not start `inline-discussion watch`, `codex exec`, or a second agent session for Apply. The `--hold` launcher must remain alive while the browser is open so the detached server is not reaped by the host shell. In app-server handoff mode, the `screen` session owns the launcher and this turn ends after the URL is published.
 
-   **cmux integration.** When the environment indicates a cmux session (e.g. `$CMUX_WORKSPACE_ID` or `$CMUX_BUNDLE_ID` is set, or the `cmux` CLI is available and `cmux identify` succeeds), open the URL automatically in a **new browser tab in the same pane** as the current agent session — do NOT spawn a new pane or a new workspace. Steps:
+   **cmux integration.** When the environment indicates a cmux session (e.g. `$CMUX_WORKSPACE_ID` or `$CMUX_BUNDLE_ID` is set, or the `cmux` CLI is available and `cmux identify` succeeds), open the discussion URL with exactly:
 
-   1. Resolve the current pane ref:
-      ```bash
-      PANE_REF=$(cmux identify 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["caller"]["pane_ref"])')
-      ```
-   2. Open the URL as a new tab (surface) inside that pane, focus it, and capture the new surface ref so it can be closed later:
-      ```bash
-      cmux new-surface --type browser --pane "$PANE_REF" --url "<URL>" --focus true \
-        | awk '/^OK / {print $2}' \
-        > "${TMPDIR:-/tmp}/inline-discussion/<SLUG>/cmux-surface.txt"
-      ```
-      The `cmux new-surface` output looks like `OK surface:29 pane:8 workspace:5`; the awk extracts the `surface:N` ref.
+   ```bash
+   cmux browser open "<URL>"
+   ```
 
-   Use `--pane "$PANE_REF"` (NOT `--workspace`, NOT `cmux browser open`, NOT `tab-action --action new-browser-right`) — those create a new pane or split. The same-pane requirement is non-negotiable: the new browser tab MUST live in the same pane as the agent.
-
-   If the cmux call fails (non-zero exit), fall back to just echoing the URL — do not retry with a different pane/workspace and do not silently swallow the error; mention it briefly to the user. Do NOT write `cmux-surface.txt` if opening failed.
+   Let cmux choose the browser placement. Do not resolve a pane or workspace, record a surface reference, or close the browser tab automatically. If the command fails, fall back to echoing the URL and mention the failure briefly; do not retry with another cmux command.
 
 6. **Loop on signal files (legacy mode only).** Steps 6a–6d repeat until the user clicks Pause or Finish. App-server handoff mode has already returned control to the running main session and must not enter this loop.
    For both Codex and Claude, continue with the loop below in the current main agent turn. Codex uses the bounded heartbeat form in step 6a; Claude may use the unbounded form.
@@ -227,24 +217,7 @@ back into that same main session through the generic app-server protocol.
 
    c. **If the filename is `result.json`** (Finish): continue to step 7 with the existing flow (scan, report, ask how to proceed). The loop exits.
 
-   **If the filename is `pause.json`** (Pause): read it, report that the discussion is paused with its open thread and highlight counts, then end the turn. Do not scan for follow-ups, archive open threads, or close the cmux browser tab. A later invocation with the same document uses the same session directory and resumes the persisted live threads and highlights.
-
-      **cmux cleanup (Finish only).** If `${TMPDIR:-/tmp}/inline-discussion/<SLUG>/cmux-surface.txt` exists, close that browser tab — the conversation is done, the user does not need it sitting open. This is the **only** place the skill may ever call `cmux close-surface`, it runs **exactly once**, and it must target **only** the browser surface recorded in `cmux-surface.txt`. Guard the call with `cmux identify --surface` so a terminal surface can never be closed (closing a terminal surface kills the agent's own session):
-
-      ```bash
-      SURFACE_REF=$(cat "${TMPDIR:-/tmp}/inline-discussion/<SLUG>/cmux-surface.txt" 2>/dev/null)
-      # Only close it if it is verifiably a BROWSER surface — never a terminal.
-      if [ -n "$SURFACE_REF" ]; then
-        SURFACE_TYPE=$(cmux identify --surface "$SURFACE_REF" 2>/dev/null \
-          | python3 -c 'import json,sys; print(json.load(sys.stdin).get("caller", {}).get("surface_type", ""))' 2>/dev/null || true)
-        if [ "$SURFACE_TYPE" = "browser" ]; then
-          cmux close-surface --surface "$SURFACE_REF" >/dev/null 2>&1 || true
-        fi
-      fi
-      rm -f "${TMPDIR:-/tmp}/inline-discussion/<SLUG>/cmux-surface.txt"
-      ```
-
-      Do this **only on Finish** — never close the tab when handling Apply (step 6d), since the loop continues and the user is still reviewing in that browser tab. **Never call `cmux close-surface` anywhere else in this skill, and never on a terminal surface.** A failed/skipped close is non-fatal: just continue.
+   **If the filename is `pause.json`** (Pause): read it, report that the discussion is paused with its open thread and highlight counts, then end the turn. Do not scan for follow-ups or archive open threads. A later invocation with the same document uses the same session directory and resumes the persisted live threads and highlights.
 
    d. **If the filename matches `apply-*.json`** (Apply):
       - Read the URL from `${TMPDIR:-/tmp}/inline-discussion/<SLUG>/url.txt`.
