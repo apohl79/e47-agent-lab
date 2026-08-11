@@ -29,6 +29,7 @@ import {
 } from './mermaid-diagrams.ts';
 import { installShiftArrowTextareaSelection } from './textarea-selection.ts';
 import { updateApplyCount } from './apply-count.ts';
+import { HOVER_ACTION_DISMISS_MS, SELECTION_ACTION_DISMISS_MS } from './action-hover-timing.ts';
 
 // Dedicated marked instance for rendering thread messages. GFM on so tables +
 // fenced code work. `breaks: true` so assistant single-newlines survive as
@@ -1220,7 +1221,7 @@ function showFloatingSelectionActions(range: Range, segments: SelectionSegment[]
   bar.appendChild(highlight);
   document.body.appendChild(bar);
   floating = bar;
-  setTimeout(() => { dismissFloating(); }, 5000);
+  setTimeout(() => { dismissFloating(); }, SELECTION_ACTION_DISMISS_MS);
 }
 
 function dismissFloating(): void {
@@ -1334,7 +1335,7 @@ function scheduleHighlightActionsDismiss(): void {
   if (highlightActionsTimer !== null) window.clearTimeout(highlightActionsTimer);
   highlightActionsTimer = window.setTimeout(() => {
     dismissHighlightActions();
-  }, 250);
+  }, HOVER_ACTION_DISMISS_MS);
 }
 
 function dismissHighlightActions(): void {
@@ -1444,7 +1445,7 @@ function showFloatingQuote(range: Range, card: HTMLElement, text: string): void 
   });
   document.body.appendChild(btn);
   floating = btn;
-  setTimeout(() => { floating?.remove(); floating = null; }, 5000);
+  setTimeout(() => { floating?.remove(); floating = null; }, SELECTION_ACTION_DISMISS_MS);
 }
 
 function insertQuoteIntoReply(card: HTMLElement, text: string): void {
