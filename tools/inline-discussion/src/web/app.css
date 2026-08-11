@@ -917,7 +917,6 @@ button.primary:hover {
 .msg.assistant {
   background: var(--bg-chip);
   color: var(--fg);
-  border-bottom-left-radius: 4px;
   white-space: normal;
 }
 
