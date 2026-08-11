@@ -528,6 +528,7 @@ button.primary:hover {
 }
 
 .block-plus {
+  --block-plus-hide-delay: 2s;
   position: absolute;
   right: -44px;
   top: 2px;
@@ -547,11 +548,12 @@ button.primary:hover {
   padding: 0;
   opacity: 0;
   visibility: hidden;
-  pointer-events: none;
+  pointer-events: auto;
   box-shadow: var(--shadow-sm);
   transition: color 120ms ease, background 120ms ease,
               border-color 120ms ease, transform 120ms ease,
-              opacity 120ms ease, visibility 0s linear 120ms;
+              opacity 120ms ease var(--block-plus-hide-delay),
+              visibility 0s linear calc(var(--block-plus-hide-delay) + 120ms);
 }
 
 /* Invisible bridge over the gap between the block and the button,

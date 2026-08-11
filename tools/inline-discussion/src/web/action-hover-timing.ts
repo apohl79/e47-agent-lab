@@ -1,0 +1,2 @@
+export const HOVER_ACTION_DISMISS_MS = 2_000;
+export const SELECTION_ACTION_DISMISS_MS = 5_000;
