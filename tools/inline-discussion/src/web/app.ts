@@ -28,6 +28,7 @@ import {
   restoreDiagramSource,
 } from './mermaid-diagrams.ts';
 import { installShiftArrowTextareaSelection } from './textarea-selection.ts';
+import { updateApplyCount } from './apply-count.ts';
 
 // Dedicated marked instance for rendering thread messages. GFM on so tables +
 // fenced code work. `breaks: true` so assistant single-newlines survive as
@@ -116,6 +117,7 @@ interface Bootstrap {
   applyProgress?: ApplyProgress | null;
   applyTasks?: ApplyTask[];
   applyAvailable?: boolean;
+  applyCount?: number;
   hasMainSession?: boolean;
   targetLine?: number | null;
   readOnly?: boolean;
@@ -138,6 +140,7 @@ const state = {
   applyProgress: null as ApplyProgress | null,
   applyTasks: [] as ApplyTask[],
   applyAvailable: false,
+  applyCount: 0,
   // Defaults to true so a missing field (e.g. older server build) keeps the
   // legacy behaviour: Apply visible. The standalone CLI shortcut sets this
   // to false in /api/bootstrap so we hide Apply.
@@ -427,6 +430,8 @@ async function init(): Promise<void> {
   state.sourceView = boot.sourceView === true;
   state.documentPath = boot.documentPath ?? (window.location.pathname === '/' ? '' : window.location.pathname);
   state.applyAvailable = boot.applyAvailable ?? boot.threads.length > 0;
+  state.applyCount = boot.applyCount ?? boot.threads.length;
+  renderApplyCount();
   const backButton = document.getElementById('back-to-discussion') as HTMLButtonElement | null;
   if (backButton) backButton.hidden = !state.sourceView;
   if (!state.readOnly) {
@@ -509,8 +514,8 @@ async function init(): Promise<void> {
     recomputeApplyEnabled();
   });
   es.addEventListener('server.apply-availability', (e) => {
-    const payload = JSON.parse((e as MessageEvent).data) as { applyAvailable?: boolean };
-    if (typeof payload.applyAvailable === 'boolean') state.applyAvailable = payload.applyAvailable;
+    const payload = JSON.parse((e as MessageEvent).data) as { applyAvailable?: boolean; applyCount?: number };
+    updateApplyAvailability(payload);
     recomputeApplyEnabled();
   });
   es.addEventListener('server.apply-progress', (e) => {
@@ -529,8 +534,9 @@ async function init(): Promise<void> {
       applyProgress?: ApplyProgress | null;
       applyTasks?: ApplyTask[];
       applyAvailable?: boolean;
+      applyCount?: number;
     };
-    if (typeof payload.applyAvailable === 'boolean') state.applyAvailable = payload.applyAvailable;
+    updateApplyAvailability(payload);
     if (payload.applying) {
       state.applying = true;
       state.applyProgress = payload.applyProgress ?? null;
@@ -582,9 +588,13 @@ async function init(): Promise<void> {
     recomputeApplyEnabled();
   });
   es.addEventListener('server.apply-complete', (e) => {
-    const payload = JSON.parse((e as MessageEvent).data) as { tasks?: ApplyTask[]; applyAvailable?: boolean };
+    const payload = JSON.parse((e as MessageEvent).data) as {
+      tasks?: ApplyTask[];
+      applyAvailable?: boolean;
+      applyCount?: number;
+    };
     if (payload.tasks && applyOverlay) applyOverlay.setTasks(payload.tasks);
-    if (typeof payload.applyAvailable === 'boolean') state.applyAvailable = payload.applyAvailable;
+    updateApplyAvailability(payload);
     state.applying = false;
     state.applyProgress = null;
     state.applyTasks = [];
@@ -599,8 +609,13 @@ async function init(): Promise<void> {
     state.applying = false;
     state.applyProgress = null;
     state.applyTasks = [];
-    const payload = JSON.parse((e as MessageEvent).data) as { message?: string; error?: string; applyAvailable?: boolean };
-    if (typeof payload.applyAvailable === 'boolean') state.applyAvailable = payload.applyAvailable;
+    const payload = JSON.parse((e as MessageEvent).data) as {
+      message?: string;
+      error?: string;
+      applyAvailable?: boolean;
+      applyCount?: number;
+    };
+    updateApplyAvailability(payload);
     const msg = payload.message ?? payload.error ?? 'Apply failed';
     if (applyOverlay) {
       applyOverlay.setError(msg);
@@ -703,6 +718,25 @@ function setApplyEnabled(enabled: boolean): void {
     if (!btn) continue;
     btn.disabled = !enabled;
     btn.title = enabled ? '' : 'Nothing to apply yet.';
+  }
+}
+
+function applyButtons(): HTMLButtonElement[] {
+  return ['apply-top', 'apply-bottom']
+    .map((id) => document.getElementById(id))
+    .filter((element): element is HTMLButtonElement => element instanceof HTMLButtonElement);
+}
+
+function renderApplyCount(): void {
+  updateApplyCount(applyButtons(), state.applyCount);
+}
+
+function updateApplyAvailability(payload: { applyAvailable?: boolean; applyCount?: number }): void {
+  if (typeof payload.applyAvailable === 'boolean') state.applyAvailable = payload.applyAvailable;
+  if (typeof payload.applyCount === 'number') {
+    state.applyCount = payload.applyCount;
+    state.applyAvailable = payload.applyCount > 0;
+    renderApplyCount();
   }
 }
 

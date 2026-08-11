@@ -166,6 +166,34 @@ button {
   display: none !important;
 }
 
+.apply-btn {
+  position: relative;
+}
+
+.apply-count {
+  position: absolute;
+  top: -8px;
+  right: -8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 19px;
+  height: 19px;
+  padding: 0 5px;
+  color: var(--accent-fg);
+  background: var(--accent);
+  border: 2px solid var(--bg);
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  pointer-events: none;
+}
+
+.apply-count[hidden] {
+  display: none;
+}
+
 /* Finish buttons: force a stronger, unmistakably-neutral gray so they never
    pick up any accent colour regardless of browser state or inheritance.
    `#finish-top` lives inside `#controls`, so the selector must match

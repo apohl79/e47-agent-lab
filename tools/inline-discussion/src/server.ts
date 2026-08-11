@@ -554,7 +554,11 @@ function armApplyInactivityTimeout(state: ServerState, applyIndex: number): void
       const signalPath = join(state.sessionDir, `apply-${applyIndex}.json`);
       if (existsSync(signalPath)) unlinkSync(signalPath);
     } catch { /* ignore */ }
-    pushEvent(state, 'server.apply-failed', { error: 'timed out' });
+    pushEvent(state, 'server.apply-failed', {
+      error: 'timed out',
+      applyAvailable: applyAvailable(state),
+      applyCount: applyCount(state),
+    });
   }, APPLY_INACTIVITY_TIMEOUT_MS);
   state.applyTimeout.unref();
 }
@@ -601,12 +605,19 @@ function documentArchivedThreads(state: ServerState, documentPath: string): Thre
   return archived;
 }
 
+function applyCount(state: Pick<ServerState, 'liveThreads'>): number {
+  return state.liveThreads.size;
+}
+
 function applyAvailable(state: Pick<ServerState, 'liveThreads'>): boolean {
-  return state.liveThreads.size > 0;
+  return applyCount(state) > 0;
 }
 
 function pushApplyAvailability(state: ServerState): void {
-  pushEvent(state, 'server.apply-availability', { applyAvailable: applyAvailable(state) });
+  pushEvent(state, 'server.apply-availability', {
+    applyAvailable: applyAvailable(state),
+    applyCount: applyCount(state),
+  });
 }
 
 function pushDocumentEvent(state: ServerState, event: string, documentPath: string, data: Record<string, unknown>): void {
@@ -778,6 +789,7 @@ async function handle(state: ServerState, req: IncomingMessage, res: ServerRespo
       applyTasks: state.applyTasks,
       hasMainSession: state.hasMainSession,
       applyAvailable: applyAvailable(state),
+      applyCount: applyCount(state),
       targetLine: rendered.targetLine,
       readOnly: rendered.readOnly,
       sourceView,
@@ -834,6 +846,7 @@ async function handle(state: ServerState, req: IncomingMessage, res: ServerRespo
       applyProgress: state.applyProgress,
       applyTasks: state.applyTasks,
       applyAvailable: applyAvailable(state),
+      applyCount: applyCount(state),
     })}\n\n`);
     res.write(`event: ready\ndata: {}\n\n`);
     req.on('close', () => state.sseClients.delete(res));
@@ -1544,7 +1557,11 @@ async function handle(state: ServerState, req: IncomingMessage, res: ServerRespo
         const signalPath = join(state.sessionDir, `apply-${applyIndex}.json`);
         if (existsSync(signalPath)) unlinkSync(signalPath);
       } catch { /* ignore */ }
-      pushEvent(state, 'server.apply-failed', { error: message });
+      pushEvent(state, 'server.apply-failed', {
+        error: message,
+        applyAvailable: applyAvailable(state),
+        applyCount: applyCount(state),
+      });
       res.statusCode = 500;
       res.setHeader('content-type', 'application/json');
       res.end(JSON.stringify({ error: 'apply-failed', message }));
@@ -1646,6 +1663,7 @@ async function handle(state: ServerState, req: IncomingMessage, res: ServerRespo
       pushEvent(state, 'server.apply-complete', {
         tasks: completedTasks,
         applyAvailable: applyAvailable(state),
+        applyCount: applyCount(state),
       });
     }
 
@@ -1661,7 +1679,11 @@ async function handle(state: ServerState, req: IncomingMessage, res: ServerRespo
       return;
     }
     const tasks = finishApplyMonitoring(state);
-    pushEvent(state, 'server.apply-complete', { tasks, applyAvailable: applyAvailable(state) });
+    pushEvent(state, 'server.apply-complete', {
+      tasks,
+      applyAvailable: applyAvailable(state),
+      applyCount: applyCount(state),
+    });
     res.setHeader('content-type', 'application/json');
     res.end(JSON.stringify({ ok: true, tasks }));
     return;
@@ -1691,7 +1713,11 @@ async function handle(state: ServerState, req: IncomingMessage, res: ServerRespo
       const signalPath = join(state.sessionDir, `apply-${state.applyCounter}.json`);
       if (existsSync(signalPath)) unlinkSync(signalPath);
     } catch { /* ignore */ }
-    pushEvent(state, 'server.apply-failed', { error });
+    pushEvent(state, 'server.apply-failed', {
+      error,
+      applyAvailable: applyAvailable(state),
+      applyCount: applyCount(state),
+    });
     res.setHeader('content-type', 'application/json');
     res.end(JSON.stringify({ ok: true }));
     return;
