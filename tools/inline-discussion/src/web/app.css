@@ -927,7 +927,6 @@ button.primary:hover {
   align-self: flex-end;
   background: var(--accent);
   color: var(--accent-fg);
-  border-bottom-right-radius: 4px;
 }
 
 .msg.user.steering-pending {
