@@ -53,6 +53,10 @@ interface OpenModal {
 let openModal: OpenModal | null = null;
 let lastFocus: HTMLElement | null = null;
 
+export function dismissModal(): void {
+  openModal?.cleanup();
+}
+
 function ensureRoot(): HTMLElement {
   let root = document.getElementById('modal-root');
   if (!root) {

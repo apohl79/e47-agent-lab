@@ -8,10 +8,15 @@ import { isMarkdownFile, isSourceFile, renderDoc, renderSourceFile } from './mar
 import { parseArchivedThreads } from './archive.ts';
 import { readJsonl, trimTranscript } from './transcript.ts';
 import { appendThreadDetails, removeAllArchivedBlocks, removeArchivedBlockByIndex, removeThreadDetailsById, replaceThreadDetails } from './doc-writer.ts';
-import type { AgentFactory, ThreadAgent } from './agent.ts';
+import type { AgentFactory, ThreadAgent, ToolApprovalRequest } from './agent.ts';
 import { codexAgentFactory, sdkAgentFactory, THREAD_AGENT_BASE_INSTRUCTIONS } from './agent.ts';
 import { createAppServerSessionBridge, type MainSessionBridge } from './main-session.ts';
 import { logDiagnostic } from './diagnostics.ts';
+import {
+  persistMcpToolApproval,
+  readDiscussionProjectSettings,
+  type ToolApprovalScope,
+} from './tool-approvals.ts';
 import type {
   Block,
   Thread,
@@ -78,6 +83,23 @@ export interface Prefs {
   width?: 'comfortable' | 'full';
 }
 
+interface ToolApprovalView {
+  id: string;
+  threadId: string;
+  documentPath: string;
+  provider: 'claude' | 'codex';
+  toolName: string;
+  input: Record<string, unknown>;
+  title?: string;
+  description?: string;
+}
+
+interface PendingToolApproval extends ToolApprovalView {
+  toolKey: string;
+  resolve: (approved: boolean) => void;
+  removeAbortListener?: () => void;
+}
+
 function readPrefs(path: string): Prefs {
   if (!existsSync(path)) return {};
   try {
@@ -134,6 +156,8 @@ export async function createServer(opts: ServerOptions): Promise<ServerHandle> {
   chmodSync(transcriptPath, 0o600);
 
   const prefsPath = opts.prefsPath ?? PREFS_PATH;
+  const settingsRoot = opts.projectRoot ?? resolveServeRoot(opts.docPath);
+  const projectMcpApprovals = new Set(readDiscussionProjectSettings(settingsRoot).mcpApprovedTools);
 
   const state: ServerState = {
     docPath: opts.docPath,
@@ -151,6 +175,11 @@ export async function createServer(opts: ServerOptions): Promise<ServerHandle> {
     staticDir: opts.staticDir,
     prefsPath,
     prefs: readPrefs(prefsPath),
+    settingsRoot,
+    sessionMcpApprovals: new Set(),
+    projectMcpApprovals,
+    pendingToolApprovals: new Map(),
+    nextToolApprovalSeq: 0,
     eventBuffer: [],
     nextEventId: 0,
     nextThreadSeq: 0,
@@ -190,6 +219,11 @@ export async function createServer(opts: ServerOptions): Promise<ServerHandle> {
   return {
     port,
     close: async () => {
+      for (const pending of state.pendingToolApprovals.values()) {
+        pending.removeAbortListener?.();
+        pending.resolve(false);
+      }
+      state.pendingToolApprovals.clear();
       for (const c of state.sseClients) c.end();
       if (state.docWatcher) state.docWatcher.close();
       if (state.docReloadTimer) clearTimeout(state.docReloadTimer);
@@ -222,6 +256,11 @@ interface ServerState {
   staticDir?: string;
   prefsPath: string;
   prefs: Prefs;
+  settingsRoot: string;
+  sessionMcpApprovals: Set<string>;
+  projectMcpApprovals: Set<string>;
+  pendingToolApprovals: Map<string, PendingToolApproval>;
+  nextToolApprovalSeq: number;
   eventBuffer: BufferedEvent[];
   nextEventId: number;
   nextThreadSeq: number;
@@ -319,6 +358,67 @@ function createThreadAgent(state: ServerState, thread: Thread): ThreadAgent {
     systemPreamble: preamble,
     tools: ['Read', 'Grep', 'Glob', 'WebSearch'],
     turnContext: buildTurnContext(state, thread),
+    requestToolApproval: (request) => requestThreadToolApproval(state, thread, request),
+  });
+}
+
+function toolApprovalView(pending: PendingToolApproval): ToolApprovalView {
+  const { toolKey: _toolKey, resolve: _resolve, removeAbortListener: _removeAbortListener, ...view } = pending;
+  return view;
+}
+
+function requestThreadToolApproval(
+  state: ServerState,
+  thread: Thread,
+  request: ToolApprovalRequest,
+): Promise<{ approved: boolean }> {
+  if (state.sessionMcpApprovals.has(request.toolKey) || state.projectMcpApprovals.has(request.toolKey)) {
+    logDiagnostic('thread.tool-approval.cached', {
+      threadId: thread.id,
+      provider: request.provider,
+      toolName: request.toolName,
+      scope: state.projectMcpApprovals.has(request.toolKey) ? 'project' : 'session',
+    });
+    return Promise.resolve({ approved: true });
+  }
+  if (request.signal?.aborted) return Promise.resolve({ approved: false });
+
+  state.nextToolApprovalSeq += 1;
+  const id = `tool-approval-${state.nextToolApprovalSeq}`;
+  const documentPath = threadDocumentPath(state, thread);
+  return new Promise((resolveDecision) => {
+    const onAbort = (): void => {
+      const pending = state.pendingToolApprovals.get(id);
+      if (!pending) return;
+      state.pendingToolApprovals.delete(id);
+      pending.removeAbortListener?.();
+      resolveDecision({ approved: false });
+      pushDocumentEvent(state, 'tool.approval.resolved', documentPath, { approvalId: id, approved: false });
+    };
+    request.signal?.addEventListener('abort', onAbort, { once: true });
+    const pending: PendingToolApproval = {
+      id,
+      threadId: thread.id,
+      documentPath,
+      provider: request.provider,
+      toolKey: request.toolKey,
+      toolName: request.toolName,
+      input: request.input,
+      title: request.title,
+      description: request.description,
+      resolve: (approved) => resolveDecision({ approved }),
+      removeAbortListener: request.signal
+        ? () => request.signal?.removeEventListener('abort', onAbort)
+        : undefined,
+    };
+    state.pendingToolApprovals.set(id, pending);
+    logDiagnostic('thread.tool-approval.requested', {
+      approvalId: id,
+      threadId: thread.id,
+      provider: request.provider,
+      toolName: request.toolName,
+    });
+    pushDocumentEvent(state, 'tool.approval.requested', documentPath, { ...toolApprovalView(pending) });
   });
 }
 
@@ -794,7 +894,62 @@ async function handle(state: ServerState, req: IncomingMessage, res: ServerRespo
       readOnly: rendered.readOnly,
       sourceView,
       documentPath,
+      pendingToolApprovals: [...state.pendingToolApprovals.values()]
+        .filter((pending) => pending.documentPath === documentPath)
+        .map(toolApprovalView),
     }));
+    return;
+  }
+
+  const toolApprovalMatch = url.pathname.match(/^\/api\/tool-approvals\/([^/]+)$/);
+  if (req.method === 'POST' && toolApprovalMatch) {
+    if (!requireJsonContentType(req, res)) return;
+    const approvalId = toolApprovalMatch[1]!;
+    const pending = state.pendingToolApprovals.get(approvalId);
+    if (!pending) {
+      res.statusCode = 409;
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ ok: false, error: 'approval request is no longer pending' }));
+      return;
+    }
+    const body = await readJson(req) as { decision?: 'deny' | ToolApprovalScope };
+    const decision = body.decision;
+    if (decision !== 'deny' && decision !== 'once' && decision !== 'session' && decision !== 'project') {
+      res.statusCode = 400;
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ ok: false, error: 'decision must be deny, once, session, or project' }));
+      return;
+    }
+    if (decision === 'project') {
+      persistMcpToolApproval(state.settingsRoot, pending.toolKey);
+      state.projectMcpApprovals.add(pending.toolKey);
+    } else if (decision === 'session') {
+      state.sessionMcpApprovals.add(pending.toolKey);
+    }
+    const approved = decision !== 'deny';
+    const resolvedRequests = decision === 'session' || decision === 'project'
+      ? [...state.pendingToolApprovals.values()].filter((candidate) => candidate.toolKey === pending.toolKey)
+      : [pending];
+    for (const resolved of resolvedRequests) {
+      state.pendingToolApprovals.delete(resolved.id);
+      resolved.removeAbortListener?.();
+      resolved.resolve(approved);
+      logDiagnostic('thread.tool-approval.resolved', {
+        approvalId: resolved.id,
+        threadId: resolved.threadId,
+        provider: resolved.provider,
+        toolName: resolved.toolName,
+        approved,
+        scope: approved ? decision : undefined,
+      });
+      pushDocumentEvent(state, 'tool.approval.resolved', resolved.documentPath, {
+        approvalId: resolved.id,
+        approved,
+        scope: approved ? decision : undefined,
+      });
+    }
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify({ ok: true, approved, scope: approved ? decision : undefined }));
     return;
   }
 

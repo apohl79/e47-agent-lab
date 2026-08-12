@@ -30,11 +30,27 @@ function isDone(c: StreamChunk): c is Extract<StreamChunk, { type: 'done' }> {
   return c.type === 'done';
 }
 
+async function collectChunkLabels(stream: AsyncIterable<StreamChunk>): Promise<string[]> {
+  const chunks: string[] = [];
+  for await (const chunk of stream) chunks.push(chunkLabel(chunk));
+  return chunks;
+}
+
+function dispatchEvents(events: unknown[], state: DispatchState): { chunks: StreamChunk[]; endSeen: boolean } {
+  const chunks: StreamChunk[] = [];
+  let endSeen = false;
+  for (const event of events) {
+    const result = dispatchSdkMessage(event, state);
+    chunks.push(...result.chunks);
+    endSeen ||= result.endOfTurn;
+  }
+  return { chunks, endSeen };
+}
+
 test('mockAgentFactory streams a scripted reply and records messages', async () => {
   const factory = mockAgentFactory({ reply: 'hi', conclusion: 'done' });
   const agent = factory({ systemPreamble: '', tools: [] });
-  const chunks: string[] = [];
-  for await (const c of agent.send('hello')) chunks.push(chunkLabel(c));
+  const chunks = await collectChunkLabels(agent.send('hello'));
   assert.deepEqual(chunks, ['delta:hi', 'done:hi']);
   const snap = agent.snapshot();
   assert.equal(snap.length, 2);
@@ -50,8 +66,13 @@ test('appendTurnContext makes the document and anchor explicit without replacing
   assert.match(payload, /97ed12e755/);
 });
 
-test('readOnlyMcpConfigFromEnv accepts only the read-only Notion tool set', () => {
+test('readOnlyMcpConfigFromEnv exposes configured MCP tools for interactive approval', () => {
   assert.equal(readOnlyMcpConfigFromEnv({}), null);
+  assert.deepEqual(readOnlyMcpConfigFromEnv({ IND_MCP_URL: 'http://127.0.0.1:3100/mcp' }), {
+    serverName: 'inline-mcp',
+    url: 'http://127.0.0.1:3100/mcp',
+    toolNames: [],
+  });
   const config = readOnlyMcpConfigFromEnv({
     IND_MCP_URL: 'http://127.0.0.1:3100/mcp',
     IND_MCP_SERVER_NAME: 'gateway',
@@ -60,7 +81,7 @@ test('readOnlyMcpConfigFromEnv accepts only the read-only Notion tool set', () =
   assert.deepEqual(config, {
     serverName: 'gateway',
     url: 'http://127.0.0.1:3100/mcp',
-    toolNames: ['notion__notion-search', 'notion__notion-fetch'],
+    toolNames: ['notion__notion-search', 'notion__notion-fetch', 'notion__notion-create-pages'],
   });
 });
 
@@ -78,8 +99,7 @@ test('codexAgentFactory streams app-server deltas and records replies', async ()
 
   const factory = codexAgentFactory({ command: process.execPath, args: [fakeServer], cwd: root });
   const agent = factory({ systemPreamble: 'preamble', tools: [] });
-  const chunks: string[] = [];
-  for await (const c of agent.send('hello')) chunks.push(chunkLabel(c));
+  const chunks = await collectChunkLabels(agent.send('hello'));
 
   assert.deepEqual(chunks, [
     'status:Using Read...',
@@ -104,8 +124,7 @@ test('codexAgentFactory separates Codex activity from final answer text', async 
 
   const factory = codexAgentFactory({ command: process.execPath, args: [fakeServer], cwd: root });
   const agent = factory({ systemPreamble: 'preamble', tools: [] });
-  const chunks: string[] = [];
-  for await (const c of agent.send('hello')) chunks.push(chunkLabel(c));
+  const chunks = await collectChunkLabels(agent.send('hello'));
 
   assert.deepEqual(chunks, [
     'activity:commentary:Commentary:Checking context.',
@@ -130,11 +149,39 @@ test('codexAgentFactory uses app-server thread history for conclusions', async (
 
   const factory = codexAgentFactory({ command: process.execPath, args: [fakeServer], cwd: root });
   const agent = factory({ systemPreamble: 'preamble', tools: [] });
-  const chunks: string[] = [];
-  for await (const c of agent.proposeConclusion()) chunks.push(chunkLabel(c));
+  const chunks = await collectChunkLabels(agent.proposeConclusion());
 
   assert.deepEqual(chunks, ['delta:summary', 'done:summary']);
   await agent.close?.();
+});
+
+test('codexAgentFactory routes MCP approval elicitations through the host callback', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ind-codex-mcp-approval-'));
+  const fakeServer = join(root, 'fake-codex-mcp-app-server.mjs');
+  writeFileSync(fakeServer, fakeCodexMcpApprovalAppServer());
+  const requests: Array<{ provider: string; toolKey: string; toolName: string; input: Record<string, unknown> }> = [];
+
+  const factory = codexAgentFactory({ command: process.execPath, args: [fakeServer], cwd: root });
+  const agent = factory({
+    systemPreamble: 'preamble',
+    tools: [],
+    requestToolApproval: async (request) => {
+      requests.push(request);
+      return { approved: true };
+    },
+  });
+  try {
+    const chunks = await collectChunkLabels(agent.send('use notion'));
+
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0]?.provider, 'codex');
+    assert.equal(requests[0]?.toolKey, 'mcp__notion__create_page');
+    assert.equal(requests[0]?.toolName, 'create_page');
+    assert.deepEqual(requests[0]?.input, { title: 'Roadmap' });
+    assert.equal(chunks.at(-1), 'done:approved by user');
+  } finally {
+    await agent.close?.();
+  }
 });
 
 function fakeCodexAppServer(): string {
@@ -246,6 +293,64 @@ rl.on('line', (line) => {
 `;
 }
 
+function fakeCodexMcpApprovalAppServer(): string {
+  return `
+import readline from 'node:readline';
+
+const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+const threadId = 'thread-approval';
+const turnId = 'turn-approval';
+
+function send(message) { console.log(JSON.stringify(message)); }
+function complete() {
+  send({ method: 'item/completed', params: { threadId, turnId, item: { id: 'call-1', type: 'mcpToolCall', server: 'notion', tool: 'create_page', arguments: { title: 'Roadmap' }, status: 'completed' } } });
+  send({ method: 'item/agentMessage/delta', params: { threadId, turnId, itemId: 'answer-1', delta: 'approved by user' } });
+  send({ method: 'item/completed', params: { threadId, turnId, item: { id: 'answer-1', type: 'agentMessage', text: 'approved by user' } } });
+  send({ method: 'turn/completed', params: { threadId, turn: { id: turnId, status: 'completed' } } });
+}
+
+rl.on('line', (line) => {
+  const msg = JSON.parse(line);
+  if (msg.id === 'approval-1' && !msg.method) {
+    if (msg.result?.action !== 'accept') throw new Error('MCP call was not approved');
+    complete();
+    return;
+  }
+  if (msg.method === 'initialize') {
+    send({ id: msg.id, result: { userAgent: 'fake', codexHome: '.', platformFamily: 'unix', platformOs: 'macos' } });
+    return;
+  }
+  if (msg.method === 'initialized') return;
+  if (msg.method === 'thread/start') {
+    send({ id: msg.id, result: { thread: { id: threadId } } });
+    return;
+  }
+  if (msg.method === 'turn/start') {
+    send({ id: msg.id, result: {} });
+    send({ method: 'turn/started', params: { threadId, turn: { id: turnId, status: 'inProgress' } } });
+    send({ method: 'item/started', params: { threadId, turnId, item: { id: 'call-1', type: 'mcpToolCall', server: 'notion', tool: 'create_page', arguments: { title: 'Roadmap' }, status: 'inProgress' } } });
+    send({
+      id: 'approval-1',
+      method: 'mcpServer/elicitation/request',
+      params: {
+        threadId,
+        turnId,
+        serverName: 'notion',
+        mode: 'form',
+        message: 'Allow Notion to create a page?',
+        requestedSchema: { type: 'object', properties: {} },
+        _meta: {
+          codex_approval_kind: 'mcp_tool_call',
+          tool_title: 'Create Page',
+          tool_params: { title: 'Roadmap' },
+        },
+      },
+    });
+  }
+});
+`;
+}
+
 // Shape-only fixtures matching SDKMessage fields dispatchSdkMessage reads.
 function deltaEvt(text: string): unknown {
   return { type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text } } };
@@ -267,17 +372,17 @@ function toolStartEvt(name: string): unknown {
 
 test('dispatchSdkMessage ignores intermediate assistant messages (multi-turn tool use)', () => {
   const state: DispatchState = { accumulated: '' };
-  const all: StreamChunk[] = [];
-  let endSeen = false;
 
   // Simulated turn: partial text deltas → intermediate assistant (with tool_use) →
   // more text deltas → final result. Emitting `done` on the intermediate assistant
   // truncated replies at the first tool call (VC-0 regression).
-  for (const evt of [deltaEvt('Part 1.'), deltaEvt(' '), assistantEvt('Part 1. (intermediate)'), deltaEvt('Part 2.'), resultEvt('Part 1. Part 2.')]) {
-    const { chunks, endOfTurn } = dispatchSdkMessage(evt, state);
-    all.push(...chunks);
-    if (endOfTurn) endSeen = true;
-  }
+  const { chunks: all, endSeen } = dispatchEvents([
+    deltaEvt('Part 1.'),
+    deltaEvt(' '),
+    assistantEvt('Part 1. (intermediate)'),
+    deltaEvt('Part 2.'),
+    resultEvt('Part 1. Part 2.'),
+  ], state);
 
   assert.equal(endSeen, true);
   const doneCount = all.filter(isDone).length;
@@ -292,11 +397,11 @@ test('dispatchSdkMessage ignores intermediate assistant messages (multi-turn too
 
 test('dispatchSdkMessage falls back to accumulated deltas on non-success result', () => {
   const state: DispatchState = { accumulated: '' };
-  const all: StreamChunk[] = [];
-  for (const evt of [deltaEvt('hello '), deltaEvt('world'), resultEvt(/* no success payload */)]) {
-    const { chunks } = dispatchSdkMessage(evt, state);
-    all.push(...chunks);
-  }
+  const { chunks: all } = dispatchEvents([
+    deltaEvt('hello '),
+    deltaEvt('world'),
+    resultEvt(/* no success payload */),
+  ], state);
   const done = all.find(isDone)!;
   assert.equal(done.text, 'hello world');
 });
@@ -310,19 +415,15 @@ test('dispatchSdkMessage maps an interrupted SDK result to an interrupted chunk'
 
 test('dispatchSdkMessage inserts paragraph break at new text-block boundaries (tool-pause spacing)', () => {
   const state: DispatchState = { accumulated: '' };
-  const all: StreamChunk[] = [];
   // First text block opens, model writes a sentence, tool runs, second text block opens.
   // Without the boundary insert, the streamed text would read "Foo.Bar." with no space.
-  for (const evt of [
+  const { chunks: all } = dispatchEvents([
     blockStartEvt('text'),
     deltaEvt('Foo.'),
     blockStartEvt('tool_use'),
     blockStartEvt('text'),
     deltaEvt('Bar.'),
-  ]) {
-    const { chunks } = dispatchSdkMessage(evt, state);
-    all.push(...chunks);
-  }
+  ], state);
   assert.equal(state.accumulated, 'Foo.\n\nBar.');
   assert.deepEqual(
     all.filter(isDelta).map((c) => c.text),
@@ -332,30 +433,25 @@ test('dispatchSdkMessage inserts paragraph break at new text-block boundaries (t
 
 test('dispatchSdkMessage emits and clears tool-use status', () => {
   const state: DispatchState = { accumulated: '' };
-  const all: StreamChunk[] = [];
-  for (const evt of [toolStartEvt('WebSearch'), deltaEvt('Found it.')]) {
-    const { chunks } = dispatchSdkMessage(evt, state);
-    all.push(...chunks);
-  }
+  const { chunks: all } = dispatchEvents([toolStartEvt('WebSearch'), deltaEvt('Found it.')], state);
   assert.deepEqual(all.map(chunkLabel), ['status:Using WebSearch...', 'status:', 'delta:Found it.']);
 });
 
 test('dispatchSdkMessage does not insert a paragraph break before the first text block', () => {
   const state: DispatchState = { accumulated: '' };
-  const all: StreamChunk[] = [];
-  for (const evt of [blockStartEvt('text'), deltaEvt('Hello.')]) {
-    const { chunks } = dispatchSdkMessage(evt, state);
-    all.push(...chunks);
-  }
+  const { chunks: all } = dispatchEvents([blockStartEvt('text'), deltaEvt('Hello.')], state);
   assert.equal(state.accumulated, 'Hello.');
   assert.deepEqual(all.filter(isDelta).map((c) => c.text), ['Hello.']);
 });
 
 test('dispatchSdkMessage does not double-up newlines when prior block already ends with \\n\\n', () => {
   const state: DispatchState = { accumulated: '' };
-  for (const evt of [blockStartEvt('text'), deltaEvt('First.\n\n'), blockStartEvt('text'), deltaEvt('Second.')]) {
-    dispatchSdkMessage(evt, state);
-  }
+  dispatchEvents([
+    blockStartEvt('text'),
+    deltaEvt('First.\n\n'),
+    blockStartEvt('text'),
+    deltaEvt('Second.'),
+  ], state);
   assert.equal(state.accumulated, 'First.\n\nSecond.');
 });
 
