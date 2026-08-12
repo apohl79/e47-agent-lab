@@ -88,6 +88,19 @@ test('modalChoice resolves null on ESC when no cancelValue given', async () => {
   assert.equal(await p, null);
 });
 
+test('dismissModal resolves an open choice with its cancel value', async () => {
+  setupDom();
+  const { dismissModal, modalChoice } = await import('../src/web/modal.ts');
+  const pending = modalChoice({
+    title: 'Approval',
+    body: 'B',
+    options: [{ label: 'Allow', value: 'allow' }],
+    cancelValue: 'deny',
+  });
+  dismissModal();
+  assert.equal(await pending, 'deny');
+});
+
 test('modalConfirm resolves false on ESC', async () => {
   setupDom();
   const { modalConfirm } = await import('../src/web/modal.ts');

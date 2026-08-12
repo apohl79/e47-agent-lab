@@ -9,7 +9,7 @@ import {
   composerNoteModifierActive,
   detectComposerPlatform,
 } from './composer-shortcuts.ts';
-import { modalChoice, modalConfirm, modalStatus, type ModalStatusHandle } from './modal.ts';
+import { dismissModal, modalChoice, modalConfirm, modalStatus, type ModalStatusHandle } from './modal.ts';
 import { scrollToFragment } from './navigation.ts';
 import { calculateOverlayPlacement } from './overlay-position.ts';
 import { quoteOccurrence } from './quote-position.ts';
@@ -30,6 +30,7 @@ import {
 import { installShiftArrowTextareaSelection } from './textarea-selection.ts';
 import { updateApplyCount } from './apply-count.ts';
 import { HOVER_ACTION_DISMISS_MS, SELECTION_ACTION_DISMISS_MS } from './action-hover-timing.ts';
+import { toolApprovalModalOptions, type ToolApprovalPrompt } from './tool-approval.ts';
 
 // Dedicated marked instance for rendering thread messages. GFM on so tables +
 // fenced code work. `breaks: true` so assistant single-newlines survive as
@@ -124,6 +125,7 @@ interface Bootstrap {
   readOnly?: boolean;
   sourceView?: boolean;
   documentPath?: string;
+  pendingToolApprovals?: ToolApprovalPrompt[];
 }
 
 interface Prefs {
@@ -406,6 +408,41 @@ function listenDocumentEvent<T>(es: EventSource, event: string, handler: (payloa
 }
 
 let applyOverlay: ModalStatusHandle | null = null;
+const seenToolApprovals = new Set<string>();
+const resolvedToolApprovals = new Set<string>();
+let toolApprovalQueue: Promise<void> = Promise.resolve();
+let activeToolApprovalId: string | null = null;
+
+function enqueueToolApproval(request: ToolApprovalPrompt): void {
+  if (seenToolApprovals.has(request.id)) return;
+  seenToolApprovals.add(request.id);
+  toolApprovalQueue = toolApprovalQueue.then(() => showToolApproval(request));
+}
+
+async function showToolApproval(request: ToolApprovalPrompt): Promise<void> {
+  if (resolvedToolApprovals.has(request.id)) return;
+  activeToolApprovalId = request.id;
+  const decision = await modalChoice(toolApprovalModalOptions(request));
+  activeToolApprovalId = null;
+  try {
+    const response = await fetch(`/api/tool-approvals/${encodeURIComponent(request.id)}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ decision: decision ?? 'deny' }),
+    });
+    if (!response.ok && response.status !== 409) {
+      const payload = (await response.json().catch(() => ({}))) as { error?: string };
+      throw new Error(payload.error ?? `HTTP ${response.status}`);
+    }
+  } catch (error) {
+    await modalChoice({
+      title: 'Approval failed',
+      body: error instanceof Error ? error.message : String(error),
+      options: [{ label: 'Dismiss', value: 'dismiss' }],
+      cancelValue: 'dismiss',
+    });
+  }
+}
 
 init().catch((err) => console.error(err));
 
@@ -483,6 +520,8 @@ async function init(): Promise<void> {
   }
   recomputeApplyEnabled();
 
+  for (const request of boot.pendingToolApprovals ?? []) enqueueToolApproval(request);
+
   // Source-code views remain read-only. Markdown subdocuments participate in
   // the same live annotation stream as the main discussion, scoped by the
   // documentPath field carried on document-specific events.
@@ -505,6 +544,11 @@ async function init(): Promise<void> {
   listenDocumentEvent(es, 'doc.updated', onDocUpdated);
   listenDocumentEvent(es, 'server.finished', onFinished);
   listenDocumentEvent(es, 'server.paused', onPaused);
+  listenDocumentEvent<ToolApprovalPrompt>(es, 'tool.approval.requested', enqueueToolApproval);
+  listenDocumentEvent<{ approvalId: string }>(es, 'tool.approval.resolved', ({ approvalId }) => {
+    resolvedToolApprovals.add(approvalId);
+    if (activeToolApprovalId === approvalId) dismissModal();
+  });
   es.addEventListener('server.applying', (e) => {
     const payload = JSON.parse((e as MessageEvent).data) as { progress?: ApplyProgress | null; tasks?: ApplyTask[] };
     state.applying = true;

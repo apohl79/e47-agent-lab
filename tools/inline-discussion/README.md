@@ -129,25 +129,33 @@ npm test
 npm run typecheck
 ```
 
-### Read-only MCP access
+### MCP tool approvals
 
-MCP is disabled unless `IND_MCP_URL` is set. When enabled, the Claude thread
-agent connects to that HTTP MCP endpoint and exposes only the exact read-only
-Notion tool names in `IND_MCP_READONLY_TOOLS` (default: `notion-search,notion-fetch`).
-For the local gateway, use `IND_MCP_SERVER_NAME=gateway` and names such as
-`notion__notion-search,notion__notion-fetch`. Unknown or write-capable names are
-rejected before the agent starts.
+MCP calls that require permission pause the thread and open an approval overlay.
+The user can deny the call, allow it once, approve that MCP tool for the running
+discussion server, or approve it permanently for the current project. Session
+and project grants apply to the tool name, not just the displayed arguments.
+
+Codex uses its app-server MCP approval elicitations. Claude MCP is disabled
+unless `IND_MCP_URL` is set; the connected server's tools are then available for
+approval. `IND_MCP_TOOLS` can optionally restrict exposure to a comma-separated
+set. `IND_MCP_READONLY_TOOLS` remains a backwards-compatible alias. For the
+local gateway, use `IND_MCP_SERVER_NAME=gateway` and names such as
+`notion__notion-search,notion__notion-fetch`.
 
 Example using the local read-only gateway session:
 
 ```bash
 IND_MCP_URL=http://127.0.0.1:3100/mcp \
 IND_MCP_SERVER_NAME=gateway \
-IND_MCP_READONLY_TOOLS=notion__notion-search,notion__notion-fetch \
+IND_MCP_TOOLS=notion__notion-search,notion__notion-fetch \
 ./bin/inline-discussion start --doc ../../docs/sap-oem-voice-auth.md \
   --session-dir "$TMPDIR/inline-discussion/sap-oem" --agent claude --hold
 ```
 
-The server logs `claude.mcp.config.enabled` or `claude.mcp.config.disabled` at
-agent startup, so a missing `IND_MCP_URL` is distinguishable from an MCP
-transport failure.
+Permanent grants are stored in `.inline-discussion-settings.json` at the
+project root. The server adds that file to `.git/info/exclude` (including the
+shared Git directory for linked worktrees); it never edits `.gitignore`.
+
+The server logs MCP configuration plus approval request, cached-grant, and
+resolution events without logging tool arguments.

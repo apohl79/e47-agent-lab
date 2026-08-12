@@ -13,6 +13,21 @@ export interface AgentFactoryOptions {
   systemPreamble: string;
   tools: string[]; // allow-list
   turnContext?: string;
+  requestToolApproval?: (request: ToolApprovalRequest) => Promise<ToolApprovalDecision>;
+}
+
+export interface ToolApprovalRequest {
+  provider: 'claude' | 'codex';
+  toolKey: string;
+  toolName: string;
+  input: Record<string, unknown>;
+  title?: string;
+  description?: string;
+  signal?: AbortSignal;
+}
+
+export interface ToolApprovalDecision {
+  approved: boolean;
 }
 
 export const THREAD_AGENT_BASE_INSTRUCTIONS = [
@@ -74,13 +89,14 @@ export interface CodexAgentFactoryConfig {
 }
 
 export function codexAgentFactory(config: CodexAgentFactoryConfig = {}): AgentFactory {
-  return ({ systemPreamble, turnContext }) => {
+  return ({ systemPreamble, turnContext, requestToolApproval }) => {
     const messages: ThreadMessage[] = [];
     const client = new CodexAppServerClient({
       command: config.command ?? 'codex',
       args: config.args ?? ['app-server'],
       cwd: config.cwd ?? process.cwd(),
       developerInstructions: buildCodexDeveloperInstructions(systemPreamble),
+      requestToolApproval,
     });
 
     async function* runOnce(userText: string, kind: 'message' | 'conclusion'): AsyncIterable<StreamChunk> {
@@ -141,10 +157,13 @@ interface CodexAppServerOptions {
   args: string[];
   cwd: string;
   developerInstructions: string;
+  requestToolApproval?: (request: ToolApprovalRequest) => Promise<ToolApprovalDecision>;
 }
 
+type JsonRpcId = number | string;
+
 interface JsonRpcResponse {
-  id: number;
+  id: JsonRpcId;
   result?: unknown;
   error?: { message?: string };
 }
@@ -152,6 +171,20 @@ interface JsonRpcResponse {
 interface JsonRpcNotification {
   method: string;
   params?: unknown;
+}
+
+interface JsonRpcServerRequest extends JsonRpcNotification {
+  id: JsonRpcId;
+}
+
+function declinedCodexServerRequest(method: string): Record<string, unknown> {
+  if (method === 'mcpServer/elicitation/request') return { action: 'decline', content: null };
+  if (method === 'item/tool/requestUserInput') return { answers: {} };
+  if (method === 'item/permissions/requestApproval') return { permissions: {} };
+  if (method === 'item/commandExecution/requestApproval' || method === 'item/fileChange/requestApproval') {
+    return { decision: 'decline' };
+  }
+  return {};
 }
 
 class CodexAppServerClient {
@@ -176,6 +209,15 @@ class CodexAppServerClient {
   }>();
   private notifications: JsonRpcNotification[] = [];
   private notificationWaiters: Array<(value: JsonRpcNotification | null) => void> = [];
+  private activeMcpCalls: Array<{
+    id: string;
+    threadId?: string;
+    turnId?: string;
+    server: string;
+    tool: string;
+    input: Record<string, unknown>;
+  }> = [];
+  private serverRequestControllers = new Map<JsonRpcId, AbortController>();
 
   constructor(private readonly opts: CodexAppServerOptions) {}
 
@@ -234,6 +276,8 @@ class CodexAppServerClient {
     for (const pending of this.pending.values()) {
       pending.reject(new Error('codex app-server closed'));
     }
+    for (const controller of this.serverRequestControllers.values()) controller.abort();
+    this.serverRequestControllers.clear();
     this.pending.clear();
     this.rl?.close();
     this.rl = null;
@@ -392,16 +436,50 @@ class CodexAppServerClient {
       return;
     }
     if (!isRecord(parsed)) return;
+    if (typeof parsed['method'] === 'string' && (typeof parsed['id'] === 'number' || typeof parsed['id'] === 'string')) {
+      void this.handleServerRequest(parsed as unknown as JsonRpcServerRequest);
+      return;
+    }
     if (typeof parsed['id'] === 'number') {
       this.handleResponse(parsed as unknown as JsonRpcResponse);
       return;
     }
     if (typeof parsed['method'] === 'string') {
-      this.enqueueNotification(parsed as unknown as JsonRpcNotification);
+      const notification = parsed as unknown as JsonRpcNotification;
+      this.trackMcpCall(notification);
+      this.enqueueNotification(notification);
     }
   }
 
+  private trackMcpCall(notification: JsonRpcNotification): void {
+    const params = isRecord(notification.params) ? notification.params : {};
+    if (notification.method === 'serverRequest/resolved') {
+      const requestId = params['requestId'];
+      if (typeof requestId === 'number' || typeof requestId === 'string') {
+        this.serverRequestControllers.get(requestId)?.abort();
+        this.serverRequestControllers.delete(requestId);
+      }
+      return;
+    }
+    const item = isRecord(params['item']) ? params['item'] : null;
+    if (!item || item['type'] !== 'mcpToolCall' || typeof item['id'] !== 'string') return;
+    if (notification.method === 'item/completed') {
+      this.activeMcpCalls = this.activeMcpCalls.filter((call) => call.id !== item['id']);
+      return;
+    }
+    if (notification.method !== 'item/started') return;
+    this.activeMcpCalls.push({
+      id: item['id'],
+      threadId: typeof params['threadId'] === 'string' ? params['threadId'] : undefined,
+      turnId: typeof params['turnId'] === 'string' ? params['turnId'] : undefined,
+      server: typeof item['server'] === 'string' ? item['server'] : 'mcp',
+      tool: typeof item['tool'] === 'string' ? item['tool'] : 'tool',
+      input: isRecord(item['arguments']) ? item['arguments'] : {},
+    });
+  }
+
   private handleResponse(response: JsonRpcResponse): void {
+    if (typeof response.id !== 'number') return;
     const pending = this.pending.get(response.id);
     if (!pending) return;
     this.pending.delete(response.id);
@@ -418,6 +496,90 @@ class CodexAppServerClient {
       return;
     }
     pending.resolve(response.result);
+  }
+
+  private async handleServerRequest(request: JsonRpcServerRequest): Promise<void> {
+    const params = isRecord(request.params) ? request.params : {};
+    const controller = new AbortController();
+    this.serverRequestControllers.set(request.id, controller);
+    try {
+      const elicitationMeta = request.method === 'mcpServer/elicitation/request' && isRecord(params['_meta'])
+        ? params['_meta']
+        : null;
+      const questions = request.method === 'item/tool/requestUserInput' && Array.isArray(params['questions'])
+        ? params['questions'].filter(isRecord)
+        : [];
+      const approvalQuestion = questions.find((question) =>
+        typeof question['id'] === 'string' && question['id'].startsWith('mcp_tool_call_approval_'),
+      );
+      const isMcpElicitation = elicitationMeta?.['codex_approval_kind'] === 'mcp_tool_call';
+      if (!isMcpElicitation && !approvalQuestion) {
+        this.write({ id: request.id, result: declinedCodexServerRequest(request.method) });
+        return;
+      }
+      const threadId = typeof params['threadId'] === 'string' ? params['threadId'] : undefined;
+      const turnId = typeof params['turnId'] === 'string' ? params['turnId'] : undefined;
+      const meta = elicitationMeta ?? {};
+      const metaInput = isRecord(meta['tool_params']) ? meta['tool_params'] : null;
+      const trackedCall = [...this.activeMcpCalls].reverse().find((call) =>
+        (threadId === undefined || call.threadId === threadId) &&
+        (turnId === undefined || call.turnId === turnId) &&
+        (metaInput === null || JSON.stringify(call.input) === JSON.stringify(metaInput)),
+      );
+      const serverName = typeof params['serverName'] === 'string' ? params['serverName'] : trackedCall?.server ?? 'mcp';
+      const message = typeof params['message'] === 'string'
+        ? params['message']
+        : typeof approvalQuestion?.['question'] === 'string'
+          ? approvalQuestion['question']
+          : 'Allow this MCP tool call?';
+      const input = metaInput ?? trackedCall?.input ?? {};
+      const rawToolName =
+        (typeof meta['tool_name'] === 'string' ? meta['tool_name'] : undefined)
+        ?? trackedCall?.tool
+        ?? (typeof meta['tool_title'] === 'string' ? meta['tool_title'] : undefined)
+        ?? message.match(/tool\s+["“]([^"”]+)["”]/i)?.[1]
+        ?? 'tool';
+      const toolKey = `mcp__${serverName}__${rawToolName}`;
+      logDiagnostic('codex.mcp.approval.request', {
+        provider: 'codex',
+        serverName,
+        toolName: rawToolName,
+      });
+      const decision = this.opts.requestToolApproval
+        ? await this.opts.requestToolApproval({
+            provider: 'codex',
+            toolKey,
+            toolName: rawToolName,
+            input,
+            title: message,
+            description: typeof meta['tool_description'] === 'string' ? meta['tool_description'] : undefined,
+            signal: controller.signal,
+          })
+        : { approved: false };
+      const result = request.method === 'mcpServer/elicitation/request'
+        ? decision.approved
+          ? { action: 'accept', content: null }
+          : { action: 'decline', content: null }
+        : {
+            answers: approvalQuestion && typeof approvalQuestion['id'] === 'string'
+              ? { [approvalQuestion['id']]: { answers: decision.approved ? ['Allow'] : [] } }
+              : {},
+          };
+      this.write({ id: request.id, result });
+      logDiagnostic('codex.mcp.approval.response', {
+        provider: 'codex',
+        serverName,
+        toolName: rawToolName,
+        approved: decision.approved,
+      });
+    } catch (error) {
+      this.write({
+        id: request.id,
+        error: { code: -32000, message: error instanceof Error ? error.message : String(error) },
+      });
+    } finally {
+      this.serverRequestControllers.delete(request.id);
+    }
   }
 
   private enqueueNotification(notification: JsonRpcNotification): void {
@@ -444,6 +606,8 @@ class CodexAppServerClient {
   private failAll(err: Error): void {
     for (const pending of this.pending.values()) pending.reject(err);
     this.pending.clear();
+    for (const controller of this.serverRequestControllers.values()) controller.abort();
+    this.serverRequestControllers.clear();
     this.rejectPendingSteers(err);
     this.resolveNotificationWaiters(null);
   }
@@ -752,78 +916,43 @@ function truncateForError(s: string): string {
 // Tools permitted in inline-discussion threads. WebFetch excluded (SSRF risk).
 const ALLOWED_TOOLS = ['Read', 'Grep', 'Glob', 'WebSearch'] as const;
 
-// MCP is opt-in and restricted to tool names that the connected server has
-// declared as read-only. The gateway form is supported because it prefixes
-// upstream names with the connector name.
-const READ_ONLY_MCP_TOOLS = new Set([
-  'notion-search',
-  'notion-fetch',
-  'notion-download-attachment',
-  'notion-get-comments',
-  'notion-get-async-task',
-  'notion-get-teams',
-  'notion-get-users',
-  'notion-query-data-sources',
-  'notion-query-database-view',
-  'notion-query-meeting-notes',
-  'notion-list-private-pages',
-  'notion-list-shared-pages',
-  'notion-list-favorite-pages',
-  'notion-list-recent-pages',
-  'notion-search-agents',
-  'notion__notion-search',
-  'notion__notion-fetch',
-  'notion__notion-download-attachment',
-  'notion__notion-get-comments',
-  'notion__notion-get-async-task',
-  'notion__notion-get-teams',
-  'notion__notion-get-users',
-  'notion__notion-query-data-sources',
-  'notion__notion-query-database-view',
-  'notion__notion-query-meeting-notes',
-  'notion__notion-list-private-pages',
-  'notion__notion-list-shared-pages',
-  'notion__notion-list-favorite-pages',
-  'notion__notion-list-recent-pages',
-  'notion__notion-search-agents',
-]);
-
-export type ReadOnlyMcpConfig = Readonly<{
+// Claude MCP is opt-in. Configured tool names are exposed with always-ask
+// permission policy; the discussion server resolves each request through its
+// one-time/session/project approval store.
+export type McpConfig = Readonly<{
   serverName: string;
   url: string;
   toolNames: readonly string[];
 }>;
 
-export function readOnlyMcpConfigFromEnv(env: NodeJS.ProcessEnv = process.env): ReadOnlyMcpConfig | null {
+export function mcpConfigFromEnv(env: NodeJS.ProcessEnv = process.env): McpConfig | null {
   const url = env.IND_MCP_URL?.trim() ?? '';
   if (!url) return null;
-  const requested = (env.IND_MCP_READONLY_TOOLS ?? 'notion-search,notion-fetch')
+  const configuredTools = env.IND_MCP_TOOLS ?? env.IND_MCP_READONLY_TOOLS;
+  const requested = (configuredTools ?? '')
     .split(',')
     .map((name) => name.trim())
     .filter(Boolean);
-  const toolNames = requested.filter((name) => READ_ONLY_MCP_TOOLS.has(name));
-  const rejected = requested.filter((name) => !READ_ONLY_MCP_TOOLS.has(name));
-  if (rejected.length > 0) {
-    logDiagnostic('claude.mcp.config.rejected-tools', {
-      provider: 'claude',
-      tools: rejected.join(','),
-    });
-  }
-  return toolNames.length > 0
-    ? Object.freeze({
-        serverName: env.IND_MCP_SERVER_NAME?.trim() || 'inline-readonly-mcp',
-        url,
-        toolNames: Object.freeze(toolNames),
-      })
-    : null;
+  const toolNames = [...new Set(requested)];
+  return Object.freeze({
+    serverName: env.IND_MCP_SERVER_NAME?.trim() || 'inline-mcp',
+    url,
+    toolNames: Object.freeze(toolNames),
+  });
 }
 
-function buildReadOnlyMcpServers(config: ReadOnlyMcpConfig): NonNullable<Options['mcpServers']> {
+// Backward-compatible export for callers using the original configuration
+// helper name. Configured tools now require interactive approval.
+export const readOnlyMcpConfigFromEnv = mcpConfigFromEnv;
+
+function buildMcpServers(config: McpConfig): NonNullable<Options['mcpServers']> {
   return {
     [config.serverName]: {
       type: 'http',
       url: config.url,
-      tools: config.toolNames.map((name) => ({ name, permission_policy: 'always_allow' as const })),
+      ...(config.toolNames.length > 0
+        ? { tools: config.toolNames.map((name) => ({ name, permission_policy: 'always_ask' as const })) }
+        : {}),
       alwaysLoad: true,
     },
   };
@@ -1020,19 +1149,20 @@ function truncateStatusPart(value: string): string {
 }
 
 export function sdkAgentFactory(): AgentFactory {
-  return ({ systemPreamble, tools, turnContext }) => {
+  return ({ systemPreamble, tools, turnContext, requestToolApproval }) => {
     const messages: ThreadMessage[] = [];
     const allowList = tools.filter((t) => (ALLOWED_TOOLS as readonly string[]).includes(t));
-    const mcpConfig = readOnlyMcpConfigFromEnv();
+    const mcpConfig = mcpConfigFromEnv();
     logDiagnostic(mcpConfig ? 'claude.mcp.config.enabled' : 'claude.mcp.config.disabled', {
       provider: 'claude',
       serverName: mcpConfig?.serverName,
       toolCount: mcpConfig?.toolNames.length ?? 0,
-      reason: mcpConfig ? undefined : 'IND_MCP_URL or an allowed read-only tool is missing',
+      reason: mcpConfig ? undefined : 'IND_MCP_URL or an MCP tool name is missing',
     });
     const mcpToolNames = new Set(
       mcpConfig?.toolNames.map((name) => `mcp__${mcpConfig.serverName}__${name}`) ?? [],
     );
+    const mcpToolPrefix = mcpConfig ? `mcp__${mcpConfig.serverName}__` : null;
 
     // Push-based user-message queue drives multi-turn sessions via a single persistent query.
     let resolveNext: ((m: unknown) => void) | null = null;
@@ -1063,11 +1193,31 @@ export function sdkAgentFactory(): AgentFactory {
       systemPrompt: [THREAD_AGENT_BASE_INSTRUCTIONS, systemPreamble].filter(Boolean).join('\n\n'),
       // Restrict available tools to the allow-list.
       tools: allowList,
-      ...(mcpConfig ? { mcpServers: buildReadOnlyMcpServers(mcpConfig) } : {}),
+      ...(mcpConfig ? { mcpServers: buildMcpServers(mcpConfig) } : {}),
       // Extra enforcement: deny anything outside the allow-list with a clear message.
-      canUseTool: async (toolName, input, _opts) => {
-        if ((ALLOWED_TOOLS as readonly string[]).includes(toolName) || mcpToolNames.has(toolName)) {
+      canUseTool: async (toolName, input, permissionOptions) => {
+        if ((ALLOWED_TOOLS as readonly string[]).includes(toolName)) {
           return { behavior: 'allow', updatedInput: input };
+        }
+        const configuredMcpTool = mcpToolNames.has(toolName) || (
+          mcpToolNames.size === 0 && mcpToolPrefix !== null && toolName.startsWith(mcpToolPrefix)
+        );
+        if (configuredMcpTool) {
+          if (!requestToolApproval) {
+            return { behavior: 'deny', message: `MCP tool '${toolName}' requires user approval.` };
+          }
+          const decision = await requestToolApproval({
+            provider: 'claude',
+            toolKey: toolName,
+            toolName: formatToolName(toolName),
+            input,
+            title: permissionOptions.title,
+            description: permissionOptions.description,
+            signal: permissionOptions.signal,
+          });
+          return decision.approved
+            ? { behavior: 'allow', updatedInput: input }
+            : { behavior: 'deny', message: `User denied MCP tool '${toolName}'.` };
         }
         return {
           behavior: 'deny',
