@@ -1,7 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
-import { createInferenceSelectors } from '../src/web/inference-selectors.ts';
+import {
+  createInferenceSelectors,
+  setInferenceSelectorsDisabled,
+} from '../src/web/inference-selectors.ts';
 import type { InferenceCatalog, InferenceSettings } from '../src/types.ts';
 
 const catalog: InferenceCatalog = {
@@ -76,5 +79,25 @@ test('a selected hidden model remains available', () => {
     'Hidden · openai',
   ]);
   assert.equal(model.selectedOptions[0]?.text, 'Hidden · openai');
+  dom.window.close();
+});
+
+test('inference selectors can be disabled for an active turn and re-enabled afterward', () => {
+  const dom = installDom();
+  const selectors = createInferenceSelectors({
+    catalog,
+    settings: catalog.defaultSettings,
+    label: 'Thread inference',
+    onChange: async () => undefined,
+    onError: assert.fail,
+  });
+
+  setInferenceSelectorsDisabled(selectors, true);
+  assert.equal(selectors.dataset.disabled, 'true');
+  assert.ok([...selectors.querySelectorAll<HTMLSelectElement>('select')].every((select) => select.disabled));
+
+  setInferenceSelectorsDisabled(selectors, false);
+  assert.equal(selectors.dataset.disabled, undefined);
+  assert.ok([...selectors.querySelectorAll<HTMLSelectElement>('select')].every((select) => !select.disabled));
   dom.window.close();
 });

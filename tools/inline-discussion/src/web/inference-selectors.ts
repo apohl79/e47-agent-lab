@@ -9,6 +9,14 @@ export interface InferenceSelectorsOptions {
   onError(error: unknown): void;
 }
 
+export function setInferenceSelectorsDisabled(root: HTMLElement, disabled: boolean): void {
+  if (disabled) root.dataset.disabled = 'true';
+  else delete root.dataset.disabled;
+  for (const select of root.querySelectorAll<HTMLSelectElement>('select')) {
+    select.disabled = disabled;
+  }
+}
+
 function appendOption(select: HTMLSelectElement, value: string, label: string): void {
   const option = document.createElement('option');
   option.value = value;
@@ -69,6 +77,7 @@ export function createInferenceSelectors(options: InferenceSelectorsOptions): HT
       void commit(Object.freeze({ ...current, reasoningEffort: effortSelect.value }));
     });
     root.append(modelSelect, effortSelect);
+    setInferenceSelectorsDisabled(root, root.dataset.disabled === 'true');
   };
 
   render();
