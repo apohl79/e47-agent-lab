@@ -845,8 +845,28 @@ class CodexAppServerClient {
         else yield { type: 'done', text: answer };
         return;
       } else if (notification.method === 'error') {
-        const message = typeof params['message'] === 'string' ? params['message'] : 'codex app-server error';
-        throw new Error(message);
+        const error = isRecord(params['error']) ? params['error'] : params;
+        const message = stringField(error, 'message') ?? 'codex app-server error';
+        const details = stringField(error, 'additionalDetails');
+        const willRetry = params['willRetry'] === true;
+        logDiagnostic(willRetry ? 'codex.turn.retry' : 'codex.turn.provider-error', {
+          provider: 'codex',
+          threadId,
+          turnId,
+          error: message,
+          details,
+        });
+        if (willRetry) {
+          statusActive = true;
+          yield { type: 'status', status: message };
+        } else {
+          this.activeTurnId = null;
+          if (statusActive) {
+            statusActive = false;
+            yield { type: 'status', status: null };
+          }
+          throw new Error(details ? `${message}: ${details}` : message);
+        }
       }
     }
   }

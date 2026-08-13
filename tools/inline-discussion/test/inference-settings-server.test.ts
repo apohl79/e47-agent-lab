@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync } from 'node:fs';
+import { EventEmitter, once } from 'node:events';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AgentFactory, ThreadAgent } from '../src/agent.ts';
@@ -32,6 +33,31 @@ async function patchSettings(port: number, path: string, settings: InferenceSett
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(settings),
   });
+}
+
+function providerSwitchFactory(
+  events: EventEmitter,
+  created: Array<{ settings: InferenceSettings; preamble: string }>,
+  closed: number[],
+): AgentFactory {
+  return (options): ThreadAgent => {
+    assert.ok(options.inferenceSettings);
+    const agentIndex = created.length;
+    created.push({ settings: options.inferenceSettings, preamble: options.systemPreamble });
+    if (agentIndex === 1) events.emit('replacement');
+    return {
+      async *send() {
+        if (agentIndex === 0) {
+          events.emit('turn-started');
+          await once(events, 'release-turn');
+        }
+        yield { type: 'done', text: 'done' };
+      },
+      async *proposeConclusion() { yield { type: 'done', text: 'done' }; },
+      snapshot: () => [],
+      close: async () => { closed.push(agentIndex); },
+    };
+  };
 }
 
 test('page defaults affect only new threads and a thread override updates that agent', async () => {
@@ -116,6 +142,49 @@ test('unsupported inference settings are rejected', async () => {
       provider: 'openai', model: 'missing', reasoningEffort: 'medium',
     });
     assert.equal(response.status, 400);
+  } finally {
+    await close();
+  }
+});
+
+test('a provider change replaces the backing agent after the active turn completes', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ind-inference-provider-switch-'));
+  const docPath = join(root, 'doc.md');
+  writeFileSync(docPath, '# Title\n\nParagraph.\n');
+  const events = new EventEmitter();
+  const created: Array<{ settings: InferenceSettings; preamble: string }> = [];
+  const closed: number[] = [];
+  const factory = providerSwitchFactory(events, created, closed);
+  const { port, close } = await createServer({
+    docPath,
+    sessionDir: join(root, 'session'),
+    prefsPath: join(root, 'prefs.json'),
+    agentFactory: factory,
+    inferenceCatalog: catalog,
+    shutdownOnFinish: false,
+  });
+  try {
+    const bootstrap = await (await fetch(`http://127.0.0.1:${port}/api/bootstrap`)).json() as { blockIds: string[] };
+    const turnStarted = once(events, 'turn-started');
+    const response = await fetch(`http://127.0.0.1:${port}/api/threads`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ anchor: { blockId: bootstrap.blockIds[1] }, message: 'first' }),
+    });
+    const threadId = ((await response.json()) as { threadId: string }).threadId;
+    await turnStarted;
+    const replacement = once(events, 'replacement');
+    const next = { provider: 'other', model: 'model-b', reasoningEffort: 'high' } as const;
+    assert.equal((await patchSettings(port, `/api/threads/${threadId}/inference-settings`, next)).status, 200);
+    assert.equal(created.length, 1);
+    assert.deepEqual(closed, []);
+    events.emit('release-turn');
+    await replacement;
+    assert.deepEqual(created.map((agent) => agent.settings), [catalog.defaultSettings, next]);
+    const replacementAgent = created[1];
+    assert.ok(replacementAgent);
+    assert.match(replacementAgent.preamble, /User: first/);
+    assert.match(replacementAgent.preamble, /Assistant: done/);
+    assert.deepEqual(closed, [0]);
   } finally {
     await close();
   }

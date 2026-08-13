@@ -178,6 +178,7 @@ export async function createServer(opts: ServerOptions): Promise<ServerHandle> {
     archivedThreads: [],
     agents: new Map(),
     activeReplies: new Map(),
+    pendingAgentReplacements: new Set(),
     agentFactory: opts.agentFactory,
     inferenceCatalog: opts.inferenceCatalog,
     defaultInferenceSettings: opts.inferenceCatalog
@@ -263,6 +264,7 @@ interface ServerState {
   archivedThreads: Thread[];
   agents: Map<string, ThreadAgent>;
   activeReplies: Map<string, { interrupted: boolean }>;
+  pendingAgentReplacements: Set<string>;
   agentFactory: AgentFactory;
   inferenceCatalog?: InferenceCatalog;
   defaultInferenceSettings?: InferenceSettings;
@@ -380,6 +382,29 @@ function createThreadAgent(state: ServerState, thread: Thread): ThreadAgent {
     inferenceSettings: thread.inferenceSettings,
     requestToolApproval: (request) => requestThreadToolApproval(state, thread, request),
   });
+}
+
+function replaceThreadAgent(state: ServerState, threadId: string): void {
+  const thread = state.liveThreads.get(threadId);
+  const previous = state.agents.get(threadId);
+  if (!thread || thread.kind !== 'thread' || thread.status !== 'open' || !previous) return;
+  const replacement = createThreadAgent(state, thread);
+  state.agents.set(threadId, replacement);
+  state.pendingAgentReplacements.delete(threadId);
+  logDiagnostic('thread.agent.replaced', {
+    threadId,
+    provider: replacement.provider ?? 'unknown',
+    modelProvider: thread.inferenceSettings?.provider,
+    model: thread.inferenceSettings?.model,
+  });
+  const closing = previous.close?.();
+  if (closing) {
+    void closing.catch((error) => logDiagnostic('thread.agent.close.error', {
+      threadId,
+      provider: previous.provider ?? 'unknown',
+      error: error instanceof Error ? error.message : String(error),
+    }));
+  }
 }
 
 function parseInferenceSettings(
@@ -1148,8 +1173,14 @@ async function handle(state: ServerState, req: IncomingMessage, res: ServerRespo
       res.end(JSON.stringify({ error: 'unsupported provider, model, or reasoning effort' }));
       return;
     }
+    const providerChanged = thread.inferenceSettings?.provider !== settings.provider;
     thread.inferenceSettings = settings;
-    agent.setInferenceSettings?.(settings);
+    if (providerChanged) {
+      if (state.activeReplies.has(threadId)) state.pendingAgentReplacements.add(threadId);
+      else replaceThreadAgent(state, threadId);
+    } else {
+      agent.setInferenceSettings?.(settings);
+    }
     writeLiveSession(state);
     const documentPath = threadDocumentPath(state, thread);
     pushDocumentEvent(state, 'thread.updated', documentPath, {
@@ -2464,6 +2495,7 @@ function runStreamReply(
     }
   }).finally(() => {
     if (state.activeReplies.get(threadId) === active) state.activeReplies.delete(threadId);
+    if (state.pendingAgentReplacements.has(threadId)) replaceThreadAgent(state, threadId);
   });
 }
 
@@ -2515,8 +2547,8 @@ if (isMainModule(import.meta.url)) {
   const inferenceCatalog = agentMode === 'codex'
     ? await discoverCodexInferenceCatalog({ cwd: agentCwd })
     : undefined;
-  const inheritedInferenceSettings = agentMode === 'codex'
-    ? readCodexSessionInferenceSettings(mainJsonl)
+  const inheritedInferenceSettings = agentMode === 'codex' && inferenceCatalog
+    ? readCodexSessionInferenceSettings(mainJsonl, inferenceCatalog)
     : undefined;
   const { port, close } = await createServer({
     docPath: doc,

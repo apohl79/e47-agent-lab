@@ -34,7 +34,7 @@ function installDom(): JSDOM {
   return dom;
 }
 
-test('inference selectors expose provider, model, and supported reasoning effort', async () => {
+test('inference selectors expose one provider/model list and supported reasoning effort', async () => {
   const dom = installDom();
   const changes: InferenceSettings[] = [];
   const selectors = createInferenceSelectors({
@@ -45,11 +45,14 @@ test('inference selectors expose provider, model, and supported reasoning effort
     onError: assert.fail,
   });
   const select = selectors.querySelectorAll<HTMLSelectElement>('select');
-  assert.equal(select.length, 3);
-  assert.deepEqual([...select[1]!.options].map((option) => option.text), ['Model A']);
-  assert.deepEqual([...select[2]!.options].map((option) => option.value), ['medium', 'high']);
+  assert.equal(select.length, 2);
+  assert.deepEqual([...select[0]!.options].map((option) => option.text), [
+    'Model A · openai',
+    'Model B · other',
+  ]);
+  assert.deepEqual([...select[1]!.options].map((option) => option.value), ['medium', 'high']);
 
-  select[0]!.value = 'other';
+  select[0]!.value = JSON.stringify(['other', 'model-b']);
   select[0]!.dispatchEvent(new dom.window.Event('change'));
   await Promise.resolve();
   await Promise.resolve();
@@ -67,7 +70,11 @@ test('a selected hidden model remains available', () => {
     onError: assert.fail,
   });
   const model = selectors.querySelector<HTMLSelectElement>('.inference-model')!;
-  assert.deepEqual([...model.options].map((option) => option.text), ['Model A', 'Hidden']);
-  assert.equal(model.selectedOptions[0]?.text, 'Hidden');
+  assert.deepEqual([...model.options].map((option) => option.text), [
+    'Model A · openai',
+    'Model B · other',
+    'Hidden · openai',
+  ]);
+  assert.equal(model.selectedOptions[0]?.text, 'Hidden · openai');
   dom.window.close();
 });

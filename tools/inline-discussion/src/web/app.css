@@ -136,7 +136,7 @@ body {
   font: 500 12px/1 var(--font-sans);
 }
 
-.inference-provider { max-width: 100px; }
+.inference-model { max-width: 240px; }
 .inference-effort { max-width: 110px; }
 .inference-select:focus-visible { outline: 2px solid var(--border-strong); outline-offset: 1px; }
 .inference-select:disabled { opacity: 0.55; }
