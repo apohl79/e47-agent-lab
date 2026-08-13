@@ -3,7 +3,15 @@ import DOMPurify from 'dompurify';
 import { Marked } from 'marked';
 import hljs from 'highlight.js/lib/common';
 import mermaid from 'mermaid';
-import type { AgentActivity, ApplyProgress, ApplyTask, Highlight, Thread } from '../types.ts';
+import type {
+  AgentActivity,
+  ApplyProgress,
+  ApplyTask,
+  Highlight,
+  InferenceCatalog,
+  InferenceSettings,
+  Thread,
+} from '../types.ts';
 import {
   composerKeyAction,
   composerNoteModifierActive,
@@ -31,6 +39,7 @@ import { installShiftArrowTextareaSelection } from './textarea-selection.ts';
 import { updateApplyCount } from './apply-count.ts';
 import { HOVER_ACTION_DISMISS_MS, SELECTION_ACTION_DISMISS_MS } from './action-hover-timing.ts';
 import { toolApprovalModalOptions, type ToolApprovalPrompt } from './tool-approval.ts';
+import { createInferenceSelectors } from './inference-selectors.ts';
 
 // Dedicated marked instance for rendering thread messages. GFM on so tables +
 // fenced code work. `breaks: true` so assistant single-newlines survive as
@@ -126,6 +135,8 @@ interface Bootstrap {
   sourceView?: boolean;
   documentPath?: string;
   pendingToolApprovals?: ToolApprovalPrompt[];
+  inferenceCatalog?: InferenceCatalog;
+  defaultInferenceSettings?: InferenceSettings;
 }
 
 interface Prefs {
@@ -151,6 +162,8 @@ const state = {
   readOnly: false,
   sourceView: false,
   documentPath: '',
+  inferenceCatalog: undefined as InferenceCatalog | undefined,
+  defaultInferenceSettings: undefined as InferenceSettings | undefined,
 };
 
 interface TurnState {
@@ -446,6 +459,38 @@ async function showToolApproval(request: ToolApprovalPrompt): Promise<void> {
 
 init().catch((err) => console.error(err));
 
+async function updateInferenceSettings(url: string, settings: InferenceSettings): Promise<void> {
+  const response = await fetch(url, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(settings),
+  });
+  if (response.ok) return;
+  const payload = (await response.json().catch(() => ({}))) as { error?: string };
+  throw new Error(payload.error ?? `server responded ${response.status}`);
+}
+
+function renderDefaultInferenceSelectors(): void {
+  const host = document.getElementById('inference-defaults');
+  if (!host) return;
+  host.replaceChildren();
+  if (!state.inferenceCatalog || !state.defaultInferenceSettings) {
+    host.hidden = true;
+    return;
+  }
+  host.hidden = false;
+  host.appendChild(createInferenceSelectors({
+    catalog: state.inferenceCatalog,
+    settings: state.defaultInferenceSettings,
+    label: 'New thread inference',
+    onChange: async (settings) => {
+      await updateInferenceSettings('/api/inference-settings', settings);
+      state.defaultInferenceSettings = settings;
+    },
+    onError: (error) => showCenterToast(`Model change failed: ${error instanceof Error ? error.message : String(error)}`),
+  }));
+}
+
 async function init(): Promise<void> {
   await loadAndApplyPrefs();
   document.addEventListener('keydown', onGlobalKeyDown);
@@ -467,6 +512,9 @@ async function init(): Promise<void> {
   state.readOnly = boot.readOnly === true;
   state.sourceView = boot.sourceView === true;
   state.documentPath = boot.documentPath ?? (window.location.pathname === '/' ? '' : window.location.pathname);
+  state.inferenceCatalog = boot.inferenceCatalog;
+  state.defaultInferenceSettings = boot.defaultInferenceSettings;
+  renderDefaultInferenceSelectors();
   state.applyAvailable = boot.applyAvailable ?? boot.threads.length > 0;
   state.applyCount = boot.applyCount ?? boot.threads.length;
   renderApplyCount();
@@ -545,6 +593,12 @@ async function init(): Promise<void> {
   listenDocumentEvent(es, 'server.finished', onFinished);
   listenDocumentEvent(es, 'server.paused', onPaused);
   listenDocumentEvent<ToolApprovalPrompt>(es, 'tool.approval.requested', enqueueToolApproval);
+  es.addEventListener('inference.default.updated', (event) => {
+    const payload = JSON.parse((event as MessageEvent).data) as { settings?: InferenceSettings };
+    if (!payload.settings) return;
+    state.defaultInferenceSettings = payload.settings;
+    renderDefaultInferenceSelectors();
+  });
   listenDocumentEvent<{ approvalId: string }>(es, 'tool.approval.resolved', ({ approvalId }) => {
     resolvedToolApprovals.add(approvalId);
     if (activeToolApprovalId === approvalId) dismissModal();
@@ -1604,6 +1658,9 @@ async function createThread(
     anchor: { blockId, quote, occurrence },
     messages: [{ role: 'user', text: message, ts: new Date().toISOString() }],
     createdAt: new Date().toISOString(),
+    inferenceSettings: kind === 'thread' && state.defaultInferenceSettings
+      ? { ...state.defaultInferenceSettings }
+      : undefined,
   };
   state.threads.set(threadId, thread);
   state.activeThreadId = threadId;
@@ -1825,6 +1882,7 @@ function renderThread(thread: Thread): void {
     <div class="thread-header">
       <div class="thread-label"><span class="thread-icon">💬</span> <strong>Thread</strong> <span class="anchor-quote">${thread.anchor.quote ? `“${escapeHtml(thread.anchor.quote)}”` : 'entire block'}</span></div>
       <div class="thread-actions">
+        <div class="thread-inference"></div>
         <button class="btn btn-ghost to-note-btn" title="Collapse this thread into a single note">↩ To note</button>
       </div>
     </div>
@@ -1839,6 +1897,24 @@ function renderThread(thread: Thread): void {
       </div>
       <button class="btn btn-ghost delete-btn">Delete</button>
     </div>`;
+  const inferenceHost = card.querySelector<HTMLElement>('.thread-inference');
+  if (inferenceHost && state.inferenceCatalog && thread.inferenceSettings) {
+    inferenceHost.appendChild(createInferenceSelectors({
+      catalog: state.inferenceCatalog,
+      settings: thread.inferenceSettings,
+      label: `Thread ${thread.id} inference`,
+      onChange: async (settings) => {
+        await updateInferenceSettings(`/api/threads/${thread.id}/inference-settings`, settings);
+        thread.inferenceSettings = settings;
+      },
+      onError: (error) => showCardError(
+        card!,
+        `Model change failed: ${error instanceof Error ? error.message : String(error)}`,
+      ),
+    }));
+  } else {
+    inferenceHost?.remove();
+  }
   const messagesEl = card.querySelector<HTMLElement>('.messages')!;
   for (const m of thread.messages) {
     const el = document.createElement('div');

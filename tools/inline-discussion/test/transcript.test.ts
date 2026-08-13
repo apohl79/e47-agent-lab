@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { trimTranscript, readJsonl } from '../src/transcript.ts';
+import { readCodexSessionInferenceSettings, trimTranscript, readJsonl } from '../src/transcript.ts';
 
 function makeFixture(): string {
   const big = 'X'.repeat(5000);
@@ -120,4 +120,30 @@ test('readJsonl normalizes Codex session response items', () => {
   assert.match(text, /TOOL exec_command/);
   assert.match(text, /TOOL_RESULT codex: no matches/);
   assert.match(text, /ASSISTANT: The plan is coherent/);
+});
+
+test('readCodexSessionInferenceSettings reads the latest host turn settings', () => {
+  const dir = join(tmpdir(), `ind-codex-settings-${Date.now()}`);
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, 'codex.jsonl');
+  const lines = [
+    { type: 'session_meta', payload: { model_provider: 'openai' } },
+    { type: 'turn_context', payload: { model: 'gpt-old', effort: 'medium' } },
+    { type: 'turn_context', payload: { model: 'gpt-current', effort: 'xhigh' } },
+  ];
+  writeFileSync(path, lines.map((line) => JSON.stringify(line)).join('\n'));
+
+  assert.deepEqual(readCodexSessionInferenceSettings(path), {
+    provider: 'openai',
+    model: 'gpt-current',
+    reasoningEffort: 'xhigh',
+  });
+});
+
+test('readCodexSessionInferenceSettings rejects incomplete host metadata', () => {
+  const dir = join(tmpdir(), `ind-codex-settings-incomplete-${Date.now()}`);
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, 'codex.jsonl');
+  writeFileSync(path, JSON.stringify({ type: 'turn_context', payload: { model: 'gpt-current' } }));
+  assert.equal(readCodexSessionInferenceSettings(path), undefined);
 });

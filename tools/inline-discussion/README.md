@@ -78,17 +78,27 @@ inline-discussion wait  --session-dir <path> [--idle-exit-seconds <seconds>]
 - `sessions` lists the running Codex sessions exposed by the local app-server.
   It uses the same protocol as handoff mode and works with the original Codex
   app-server; `--socket` overrides the default control socket path.
+- Codex thread inference is explicit. A host-launched discussion initializes
+  its page defaults from the main session's provider, model, and reasoning
+  effort; standalone CLI use initializes them from the Codex app-server
+  defaults. The header selectors affect only threads created afterward. Each
+  thread snapshots its own settings and its selectors affect subsequent turns
+  in that thread, without changing an already-running turn.
 
 ## HTTP surface (relevant subset)
 
 - `GET /` → static client bundle.
 - `GET /api/bootstrap` → `{ html, blockIds, title, threads, archivedThreads,
-  hasMainSession, applying, applyStatus, applyProgress, applyTasks }`.
+  hasMainSession, applying, applyStatus, applyProgress, applyTasks,
+  inferenceCatalog, defaultInferenceSettings }`.
 - `GET /events` → SSE stream of `ready`, `doc.updated`, `thread.*`,
   `server.applying`, `server.apply-failed`, `apply.progress`,
   `apply.tasks`, etc.
 - Thread CRUD under `/api/threads/...` (start, message, propose-conclusion,
   edit-conclusion, close, reopen, convert-to-thread, archive).
+- Inference selection: `PATCH /api/inference-settings` changes the page default
+  for new threads; `PATCH /api/threads/:id/inference-settings` changes that
+  thread for subsequent turns.
 - Apply lifecycle: `POST /api/apply`, `POST /api/apply/progress`,
   `POST /api/apply/done`, `POST /api/apply/failed`,
   `POST /api/apply/monitoring`. `POST /api/apply` returns 409
