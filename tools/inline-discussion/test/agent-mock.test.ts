@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import {
   appendTurnContext,
   codexAgentFactory,
+  discussionAgentEnvironment,
   discoverCodexInferenceCatalog,
   dispatchSdkMessage,
   mockAgentFactory,
@@ -90,6 +91,13 @@ test('thread agent base instructions prohibit implementation and require a main-
   assert.match(THREAD_AGENT_BASE_INSTRUCTIONS, /inline discussion thread agent, not the main agent/i);
   assert.match(THREAD_AGENT_BASE_INSTRUCTIONS, /Never apply a requested repository, discussion-document, project-context, or code change or fix/);
   assert.match(THREAD_AGENT_BASE_INSTRUCTIONS, /Your response is the handoff to the main agent/);
+});
+
+test('discussion agents disable project-context-curator while preserving their environment', () => {
+  assert.deepEqual(
+    discussionAgentEnvironment({ KEEP_ME: 'yes', PROJECT_CONTEXT_CURATOR_DISABLED: '0' }),
+    { KEEP_ME: 'yes', PROJECT_CONTEXT_CURATOR_DISABLED: '1' },
+  );
 });
 
 test('codexAgentFactory streams app-server deltas and records replies', async () => {
@@ -262,6 +270,7 @@ rl.on('line', (line) => {
   }
   if (msg.method === 'initialized') return;
   if (msg.method === 'thread/start') {
+    if (process.env.PROJECT_CONTEXT_CURATOR_DISABLED !== '1') return fail(msg.id, 'project-context curator must be disabled');
     if (msg.params.approvalPolicy !== 'never') return fail(msg.id, 'approval policy missing');
     if (msg.params.sandbox !== 'read-only') return fail(msg.id, 'read-only thread sandbox missing');
     if (!String(msg.params.developerInstructions).includes('preamble')) return fail(msg.id, 'developer instructions missing');

@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 
 HOOK = Path(__file__).resolve().parents[1] / "project-context-hook.py"
+PLUGIN_ROOT = HOOK.parent.parent
+DISABLED_ENV = "PROJECT_CONTEXT_CURATOR_DISABLED"
 
 
 def load_hook_module():
@@ -19,10 +22,18 @@ def load_hook_module():
     return module
 
 
-def run_hook_process(mode: str, payload: dict) -> subprocess.CompletedProcess[str]:
+def run_hook_process(
+    mode: str,
+    payload: dict,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    process_env = os.environ.copy()
+    process_env.pop(DISABLED_ENV, None)
+    process_env.update(env or {})
     return subprocess.run(
         [sys.executable, str(HOOK), mode],
         input=json.dumps(payload),
+        env=process_env,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -175,3 +186,49 @@ def test_hooks_are_silent_when_context_is_ignored(tmp_path: Path):
 
     assert session_proc.stderr == ""
     assert session_proc.stdout == ""
+
+
+def test_disabled_environment_makes_hook_a_side_effect_free_noop(tmp_path: Path) -> None:
+    write_context(tmp_path)
+    context_path = tmp_path / "docs/context/context.json"
+    original_context = context_path.read_text(encoding="utf-8")
+
+    proc = run_hook_process(
+        "session-start",
+        {"cwd": str(tmp_path)},
+        env={DISABLED_ENV: "1"},
+    )
+
+    assert (
+        proc.returncode,
+        proc.stdout,
+        proc.stderr,
+        context_path.read_text(encoding="utf-8"),
+    ) == (0, "", "", original_context)
+
+
+def test_non_disabled_environment_preserves_hook_output(tmp_path: Path) -> None:
+    proc = run_hook_process(
+        "session-start",
+        {"cwd": str(tmp_path)},
+        env={DISABLED_ENV: "0"},
+    )
+
+    assert (
+        proc.returncode,
+        proc.stderr,
+        "Project Context Curator is active" in proc.stdout,
+    ) == (0, "", True)
+
+
+def test_plugin_entrypoints_gate_on_disabled_environment() -> None:
+    manifest = json.loads((PLUGIN_ROOT / ".codex-plugin/plugin.json").read_text(encoding="utf-8"))
+    hooks = json.loads((PLUGIN_ROOT / "hooks/hooks.json").read_text(encoding="utf-8"))
+
+    assert (
+        manifest["context"]["thread"][0]["condition_shell"],
+        hooks["hooks"]["SessionStart"][0]["hooks"][0]["command"],
+    ) == (
+        'test "${PROJECT_CONTEXT_CURATOR_DISABLED:-0}" != "1"',
+        'sh -c \'test "${PROJECT_CONTEXT_CURATOR_DISABLED:-0}" = "1" || exec python3 "${CLAUDE_PLUGIN_ROOT:-.}/hooks/project-context-hook.py" session-start\'',
+    )
