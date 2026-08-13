@@ -116,6 +116,31 @@ body {
   gap: 8px;
 }
 
+#controls { flex-wrap: wrap; justify-content: flex-end; }
+
+.inference-selectors,
+.thread-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.inference-select {
+  height: 32px;
+  max-width: 180px;
+  padding: 0 24px 0 8px;
+  color: var(--fg-soft);
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font: 500 12px/1 var(--font-sans);
+}
+
+.inference-provider { max-width: 100px; }
+.inference-effort { max-width: 110px; }
+.inference-select:focus-visible { outline: 2px solid var(--border-strong); outline-offset: 1px; }
+.inference-select:disabled { opacity: 0.55; }
+
 #bottombar {
   display: flex;
   align-items: center;
@@ -744,6 +769,8 @@ button.primary:hover {
   font-size: 13px;
   color: var(--muted);
 }
+
+.thread-actions { flex-wrap: wrap; justify-content: flex-end; }
 
 .thread-icon { margin-right: 2px; }
 

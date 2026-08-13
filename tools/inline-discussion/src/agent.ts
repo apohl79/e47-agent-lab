@@ -3,7 +3,13 @@
 // Verified types: query(), Options (systemPrompt, tools, canUseTool, includePartialMessages),
 //   PermissionResult ({behavior:'allow',updatedInput}|{behavior:'deny',message}),
 //   SDKMessage union (stream_event for deltas, assistant for final, result for terminal)
-import type { AgentActivity, ThreadMessage } from './types.ts';
+import type {
+  AgentActivity,
+  InferenceCatalog,
+  InferenceModelOption,
+  InferenceSettings,
+  ThreadMessage,
+} from './types.ts';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createInterface, type Interface as ReadlineInterface } from 'node:readline';
 import { query, type Options } from '@anthropic-ai/claude-agent-sdk';
@@ -13,6 +19,7 @@ export interface AgentFactoryOptions {
   systemPreamble: string;
   tools: string[]; // allow-list
   turnContext?: string;
+  inferenceSettings?: InferenceSettings;
   requestToolApproval?: (request: ToolApprovalRequest) => Promise<ToolApprovalDecision>;
 }
 
@@ -53,6 +60,7 @@ export interface ThreadAgent {
   proposeConclusion(): AsyncIterable<StreamChunk>;
   snapshot(): ThreadMessage[];
   provider?: string;
+  setInferenceSettings?(settings: InferenceSettings): void;
   interrupt?(): Promise<void>;
   close?(): Promise<void>;
 }
@@ -89,13 +97,14 @@ export interface CodexAgentFactoryConfig {
 }
 
 export function codexAgentFactory(config: CodexAgentFactoryConfig = {}): AgentFactory {
-  return ({ systemPreamble, turnContext, requestToolApproval }) => {
+  return ({ systemPreamble, turnContext, inferenceSettings, requestToolApproval }) => {
     const messages: ThreadMessage[] = [];
     const client = new CodexAppServerClient({
       command: config.command ?? 'codex',
       args: config.args ?? ['app-server'],
       cwd: config.cwd ?? process.cwd(),
       developerInstructions: buildCodexDeveloperInstructions(systemPreamble),
+      inferenceSettings,
       requestToolApproval,
     });
 
@@ -123,6 +132,7 @@ export function codexAgentFactory(config: CodexAgentFactoryConfig = {}): AgentFa
       proposeConclusion: () => runOnce('', 'conclusion'),
       snapshot: () => [...messages],
       provider: 'codex',
+      setInferenceSettings: (settings) => client.setInferenceSettings(settings),
       interrupt: () => client.interrupt(),
       close: () => client.close(),
     } satisfies ThreadAgent;
@@ -157,6 +167,7 @@ interface CodexAppServerOptions {
   args: string[];
   cwd: string;
   developerInstructions: string;
+  inferenceSettings?: InferenceSettings;
   requestToolApproval?: (request: ToolApprovalRequest) => Promise<ToolApprovalDecision>;
 }
 
@@ -218,8 +229,15 @@ class CodexAppServerClient {
     input: Record<string, unknown>;
   }> = [];
   private serverRequestControllers = new Map<JsonRpcId, AbortController>();
+  private inferenceSettings: InferenceSettings | undefined;
 
-  constructor(private readonly opts: CodexAppServerOptions) {}
+  constructor(private readonly opts: CodexAppServerOptions) {
+    this.inferenceSettings = opts.inferenceSettings;
+  }
+
+  setInferenceSettings(settings: InferenceSettings): void {
+    this.inferenceSettings = Object.freeze({ ...settings });
+  }
 
   async *runTurn(input: string): AsyncIterable<StreamChunk> {
     const startedAt = Date.now();
@@ -235,6 +253,9 @@ class CodexAppServerClient {
       provider: 'codex',
       threadId,
       inputLength: input.length,
+      modelProvider: this.inferenceSettings?.provider,
+      model: this.inferenceSettings?.model,
+      reasoningEffort: this.inferenceSettings?.reasoningEffort,
     });
     try {
       await this.request('turn/start', {
@@ -243,6 +264,11 @@ class CodexAppServerClient {
         approvalPolicy: 'never',
         sandboxPolicy: { type: 'readOnly', networkAccess: false },
         cwd: this.opts.cwd,
+        ...(this.inferenceSettings ? {
+          model: this.inferenceSettings.model,
+          modelProvider: this.inferenceSettings.provider,
+          effort: this.inferenceSettings.reasoningEffort,
+        } : {}),
       });
       logDiagnostic('codex.turn.start.response', { provider: 'codex', threadId });
     } catch (error) {
@@ -351,6 +377,10 @@ class CodexAppServerClient {
       sandbox: 'read-only',
       developerInstructions: this.opts.developerInstructions,
       ephemeral: true,
+      ...(this.inferenceSettings ? {
+        model: this.inferenceSettings.model,
+        modelProvider: this.inferenceSettings.provider,
+      } : {}),
     });
     const thread = isRecord(result) && isRecord(result['thread']) ? result['thread'] : null;
     const id = typeof thread?.['id'] === 'string' ? thread['id'] : null;
@@ -358,6 +388,37 @@ class CodexAppServerClient {
       throw new Error('codex app-server thread/start returned no thread id');
     }
     this.threadId = id;
+  }
+
+  async discoverInferenceCatalog(): Promise<InferenceCatalog> {
+    if (!this.initialized) this.initialized = this.initialize();
+    await this.initialized;
+    const listed = await this.request('model/list', { includeHidden: true, limit: 1000 });
+    const models = parseInferenceModels(listed);
+    if (models.length === 0) throw new Error('codex app-server model/list returned no usable models');
+    const configured = await this.request('config/read', { includeLayers: false });
+    const config = isRecord(configured) && isRecord(configured['config']) ? configured['config'] : {};
+    const configuredProvider = typeof config['model_provider'] === 'string' ? config['model_provider'] : '';
+    const configuredModel = typeof config['model'] === 'string' ? config['model'] : '';
+    const model = models.find((candidate) =>
+      candidate.provider === configuredProvider && candidate.model === configuredModel,
+    ) ?? models.find((candidate) => candidate.provider === configuredProvider && candidate.isDefault)
+      ?? models.find((candidate) => candidate.isDefault)
+      ?? models[0]!;
+    const responseEffort = typeof config['model_reasoning_effort'] === 'string'
+      ? config['model_reasoning_effort']
+      : model.defaultReasoningEffort;
+    const reasoningEffort = model.supportedReasoningEfforts.some((option) =>
+      option.reasoningEffort === responseEffort,
+    ) ? responseEffort : model.defaultReasoningEffort;
+    return Object.freeze({
+      models: Object.freeze(models),
+      defaultSettings: Object.freeze({
+        provider: model.provider,
+        model: model.model,
+        reasoningEffort,
+      }),
+    });
   }
 
   private async initialize(): Promise<void> {
@@ -788,6 +849,61 @@ class CodexAppServerClient {
         throw new Error(message);
       }
     }
+  }
+}
+
+function parseInferenceModels(result: unknown): InferenceModelOption[] {
+  if (!isRecord(result) || !Array.isArray(result['data'])) return [];
+  return result['data'].flatMap((raw): InferenceModelOption[] => {
+    if (!isRecord(raw)) return [];
+    const provider = typeof raw['providerId'] === 'string' ? raw['providerId'] : '';
+    const model = typeof raw['model'] === 'string' ? raw['model'] : '';
+    const defaultReasoningEffort = typeof raw['defaultReasoningEffort'] === 'string'
+      ? raw['defaultReasoningEffort']
+      : '';
+    const supportedReasoningEfforts = Array.isArray(raw['supportedReasoningEfforts'])
+      ? raw['supportedReasoningEfforts'].flatMap((option): Array<{ reasoningEffort: string; description: string }> => {
+          if (!isRecord(option) || typeof option['reasoningEffort'] !== 'string') return [];
+          return [{
+            reasoningEffort: option['reasoningEffort'],
+            description: typeof option['description'] === 'string' ? option['description'] : '',
+          }];
+        })
+      : [];
+    if (!provider || !model || !defaultReasoningEffort || supportedReasoningEfforts.length === 0) return [];
+    return [Object.freeze({
+      provider,
+      model,
+      displayName: typeof raw['displayName'] === 'string' ? raw['displayName'] : model,
+      description: typeof raw['description'] === 'string' ? raw['description'] : '',
+      hidden: raw['hidden'] === true,
+      isDefault: raw['isDefault'] === true,
+      defaultReasoningEffort,
+      supportedReasoningEfforts: Object.freeze(supportedReasoningEfforts),
+    })];
+  });
+}
+
+export async function discoverCodexInferenceCatalog(
+  config: CodexAgentFactoryConfig = {},
+): Promise<InferenceCatalog> {
+  const client = new CodexAppServerClient({
+    command: config.command ?? 'codex',
+    args: config.args ?? ['app-server'],
+    cwd: config.cwd ?? process.cwd(),
+    developerInstructions: '',
+  });
+  try {
+    const catalog = await client.discoverInferenceCatalog();
+    logDiagnostic('codex.inference.catalog', {
+      provider: catalog.defaultSettings.provider,
+      model: catalog.defaultSettings.model,
+      reasoningEffort: catalog.defaultSettings.reasoningEffort,
+      modelCount: catalog.models.length,
+    });
+    return catalog;
+  } finally {
+    await client.close();
   }
 }
 

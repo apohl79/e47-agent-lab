@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import {
   appendTurnContext,
   codexAgentFactory,
+  discoverCodexInferenceCatalog,
   dispatchSdkMessage,
   mockAgentFactory,
   readOnlyMcpConfigFromEnv,
@@ -155,6 +156,39 @@ test('codexAgentFactory uses app-server thread history for conclusions', async (
   await agent.close?.();
 });
 
+test('codexAgentFactory applies explicit inference settings to new and subsequent turns', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ind-codex-inference-agent-'));
+  const fakeServer = join(root, 'fake-codex-inference-server.mjs');
+  writeFileSync(fakeServer, fakeCodexInferenceAppServer());
+  const factory = codexAgentFactory({ command: process.execPath, args: [fakeServer], cwd: root });
+  const agent = factory({
+    systemPreamble: 'preamble',
+    tools: [],
+    inferenceSettings: { provider: 'openai', model: 'model-a', reasoningEffort: 'medium' },
+  });
+  try {
+    assert.equal((await collectChunkLabels(agent.send('first'))).at(-1), 'done:model-a:medium');
+    agent.setInferenceSettings?.({ provider: 'openai', model: 'model-b', reasoningEffort: 'high' });
+    assert.equal((await collectChunkLabels(agent.send('second'))).at(-1), 'done:model-b:high');
+  } finally {
+    await agent.close?.();
+  }
+});
+
+test('discoverCodexInferenceCatalog uses the app-server runtime default', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ind-codex-inference-catalog-'));
+  const fakeServer = join(root, 'fake-codex-catalog-server.mjs');
+  writeFileSync(fakeServer, fakeCodexCatalogAppServer());
+  const catalog = await discoverCodexInferenceCatalog({ command: process.execPath, args: [fakeServer], cwd: root });
+  assert.deepEqual(catalog.defaultSettings, {
+    provider: 'openai',
+    model: 'model-default',
+    reasoningEffort: 'high',
+  });
+  assert.equal(catalog.models.length, 2);
+  assert.equal(catalog.models[1]?.hidden, true);
+});
+
 test('codexAgentFactory routes MCP approval elicitations through the host callback', async () => {
   const root = mkdtempSync(join(tmpdir(), 'ind-codex-mcp-approval-'));
   const fakeServer = join(root, 'fake-codex-mcp-app-server.mjs');
@@ -239,6 +273,66 @@ rl.on('line', (line) => {
     return;
   }
   fail(msg.id, \`unexpected method: \${msg.method}\`);
+});
+`;
+}
+
+function fakeCodexInferenceAppServer(): string {
+  return `
+import readline from 'node:readline';
+const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+let turnSeq = 0;
+function send(message) { console.log(JSON.stringify(message)); }
+function fail(id, message) { send({ id, error: { message } }); }
+rl.on('line', (line) => {
+  const msg = JSON.parse(line);
+  if (msg.method === 'initialize') return send({ id: msg.id, result: {} });
+  if (msg.method === 'initialized') return;
+  if (msg.method === 'thread/start') {
+    if (msg.params.model !== 'model-a' || msg.params.modelProvider !== 'openai') return fail(msg.id, 'thread settings missing');
+    return send({ id: msg.id, result: { thread: { id: 'thread-1' } } });
+  }
+  if (msg.method === 'turn/start') {
+    turnSeq += 1;
+    const expected = turnSeq === 1
+      ? { model: 'model-a', effort: 'medium' }
+      : { model: 'model-b', effort: 'high' };
+    if (msg.params.modelProvider !== 'openai' || msg.params.model !== expected.model || msg.params.effort !== expected.effort) {
+      return fail(msg.id, 'turn settings missing');
+    }
+    const turnId = 'turn-' + turnSeq;
+    const text = expected.model + ':' + expected.effort;
+    send({ id: msg.id, result: {} });
+    send({ method: 'turn/started', params: { threadId: 'thread-1', turn: { id: turnId, status: 'inProgress' } } });
+    send({ method: 'item/agentMessage/delta', params: { threadId: 'thread-1', turnId, itemId: 'item-1', delta: text } });
+    send({ method: 'turn/completed', params: { threadId: 'thread-1', turn: { id: turnId, status: 'completed' } } });
+    return;
+  }
+  fail(msg.id, 'unexpected method: ' + msg.method);
+});
+`;
+}
+
+function fakeCodexCatalogAppServer(): string {
+  return `
+import readline from 'node:readline';
+const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+function send(message) { console.log(JSON.stringify(message)); }
+rl.on('line', (line) => {
+  const msg = JSON.parse(line);
+  if (msg.method === 'initialize') return send({ id: msg.id, result: {} });
+  if (msg.method === 'initialized') return;
+  if (msg.method === 'model/list') return send({ id: msg.id, result: { data: [
+    { providerId: 'openai', model: 'model-default', displayName: 'Default', description: '', hidden: false, isDefault: true, defaultReasoningEffort: 'medium', supportedReasoningEfforts: [
+      { reasoningEffort: 'medium', description: '' }, { reasoningEffort: 'high', description: '' }
+    ] },
+    { providerId: 'openai', model: 'model-hidden', displayName: 'Hidden', description: '', hidden: true, isDefault: false, defaultReasoningEffort: 'medium', supportedReasoningEfforts: [
+      { reasoningEffort: 'medium', description: '' }
+    ] }
+  ] } });
+  if (msg.method === 'config/read') return send({ id: msg.id, result: { config: {
+    model_provider: 'openai', model: 'model-default', model_reasoning_effort: 'high'
+  } } });
 });
 `;
 }

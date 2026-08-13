@@ -29,6 +29,33 @@ export interface AgentActivity {
   text: string;
 }
 
+export type InferenceSettings = Readonly<{
+  provider: string;
+  model: string;
+  reasoningEffort: string;
+}>;
+
+export type InferenceReasoningOption = Readonly<{
+  reasoningEffort: string;
+  description: string;
+}>;
+
+export type InferenceModelOption = Readonly<{
+  provider: string;
+  model: string;
+  displayName: string;
+  description: string;
+  hidden: boolean;
+  isDefault: boolean;
+  defaultReasoningEffort: string;
+  supportedReasoningEfforts: readonly InferenceReasoningOption[];
+}>;
+
+export type InferenceCatalog = Readonly<{
+  models: readonly InferenceModelOption[];
+  defaultSettings: InferenceSettings;
+}>;
+
 export type ThreadKind = 'thread' | 'note';
 
 export interface Thread {
@@ -44,6 +71,7 @@ export interface Thread {
   closedAt?: string;
   closedBy?: 'user' | 'auto';
   colorIndex?: number;
+  inferenceSettings?: InferenceSettings;
 }
 
 // Highlights are pure visual session markers. They live alongside threads

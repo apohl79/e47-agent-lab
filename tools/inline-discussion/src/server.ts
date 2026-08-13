@@ -6,12 +6,18 @@ import { homedir } from 'node:os';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { isMarkdownFile, isSourceFile, renderDoc, renderSourceFile } from './markdown.ts';
 import { parseArchivedThreads } from './archive.ts';
-import { readJsonl, trimTranscript } from './transcript.ts';
+import { readCodexSessionInferenceSettings, readJsonl, trimTranscript } from './transcript.ts';
 import { appendThreadDetails, removeAllArchivedBlocks, removeArchivedBlockByIndex, removeThreadDetailsById, replaceThreadDetails } from './doc-writer.ts';
 import type { AgentFactory, ThreadAgent, ToolApprovalRequest } from './agent.ts';
-import { codexAgentFactory, sdkAgentFactory, THREAD_AGENT_BASE_INSTRUCTIONS } from './agent.ts';
+import {
+  codexAgentFactory,
+  discoverCodexInferenceCatalog,
+  sdkAgentFactory,
+  THREAD_AGENT_BASE_INSTRUCTIONS,
+} from './agent.ts';
 import { createAppServerSessionBridge, type MainSessionBridge } from './main-session.ts';
 import { logDiagnostic } from './diagnostics.ts';
+import { resolvedInferenceSettings, validInferenceSettings } from './inference-settings.ts';
 import {
   persistMcpToolApproval,
   readDiscussionProjectSettings,
@@ -28,6 +34,8 @@ import type {
   PauseResult,
   ApplyProgress,
   ApplyTask,
+  InferenceCatalog,
+  InferenceSettings,
 } from './types.ts';
 
 const MAX_BODY_BYTES = 256 * 1024;
@@ -65,6 +73,8 @@ export interface ServerOptions {
   mainSessionId?: string;
   mainSessionSocket?: string;
   agentFactory: AgentFactory;
+  inferenceCatalog?: InferenceCatalog;
+  initialInferenceSettings?: InferenceSettings;
   staticDir?: string;
   prefsPath?: string;
   // Shut the process down shortly after a successful /api/finish call.
@@ -169,6 +179,10 @@ export async function createServer(opts: ServerOptions): Promise<ServerHandle> {
     agents: new Map(),
     activeReplies: new Map(),
     agentFactory: opts.agentFactory,
+    inferenceCatalog: opts.inferenceCatalog,
+    defaultInferenceSettings: opts.inferenceCatalog
+      ? resolvedInferenceSettings(opts.inferenceCatalog, opts.initialInferenceSettings)
+      : undefined,
     mainTranscript,
     sseClients: new Set(),
     sessionDir: opts.sessionDir,
@@ -250,6 +264,8 @@ interface ServerState {
   agents: Map<string, ThreadAgent>;
   activeReplies: Map<string, { interrupted: boolean }>;
   agentFactory: AgentFactory;
+  inferenceCatalog?: InferenceCatalog;
+  defaultInferenceSettings?: InferenceSettings;
   mainTranscript: string;
   sseClients: Set<ServerResponse>;
   sessionDir: string;
@@ -337,6 +353,9 @@ function restoreLiveSession(state: ServerState): void {
     state.nextHighlightSeq = snapshot.nextHighlightSeq;
     for (const thread of state.liveThreads.values()) {
       if (thread.kind !== 'thread' || thread.status !== 'open') continue;
+      if (!thread.inferenceSettings && state.defaultInferenceSettings) {
+        thread.inferenceSettings = Object.freeze({ ...state.defaultInferenceSettings });
+      }
       state.agents.set(thread.id, createThreadAgent(state, thread));
     }
   } catch {
@@ -358,8 +377,34 @@ function createThreadAgent(state: ServerState, thread: Thread): ThreadAgent {
     systemPreamble: preamble,
     tools: ['Read', 'Grep', 'Glob', 'WebSearch'],
     turnContext: buildTurnContext(state, thread),
+    inferenceSettings: thread.inferenceSettings,
     requestToolApproval: (request) => requestThreadToolApproval(state, thread, request),
   });
+}
+
+function parseInferenceSettings(
+  state: ServerState,
+  value: unknown,
+): InferenceSettings | null {
+  if (!state.inferenceCatalog || typeof value !== 'object' || value === null) return null;
+  const candidate = value as Record<string, unknown>;
+  if (
+    typeof candidate['provider'] !== 'string' ||
+    typeof candidate['model'] !== 'string' ||
+    typeof candidate['reasoningEffort'] !== 'string'
+  ) return null;
+  const settings = Object.freeze({
+    provider: candidate['provider'],
+    model: candidate['model'],
+    reasoningEffort: candidate['reasoningEffort'],
+  });
+  return validInferenceSettings(state.inferenceCatalog, settings) ? settings : null;
+}
+
+function snapshotDefaultInferenceSettings(state: ServerState): InferenceSettings | undefined {
+  return state.defaultInferenceSettings
+    ? Object.freeze({ ...state.defaultInferenceSettings })
+    : undefined;
 }
 
 function toolApprovalView(pending: PendingToolApproval): ToolApprovalView {
@@ -894,10 +939,28 @@ async function handle(state: ServerState, req: IncomingMessage, res: ServerRespo
       readOnly: rendered.readOnly,
       sourceView,
       documentPath,
+      inferenceCatalog: state.inferenceCatalog,
+      defaultInferenceSettings: state.defaultInferenceSettings,
       pendingToolApprovals: [...state.pendingToolApprovals.values()]
         .filter((pending) => pending.documentPath === documentPath)
         .map(toolApprovalView),
     }));
+    return;
+  }
+
+  if (req.method === 'PATCH' && url.pathname === '/api/inference-settings') {
+    if (!requireJsonContentType(req, res)) return;
+    const settings = parseInferenceSettings(state, await readJson(req));
+    if (!settings) {
+      res.statusCode = 400;
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ error: 'unsupported provider, model, or reasoning effort' }));
+      return;
+    }
+    state.defaultInferenceSettings = settings;
+    pushEvent(state, 'inference.default.updated', { settings });
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify({ settings }));
     return;
   }
 
@@ -1038,6 +1101,7 @@ async function handle(state: ServerState, req: IncomingMessage, res: ServerRespo
       messages: [],
       createdAt: now,
       colorIndex: (seq - 1) % 8,
+      inferenceSettings: kind === 'thread' ? snapshotDefaultInferenceSettings(state) : undefined,
     };
     state.liveThreads.set(threadId, thread);
     writeLiveSession(state);
@@ -1062,6 +1126,38 @@ async function handle(state: ServerState, req: IncomingMessage, res: ServerRespo
     res.end(JSON.stringify({ threadId, kind }));
 
     runStreamReply(state, threadId, agent, body.message ?? '', { recordUser: false });
+    return;
+  }
+
+  const inferenceSettingsMatch = url.pathname.match(/^\/api\/threads\/([^/]+)\/inference-settings$/);
+  if (req.method === 'PATCH' && inferenceSettingsMatch) {
+    if (guardApplying(state, res)) return;
+    if (!requireJsonContentType(req, res)) return;
+    const threadId = inferenceSettingsMatch[1]!;
+    const thread = state.liveThreads.get(threadId);
+    const agent = state.agents.get(threadId);
+    if (!thread || thread.kind !== 'thread' || thread.status !== 'open' || !agent) {
+      res.statusCode = 404;
+      res.end('thread not found');
+      return;
+    }
+    const settings = parseInferenceSettings(state, await readJson(req));
+    if (!settings) {
+      res.statusCode = 400;
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ error: 'unsupported provider, model, or reasoning effort' }));
+      return;
+    }
+    thread.inferenceSettings = settings;
+    agent.setInferenceSettings?.(settings);
+    writeLiveSession(state);
+    const documentPath = threadDocumentPath(state, thread);
+    pushDocumentEvent(state, 'thread.updated', documentPath, {
+      threadId,
+      thread: structuredClone(thread),
+    });
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify({ settings }));
     return;
   }
 
@@ -1254,6 +1350,7 @@ async function handle(state: ServerState, req: IncomingMessage, res: ServerRespo
       messages: [{ role: 'user', text: message, ts: now }],
       createdAt: now,
       colorIndex: (seq - 1) % 8,
+      inferenceSettings: to === 'thread' ? snapshotDefaultInferenceSettings(state) : undefined,
     };
     state.liveThreads.set(threadId, thread);
     state.highlights.delete(id);
@@ -1594,6 +1691,7 @@ async function handle(state: ServerState, req: IncomingMessage, res: ServerRespo
       if (agent?.close) await agent.close().catch(() => {});
       state.agents.delete(threadId);
       thread.kind = 'note';
+      thread.inferenceSettings = undefined;
       thread.messages = [{ role: 'user', text: collapsedText, ts: new Date().toISOString() }];
       writeLiveSession(state);
       pushDocumentEvent(state, 'thread.updated', documentPath, { threadId, thread: structuredClone(thread) });
@@ -1605,6 +1703,7 @@ async function handle(state: ServerState, req: IncomingMessage, res: ServerRespo
     // note → thread: keep the note's first user message as the seed turn.
     const noteText = thread.messages[0]?.text ?? '';
     thread.kind = 'thread';
+    thread.inferenceSettings = snapshotDefaultInferenceSettings(state);
     const agent = createThreadAgent(state, thread);
     state.agents.set(threadId, agent);
     writeLiveSession(state);
@@ -2412,6 +2511,13 @@ if (isMainModule(import.meta.url)) {
   const sessionDir = process.env.IND_SESSION_DIR!;
   const staticDir = process.env.IND_STATIC_DIR;
   const agentMode = resolveAgentMode(process.env.IND_AGENT);
+  const agentCwd = process.env.IND_AGENT_CWD || process.cwd();
+  const inferenceCatalog = agentMode === 'codex'
+    ? await discoverCodexInferenceCatalog({ cwd: agentCwd })
+    : undefined;
+  const inheritedInferenceSettings = agentMode === 'codex'
+    ? readCodexSessionInferenceSettings(mainJsonl)
+    : undefined;
   const { port, close } = await createServer({
     docPath: doc,
     mainJsonlPath: mainJsonl,
@@ -2420,8 +2526,10 @@ if (isMainModule(import.meta.url)) {
     sessionDir,
     staticDir,
     projectRoot: process.env.IND_AGENT_CWD,
+    inferenceCatalog,
+    initialInferenceSettings: inheritedInferenceSettings,
     agentFactory: agentMode === 'codex'
-      ? codexAgentFactory({ cwd: process.env.IND_AGENT_CWD || process.cwd() })
+      ? codexAgentFactory({ cwd: agentCwd })
       : sdkAgentFactory(),
   });
   const url = `http://127.0.0.1:${port}/`;
