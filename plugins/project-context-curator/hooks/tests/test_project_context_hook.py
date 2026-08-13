@@ -111,6 +111,12 @@ def test_session_start_emits_context(tmp_path: Path):
     assert "not Git-initialized" in text
     assert "no local-vs-versioned question is needed" in text
     assert "Updater script:" in text
+    assert "Search command:" in text
+    assert "Update command:" in text
+    assert "read the index and its topical index" in text
+    assert "run the updater search command with 1–3 distinctive task terms" in text
+    assert "open only the matching generated sections" in text
+    assert "fall back to rg against docs/context/context.json" in text
 
 
 def test_session_start_uses_main_repo_context_from_linked_worktree(tmp_path: Path):
@@ -130,6 +136,33 @@ def test_session_start_uses_main_repo_context_from_linked_worktree(tmp_path: Pat
     assert "Existing context counts: 1 terms, 0 components, 0 patterns, 0 open questions." in text
     assert f"Context index: {repo.resolve() / 'docs' / 'context' / 'index.md'}" in text
     assert str(linked.resolve() / "docs" / "context") not in text
+
+
+def test_session_start_migrates_context_and_refreshes_views(tmp_path: Path) -> None:
+    write_context(tmp_path)
+
+    run_hook("session-start", {"cwd": str(tmp_path)})
+    data = json.loads((tmp_path / "docs/context/context.json").read_text(encoding="utf-8"))
+    index = (tmp_path / "docs/context/index.md").read_text(encoding="utf-8")
+
+    assert (data["schema_version"], "## Topical Index" in index, "ACS" in index) == (
+        1,
+        True,
+        True,
+    )
+
+
+def test_context_update_failure_is_non_blocking_and_logged(tmp_path: Path) -> None:
+    module = load_hook_module()
+    write_context(tmp_path)
+    module.LOG_PATH = tmp_path / "hook.log"
+
+    warning = module.update_existing_context(tmp_path, tmp_path / "missing-updater.py")
+
+    assert (
+        warning.startswith("Automatic project context update failed:"),
+        "Automatic project context update failed:" in module.LOG_PATH.read_text(encoding="utf-8"),
+    ) == (True, True)
 
 
 def test_hooks_are_silent_when_context_is_ignored(tmp_path: Path):

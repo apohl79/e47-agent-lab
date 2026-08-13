@@ -8,9 +8,10 @@ import json
 import re
 import subprocess
 import sys
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 SCHEMA_VERSION = 1
@@ -40,6 +41,47 @@ REMOVE_TARGETS = {
     "questions": ("open_questions", "question", "question"),
     "open-question": ("open_questions", "question", "question"),
     "open-questions": ("open_questions", "question", "question"),
+}
+
+SearchSpec = tuple[str, str, str, str, tuple[str, ...]]
+SearchResult = tuple[int, str, str, str, str, tuple[str, ...]]
+
+SEARCH_SPECS: tuple[SearchSpec, ...] = (
+    (
+        "term",
+        "terms",
+        "term",
+        "definition",
+        ("term", "kind", "definition", "scope", "aliases", "notes"),
+    ),
+    (
+        "component",
+        "components",
+        "name",
+        "responsibility",
+        ("name", "responsibility", "paths", "interfaces", "notes"),
+    ),
+    (
+        "pattern",
+        "patterns",
+        "name",
+        "summary",
+        ("name", "summary", "applies_to", "notes"),
+    ),
+    (
+        "question",
+        "open_questions",
+        "question",
+        "context",
+        ("question", "status", "context", "answer"),
+    ),
+)
+
+SEARCH_FILES = {
+    "term": "docs/context/glossary.md",
+    "component": "docs/context/components.md",
+    "pattern": "docs/context/architecture.md",
+    "question": "docs/context/inbox.md",
 }
 
 
@@ -203,6 +245,71 @@ def default_context() -> dict[str, Any]:
     }
 
 
+Migration = Callable[[dict[str, Any]], dict[str, Any]]
+
+
+def migrate_v0_to_v1(data: dict[str, Any]) -> dict[str, Any]:
+    migrated: dict[str, Any] = {
+        "schema_version": 1,
+        "terms": [],
+        "components": [],
+        "patterns": [],
+        "open_questions": [],
+    }
+    migrated.update(deepcopy(data))
+    policy = migrated.get("storage_policy")
+    if isinstance(policy, dict) and "gitignore_docs_context" in policy:
+        updated_policy = dict(policy)
+        updated_policy["git_exclude_docs_context"] = updated_policy.pop(
+            "gitignore_docs_context"
+        )
+        migrated["storage_policy"] = updated_policy
+    migrated["schema_version"] = 1
+    return migrated
+
+
+MIGRATIONS: dict[int, Migration] = {
+    0: migrate_v0_to_v1,
+}
+
+
+def context_schema_version(data: dict[str, Any]) -> int:
+    version = data.get("schema_version", 0)
+    if isinstance(version, bool) or not isinstance(version, int) or version < 0:
+        raise SystemExit(
+            f"Invalid context schema_version {version!r}: expected a non-negative integer."
+        )
+    if version > SCHEMA_VERSION:
+        raise SystemExit(
+            f"Unsupported context schema_version {version}; this updater supports up to "
+            f"schema_version {SCHEMA_VERSION}. Upgrade Project Context Curator first."
+        )
+    return version
+
+
+def migrate_context(data: dict[str, Any]) -> tuple[dict[str, Any], tuple[str, ...]]:
+    version = context_schema_version(data)
+    migrated = deepcopy(data)
+    applied: list[str] = []
+    while version < SCHEMA_VERSION:
+        migration = MIGRATIONS.get(version)
+        if migration is None:
+            raise SystemExit(
+                f"No migration registered from schema_version {version} to "
+                f"schema_version {version + 1}."
+            )
+        migrated = migration(migrated)
+        next_version = context_schema_version(migrated)
+        if next_version != version + 1:
+            raise SystemExit(
+                f"Migration from schema_version {version} produced schema_version "
+                f"{next_version}; expected {version + 1}."
+            )
+        applied.append(f"{version} -> {next_version}")
+        version = next_version
+    return migrated, tuple(applied)
+
+
 def storage_policy(
     visibility: str,
     source: str,
@@ -235,10 +342,12 @@ def storage_policy(
     }
 
 
-def load_context(repo: Path) -> dict[str, Any]:
+def load_context_with_migrations(
+    repo: Path,
+) -> tuple[dict[str, Any], tuple[str, ...]]:
     path = context_path(repo)
     if not path.exists():
-        return default_context()
+        return default_context(), ()
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
@@ -247,12 +356,18 @@ def load_context(repo: Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise SystemExit(f"Invalid context root in {path}: expected object")
 
+    migrated, applied = migrate_context(data)
     merged = default_context()
-    merged.update(data)
+    merged.update(migrated)
     for key in ("terms", "components", "patterns", "open_questions"):
         if not isinstance(merged.get(key), list):
             raise SystemExit(f"Invalid context field {key}: expected list")
-    return merged
+    return merged, applied
+
+
+def load_context(repo: Path) -> dict[str, Any]:
+    data, _ = load_context_with_migrations(repo)
+    return data
 
 
 def require_initialized_context(repo: Path) -> None:
@@ -514,6 +629,18 @@ def init_context(args: argparse.Namespace) -> None:
         )
 
 
+def update_context(args: argparse.Namespace) -> None:
+    repo = context_repo(args.repo)
+    require_initialized_context(repo)
+    data, migrations = load_context_with_migrations(repo)
+    save_context(repo, data)
+    applied = ", ".join(migrations) if migrations else "none"
+    print(f"Updated project context: {repo / CONTEXT_DIR}")
+    print(f"Schema version: {SCHEMA_VERSION}")
+    print(f"Migrations applied: {applied}")
+    print("Generated views: refreshed")
+
+
 def ignore_context(args: argparse.Namespace) -> None:
     repo = context_repo(args.repo)
     marker = ignore_marker_path(repo)
@@ -579,6 +706,66 @@ def scan_file(args: argparse.Namespace) -> None:
     scan_text(args)
 
 
+def one_line(value: Any) -> str:
+    if isinstance(value, list):
+        return " ".join(one_line(item) for item in value)
+    return " ".join(str(value or "").split()).replace("|", "\\|")
+
+
+def compact_summary(value: Any, limit: int = 180) -> str:
+    text = one_line(value)
+    return text if len(text) <= limit else f"{text[:limit - 1].rstrip()}…"
+
+
+def normalized_queries(values: list[str]) -> tuple[str, ...]:
+    queries = (one_line(value).casefold() for value in values)
+    return tuple(dict.fromkeys(query for query in queries if query))
+
+
+def context_search_results(
+    data: dict[str, Any], queries: tuple[str, ...]
+) -> list[SearchResult]:
+    results: list[SearchResult] = []
+    for kind, collection, label_key, summary_key, fields in SEARCH_SPECS:
+        for record in data[collection]:
+            haystack = "\n".join(one_line(record.get(field)) for field in fields).casefold()
+            matched = tuple(query for query in queries if query in haystack)
+            if not matched:
+                continue
+            results.append(
+                (
+                    len(matched),
+                    kind,
+                    one_line(record.get(label_key)),
+                    SEARCH_FILES[kind],
+                    one_line(record.get(summary_key)),
+                    matched,
+                )
+            )
+    return sorted(results, key=lambda result: (-result[0], result[1], result[2].casefold()))
+
+
+def search_context(args: argparse.Namespace) -> None:
+    repo = context_repo(args.repo)
+    require_initialized_context(repo)
+    queries = normalized_queries(args.query)
+    if not queries:
+        raise SystemExit("Search query must contain at least one non-blank term.")
+    if args.limit <= 0:
+        raise SystemExit("Search limit must be greater than zero.")
+
+    results = context_search_results(load_context(repo), queries)[: args.limit]
+    if not results:
+        print(f"No context matches for: {', '.join(queries)}")
+        return
+
+    for _, kind, label, path, summary, matched in results:
+        print(
+            f"{kind} | {label} | {path} | {summary} | "
+            f"matched: {', '.join(matched)}"
+        )
+
+
 def generated_header() -> str:
     return "<!-- Generated by project-context-curator. Edit docs/context/context.json via project_context.py. -->\n\n"
 
@@ -586,6 +773,86 @@ def generated_header() -> str:
 def md_escape(value: Any) -> str:
     text = str(value)
     return text.replace("|", "\\|").replace("\n", "<br>")
+
+
+def markdown_anchor(value: Any) -> str:
+    text = re.sub(r"[^\w\s-]", "", str(value).casefold())
+    return re.sub(r"[\s-]+", "-", text).strip("-")
+
+
+def render_topical_index(data: dict[str, Any]) -> list[str]:
+    lines = [
+        "## Retrieval",
+        "",
+        "1. Scan the topical index below for task-specific names and concepts.",
+        (
+            "2. Run `project_context.py search --query \"<task term>\"` with the updater "
+            "path reported by the active session."
+        ),
+        (
+            "3. Read only the matching generated sections; if nothing matches, search "
+            "`context.json` with `rg -n -i`."
+        ),
+        "",
+        "## Topical Index",
+        "",
+        "### Terms and APIs",
+        "",
+    ]
+    if data["terms"]:
+        for term in data["terms"]:
+            details = "; ".join(
+                value
+                for value in (
+                    one_line(term.get("kind")),
+                    f"scope: {one_line(term.get('scope'))}" if term.get("scope") else "",
+                )
+                if value
+            )
+            suffix = f" ({details})" if details else ""
+            lines.append(
+                f"- [{one_line(term.get('term'))}](glossary.md){suffix} — "
+                f"{compact_summary(term.get('definition'))}"
+            )
+    else:
+        lines.append("- None recorded.")
+
+    lines.extend(["", "### Components", ""])
+    if data["components"]:
+        for component in data["components"]:
+            name = one_line(component.get("name"))
+            lines.append(
+                f"- [{name}](components.md#{markdown_anchor(name)}) — "
+                f"{compact_summary(component.get('responsibility'))}"
+            )
+    else:
+        lines.append("- None recorded.")
+
+    lines.extend(["", "### Architecture and conventions", ""])
+    if data["patterns"]:
+        for pattern in data["patterns"]:
+            name = one_line(pattern.get("name"))
+            lines.append(
+                f"- [{name}](architecture.md#{markdown_anchor(name)}) — "
+                f"{compact_summary(pattern.get('summary'))}"
+            )
+    else:
+        lines.append("- None recorded.")
+
+    lines.extend(["", "### Open questions", ""])
+    if data["open_questions"]:
+        for question in data["open_questions"]:
+            label = one_line(question.get("question"))
+            context = compact_summary(question.get("context") or question.get("answer"))
+            suffix = f" — {context}" if context else ""
+            lines.append(
+                f"- [{one_line(question.get('status', 'open'))}] "
+                f"[{label}](inbox.md){suffix}"
+            )
+    else:
+        lines.append("- None recorded.")
+    lines.append("")
+    return lines
 
 
 def render_markdown(repo: Path, data: dict[str, Any]) -> None:
@@ -638,6 +905,7 @@ def render_index(data: dict[str, Any]) -> str:
             "",
         ]
     )
+    lines.extend(render_topical_index(data))
     return "\n".join(lines)
 
 
@@ -792,6 +1060,13 @@ def build_parser() -> argparse.ArgumentParser:
     add_repo(ignore_parser)
     ignore_parser.set_defaults(func=ignore_context)
 
+    update_parser = subparsers.add_parser(
+        "update",
+        help="Apply schema migrations and regenerate all context views",
+    )
+    add_repo(update_parser)
+    update_parser.set_defaults(func=update_context)
+
     term_parser = subparsers.add_parser("add-term", help="Add or update a glossary term")
     add_repo(term_parser)
     term_parser.add_argument("--term", required=True)
@@ -855,6 +1130,20 @@ def build_parser() -> argparse.ArgumentParser:
     add_repo(scan_file_parser)
     scan_file_parser.add_argument("--file", type=Path, required=True)
     scan_file_parser.set_defaults(func=scan_file)
+
+    search_parser = subparsers.add_parser(
+        "search",
+        help="Search durable context by one or more task terms",
+    )
+    add_repo(search_parser)
+    search_parser.add_argument(
+        "--query",
+        action="append",
+        required=True,
+        help="Case-insensitive term or phrase; repeat to rank records matching more terms first",
+    )
+    search_parser.add_argument("--limit", type=int, default=20)
+    search_parser.set_defaults(func=search_context)
 
     return parser
 

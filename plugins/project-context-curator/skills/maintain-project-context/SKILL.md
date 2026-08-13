@@ -15,6 +15,7 @@ Use text files as the canonical store:
 
 - Canonical machine-readable file: `docs/context/context.json`
 - Generated human-readable files: `docs/context/index.md`, `glossary.md`, `components.md`, `architecture.md`, and `inbox.md`
+- `index.md` includes the retrieval workflow and a compact topical index generated from every canonical record.
 - Opt-out marker: `.no-project-context`
 - Initialization records a user-confirmed storage policy in `context.json`.
 - If the user chooses local context in a Git repository, the updater adds `docs/context/` to the target repo's `.git/info/exclude`.
@@ -27,8 +28,11 @@ Use the updater script for writes:
 
 ```bash
 python3 <skill-dir>/scripts/project_context.py init --repo . --visibility local
+python3 <skill-dir>/scripts/project_context.py update --repo .
 python3 <skill-dir>/scripts/project_context.py ignore --repo .
 ```
+
+For initialized repositories, the session-start hook runs `update` before loading context. The command applies each registered schema migration in order and regenerates all Markdown views. Update failures do not block session start; the hook reports the failure and writes it to its log.
 
 Use `python3 <skill-dir>/scripts/project_context.py --help` and
 `python3 <skill-dir>/scripts/project_context.py <command> --help` for current command syntax.
@@ -39,7 +43,19 @@ Read `references/context-schema.md` before changing the schema or adding new rec
 
 1. At the start of feature work, research, planning, or review, check whether `docs/context/index.md` exists.
    - In a Git linked worktree, resolve `docs/context/index.md` against the primary checkout path reported by the hook/updater.
-2. If it exists, read it and any linked context file relevant to the task.
+2. If it exists, retrieve context in this order:
+   1. Read `index.md`, including its topical index.
+   2. Derive one to three distinctive project-specific terms from the task, relevant paths, or named components. Avoid broad words such as `service`, `feature`, or `test`.
+   3. Run the updater search command with each term supplied as `--query`. Search is case-insensitive, matches canonical record metadata, and ranks records that match more query terms first:
+
+      ```bash
+      python3 <skill-dir>/scripts/project_context.py search --repo <repo> \
+        --query "<task term>" --query "<another term>"
+      ```
+
+   4. Read only the matching generated sections or files reported by search.
+   5. If search returns no matches, fall back to `rg -n -i '<term1>|<term2>' docs/context/context.json docs/context/*.md`.
+   6. Load an entire large generated view only when the task itself is broad enough to require it.
 3. If `.no-project-context` exists at the repository root, do not initialize context and do not ask again.
 4. If `docs/context/index.md` does not exist, ask one concise question before executing ordinary feature, research, planning, or review work: whether Project Context Curator should be initialized for this project.
    - If the user says no, run `scripts/project_context.py ignore --repo <repo>` and continue without project context.
@@ -80,6 +96,14 @@ Avoid asking about obvious language/framework concepts, transient implementation
 
 ## Update Commands
 
+Refresh an initialized context after a plugin upgrade or apply pending schema migrations manually:
+
+```bash
+python3 <skill-dir>/scripts/project_context.py update --repo <repo>
+```
+
+`update` is idempotent. It preserves canonical records, applies sequential migrations up to the updater's supported schema version, and regenerates every derived Markdown view. It rejects malformed or newer schema versions without rewriting `context.json`.
+
 Initialize context files after asking the user whether Project Context Curator should be enabled and after reading the repository README/CLAUDE.md/AGENTS.md, top-level layout, and main manifests. Run `init` together with the `add-component`/`add-term`/`add-pattern` commands derived from that analysis, in the same turn; an init left at all-zero counts means the bootstrap was skipped. For Git repositories, ask the user to choose one visibility mode:
 
 ```bash
@@ -107,6 +131,15 @@ python3 <skill-dir>/scripts/project_context.py add-term --help
 ```
 
 Use scan output as hints only. Do not rely on deterministic term detection for decisions; confirm meanings through repo evidence or user clarification before writing them as facts.
+
+Search existing context before opening large generated views:
+
+```bash
+python3 <skill-dir>/scripts/project_context.py search --repo <repo> \
+  --query "<task term>" --query "<another term>"
+```
+
+Search is read-only. Repeating `--query` broadens results and ranks entries matching more supplied terms first; `--limit` defaults to 20.
 
 ## Rules
 
