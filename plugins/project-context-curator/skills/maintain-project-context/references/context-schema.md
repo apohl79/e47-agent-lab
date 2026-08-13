@@ -1,6 +1,19 @@
 # Project Context Schema
 
-`docs/context/context.json` is the canonical text store. Markdown files in the same directory are generated views for humans and agents. Initialization records whether context is local-only or versioned in Git. `.no-project-context` disables initialization for a repository when the user declines project context.
+`docs/context/context.json` is the canonical text store. Markdown files in the same directory are generated views for humans and agents; `index.md` includes a compact topical index of every record for task-term retrieval. Initialization records whether context is local-only or versioned in Git. `.no-project-context` disables initialization for a repository when the user declines project context.
+
+## Schema Evolution
+
+`schema_version` is a non-negative integer. The updater owns an ordered migration registry keyed by the source version; every migration must produce exactly the next version. Missing `schema_version` is legacy version `0`.
+
+`project_context.py update --repo <repo>` applies all pending migrations and regenerates every Markdown view. The session-start hook runs this command automatically for initialized contexts. A malformed version, missing migration step, or context written by a newer schema is rejected before canonical JSON is rewritten.
+
+When changing the canonical schema:
+
+1. Increment `SCHEMA_VERSION` by one.
+2. Add one migration from the previous version to the new version.
+3. Add migration, idempotent-update, and unsupported-future-version tests.
+4. Update this reference and generated-view behavior as needed.
 
 ## Root
 

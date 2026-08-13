@@ -163,6 +163,40 @@ def context_counts(data: dict[str, Any]) -> str:
     )
 
 
+def log_message(message: str) -> None:
+    try:
+        LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with LOG_PATH.open("a", encoding="utf-8") as handle:
+            handle.write(message.rstrip() + "\n")
+    except OSError:
+        pass
+
+
+def update_existing_context(repo: Path, script: Path) -> str:
+    if not (repo / CONTEXT_FILE).exists():
+        return ""
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(script), "update", "--repo", str(repo)],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        detail = str(exc)
+    else:
+        if proc.returncode == 0:
+            return ""
+        detail = " ".join((proc.stderr or proc.stdout).split()) or (
+            f"updater exited with status {proc.returncode}"
+        )
+    warning = f"Automatic project context update failed: {detail}"
+    log_message(warning)
+    return warning
+
+
 def session_start(payload: dict[str, Any]) -> None:
     cwd = cwd_from_payload(payload)
     current_worktree = worktree_root(cwd)
@@ -170,9 +204,10 @@ def session_start(payload: dict[str, Any]) -> None:
     if context_ignored(repo):
         return
 
+    script = updater_script()
+    update_warning = update_existing_context(repo, script)
     data = load_context(repo)
     index = repo / CONTEXT_INDEX
-    script = updater_script()
     git_initialized = is_git_initialized(repo)
 
     lines = [
@@ -182,6 +217,13 @@ def session_start(payload: dict[str, Any]) -> None:
         (
             "For feature work, research, planning, or review: use durable project context. "
             "If docs/context/index.md exists, read it before making project-specific claims."
+        ),
+        (
+            "Retrieval order: read the index and its topical index, derive 1–3 distinctive "
+            "project-specific terms from the task, run the updater search command with 1–3 "
+            "distinctive task terms, then open only the matching generated sections. If search "
+            "returns nothing, fall back to rg against docs/context/context.json and the generated "
+            "Markdown views. Load an entire large view only when the task itself is broad."
         ),
         (
             "Capturing durable project-level insight is part of the work, not a follow-up — "
@@ -208,8 +250,15 @@ def session_start(payload: dict[str, Any]) -> None:
             "counts (or record an explicit open question if the repository is genuinely empty)."
         ),
         f"Updater script: python3 {script} <command> --repo {repo}",
+        f"Update command: python3 {script} update --repo {repo}",
+        (
+            f"Search command: python3 {script} search --repo {repo} "
+            '--query "<task term>" [--query "<another term>"]'
+        ),
         "Do not guess definitions. Do not store secrets or transient debugging details.",
     ]
+    if update_warning:
+        lines.insert(2, update_warning)
     if current_worktree != repo:
         lines.insert(2, f"Current worktree: {current_worktree}")
 
@@ -237,13 +286,7 @@ def session_start(payload: dict[str, Any]) -> None:
 
 
 def log_exception() -> None:
-    try:
-        LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with LOG_PATH.open("a", encoding="utf-8") as handle:
-            handle.write(traceback.format_exc())
-            handle.write("\n")
-    except OSError:
-        pass
+    log_message(traceback.format_exc())
 
 
 def main(argv: list[str]) -> int:
