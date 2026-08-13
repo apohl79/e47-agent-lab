@@ -39,7 +39,7 @@ import { installShiftArrowTextareaSelection } from './textarea-selection.ts';
 import { updateApplyCount } from './apply-count.ts';
 import { HOVER_ACTION_DISMISS_MS, SELECTION_ACTION_DISMISS_MS } from './action-hover-timing.ts';
 import { toolApprovalModalOptions, type ToolApprovalPrompt } from './tool-approval.ts';
-import { createInferenceSelectors } from './inference-selectors.ts';
+import { createInferenceSelectors, setInferenceSelectorsDisabled } from './inference-selectors.ts';
 
 // Dedicated marked instance for rendering thread messages. GFM on so tables +
 // fenced code work. `breaks: true` so assistant single-newlines survive as
@@ -1686,9 +1686,15 @@ function showStreamingPlaceholder(card: HTMLElement, threadId?: string): void {
   renderStreamingMessage(streamEl);
 }
 
+function setThreadInferenceDisabled(card: HTMLElement, disabled: boolean): void {
+  const selectors = card.querySelector<HTMLElement>('.thread-inference .inference-selectors');
+  if (selectors) setInferenceSelectorsDisabled(selectors, disabled);
+}
+
 function startTurnHeartbeat(card: HTMLElement, threadId: string): void {
   const turn = getTurnState(threadId);
   turn.active = true;
+  setThreadInferenceDisabled(card, true);
   if (!turn.startedAt) turn.startedAt = Date.now();
   if (turn.heartbeat !== null) window.clearInterval(turn.heartbeat);
   const update = (): void => {
@@ -1709,6 +1715,7 @@ function stopTurnHeartbeat(threadId: string, stream?: HTMLElement): void {
   if (turn.heartbeat !== null) window.clearInterval(turn.heartbeat);
   turn.heartbeat = null;
   const card = document.getElementById(`thread-${threadId}`);
+  if (card) setThreadInferenceDisabled(card, false);
   const activeStream = stream ?? card?.querySelector<HTMLElement>('.streaming');
   if (activeStream) ensureInterruptButton(activeStream);
   if (activeStream) delete activeStream.dataset.heartbeatStatus;
@@ -1899,7 +1906,7 @@ function renderThread(thread: Thread): void {
     </div>`;
   const inferenceHost = card.querySelector<HTMLElement>('.thread-inference');
   if (inferenceHost && state.inferenceCatalog && thread.inferenceSettings) {
-    inferenceHost.appendChild(createInferenceSelectors({
+    const selectors = createInferenceSelectors({
       catalog: state.inferenceCatalog,
       settings: thread.inferenceSettings,
       label: `Thread ${thread.id} inference`,
@@ -1911,7 +1918,9 @@ function renderThread(thread: Thread): void {
         card!,
         `Model change failed: ${error instanceof Error ? error.message : String(error)}`,
       ),
-    }));
+    });
+    setInferenceSelectorsDisabled(selectors, getTurnState(thread.id).active);
+    inferenceHost.appendChild(selectors);
   } else {
     inferenceHost?.remove();
   }
@@ -2282,6 +2291,7 @@ function onDelta(evt: { threadId: string; delta: string }): void {
   }
   const turn = getTurnState(evt.threadId);
   turn.active = true;
+  setThreadInferenceDisabled(card, true);
   if (!turn.startedAt) turn.startedAt = Date.now();
   // Accumulate the raw markdown in a dataset attr and re-render on every
   // delta. marked tolerates half-finished markdown (unclosed fences, dangling
@@ -2302,6 +2312,7 @@ function onStatus(evt: { threadId: string; status: string | null }): void {
   }
   const turn = getTurnState(evt.threadId);
   turn.active = true;
+  setThreadInferenceDisabled(card, true);
   if (!turn.startedAt) turn.startedAt = Date.now();
   if (evt.status && evt.status.trim()) stream.dataset.agentStatus = evt.status;
   else delete stream.dataset.agentStatus;

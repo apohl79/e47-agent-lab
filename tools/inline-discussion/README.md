@@ -85,8 +85,9 @@ inline-discussion wait  --session-dir <path> [--idle-exit-seconds <seconds>]
   provider/model and reasoning selectors in the header affect only threads
   created afterward. Each thread snapshots its own settings and its selectors
   affect subsequent turns in that thread, without changing an already-running
-  turn. Switching providers replaces the backing app-server thread after the
-  active turn finishes and carries the persisted discussion history forward.
+  turn. A thread's selectors are disabled while its turn is active. Switching
+  providers replaces the backing app-server thread after the active turn
+  finishes and carries the persisted discussion history forward.
 
 ## HTTP surface (relevant subset)
 
