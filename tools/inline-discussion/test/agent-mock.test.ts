@@ -175,6 +175,27 @@ test('codexAgentFactory applies explicit inference settings to new and subsequen
   }
 });
 
+test('codexAgentFactory keeps retryable provider errors as status and exposes final details', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ind-codex-provider-errors-'));
+  const fakeServer = join(root, 'fake-codex-provider-errors.mjs');
+  writeFileSync(fakeServer, fakeCodexProviderErrorAppServer());
+  const agent = codexAgentFactory({ command: process.execPath, args: [fakeServer], cwd: root })({
+    systemPreamble: 'preamble',
+    tools: [],
+  });
+  try {
+    assert.deepEqual(await collectChunkLabels(agent.send('retry')), [
+      'status:Reconnecting... 1/5',
+      'status:',
+      'delta:recovered',
+      'done:recovered',
+    ]);
+    await assert.rejects(() => collectChunkLabels(agent.send('fail')), /Request failed: provider unavailable/);
+  } finally {
+    await agent.close?.();
+  }
+});
+
 test('discoverCodexInferenceCatalog uses the app-server runtime default', async () => {
   const root = mkdtempSync(join(tmpdir(), 'ind-codex-inference-catalog-'));
   const fakeServer = join(root, 'fake-codex-catalog-server.mjs');
@@ -309,6 +330,33 @@ rl.on('line', (line) => {
     return;
   }
   fail(msg.id, 'unexpected method: ' + msg.method);
+});
+`;
+}
+
+function fakeCodexProviderErrorAppServer(): string {
+  return `
+import readline from 'node:readline';
+const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+let turnSeq = 0;
+function send(message) { console.log(JSON.stringify(message)); }
+rl.on('line', (line) => {
+  const msg = JSON.parse(line);
+  if (msg.method === 'initialize') return send({ id: msg.id, result: {} });
+  if (msg.method === 'initialized') return;
+  if (msg.method === 'thread/start') return send({ id: msg.id, result: { thread: { id: 'thread-1' } } });
+  if (msg.method !== 'turn/start') return;
+  turnSeq += 1;
+  const turnId = 'turn-' + turnSeq;
+  send({ id: msg.id, result: {} });
+  send({ method: 'turn/started', params: { threadId: 'thread-1', turn: { id: turnId, status: 'inProgress' } } });
+  if (turnSeq === 1) {
+    send({ method: 'error', params: { error: { message: 'Reconnecting... 1/5', additionalDetails: 'temporary' }, willRetry: true, threadId: 'thread-1', turnId } });
+    send({ method: 'item/agentMessage/delta', params: { threadId: 'thread-1', turnId, itemId: 'item-1', delta: 'recovered' } });
+    send({ method: 'turn/completed', params: { threadId: 'thread-1', turn: { id: turnId, status: 'completed' } } });
+    return;
+  }
+  send({ method: 'error', params: { error: { message: 'Request failed', additionalDetails: 'provider unavailable' }, willRetry: false, threadId: 'thread-1', turnId } });
 });
 `;
 }

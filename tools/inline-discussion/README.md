@@ -79,11 +79,14 @@ inline-discussion wait  --session-dir <path> [--idle-exit-seconds <seconds>]
   It uses the same protocol as handoff mode and works with the original Codex
   app-server; `--socket` overrides the default control socket path.
 - Codex thread inference is explicit. A host-launched discussion initializes
-  its page defaults from the main session's provider, model, and reasoning
-  effort; standalone CLI use initializes them from the Codex app-server
-  defaults. The header selectors affect only threads created afterward. Each
-  thread snapshots its own settings and its selectors affect subsequent turns
-  in that thread, without changing an already-running turn.
+  its page defaults from the latest main-session model and reasoning effort,
+  resolving the provider from the Codex app-server model catalog; standalone
+  CLI use initializes them from the app-server defaults. The combined
+  provider/model and reasoning selectors in the header affect only threads
+  created afterward. Each thread snapshots its own settings and its selectors
+  affect subsequent turns in that thread, without changing an already-running
+  turn. Switching providers replaces the backing app-server thread after the
+  active turn finishes and carries the persisted discussion history forward.
 
 ## HTTP surface (relevant subset)
 

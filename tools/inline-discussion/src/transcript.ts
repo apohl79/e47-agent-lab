@@ -1,6 +1,6 @@
 // src/transcript.ts
 import { existsSync, readFileSync } from 'node:fs';
-import type { InferenceSettings } from './types.ts';
+import type { InferenceCatalog, InferenceSettings } from './types.ts';
 
 export interface JsonlEntry {
   type: 'user' | 'assistant' | 'tool_use' | 'tool_result';
@@ -27,9 +27,10 @@ export function readJsonl(path: string | undefined | null): JsonlEntry[] {
 /** Read the active Codex provider/model/effort from a host session transcript. */
 export function readCodexSessionInferenceSettings(
   path: string | undefined | null,
+  catalog: InferenceCatalog,
 ): InferenceSettings | undefined {
   if (!path || !existsSync(path)) return undefined;
-  let provider: string | undefined;
+  let providerHint: string | undefined;
   let model: string | undefined;
   let reasoningEffort: string | undefined;
   for (const line of readFileSync(path, 'utf8').split('\n')) {
@@ -43,15 +44,20 @@ export function readCodexSessionInferenceSettings(
     if (!isRecord(entry) || !isRecord(entry['payload'])) continue;
     const payload = entry['payload'];
     if (entry['type'] === 'session_meta' && typeof payload['model_provider'] === 'string') {
-      provider = payload['model_provider'];
+      providerHint = payload['model_provider'];
     }
     if (entry['type'] === 'turn_context') {
       if (typeof payload['model'] === 'string') model = payload['model'];
       if (typeof payload['effort'] === 'string') reasoningEffort = payload['effort'];
     }
   }
-  return provider && model && reasoningEffort
-    ? Object.freeze({ provider, model, reasoningEffort })
+  if (!model || !reasoningEffort) return undefined;
+  const candidates = catalog.models.filter((candidate) => candidate.model === model);
+  const selected = candidates.length === 1
+    ? candidates[0]
+    : candidates.find((candidate) => candidate.provider === providerHint);
+  return selected
+    ? Object.freeze({ provider: selected.provider, model, reasoningEffort })
     : undefined;
 }
 

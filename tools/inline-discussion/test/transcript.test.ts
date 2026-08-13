@@ -5,6 +5,33 @@ import { writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readCodexSessionInferenceSettings, trimTranscript, readJsonl } from '../src/transcript.ts';
+import type { InferenceCatalog } from '../src/types.ts';
+
+const inferenceCatalog: InferenceCatalog = {
+  defaultSettings: { provider: 'openai', model: 'gpt-default', reasoningEffort: 'medium' },
+  models: [
+    {
+      provider: 'openai', model: 'gpt-current', displayName: 'GPT Current', description: '', hidden: false,
+      isDefault: true, defaultReasoningEffort: 'medium',
+      supportedReasoningEfforts: [{ reasoningEffort: 'medium', description: '' }],
+    },
+    {
+      provider: 'anthropic', model: 'claude-opus-5', displayName: 'Claude Opus 5', description: '', hidden: false,
+      isDefault: false, defaultReasoningEffort: 'high',
+      supportedReasoningEfforts: [{ reasoningEffort: 'xhigh', description: '' }],
+    },
+    {
+      provider: 'openai', model: 'shared-model', displayName: 'Shared OpenAI', description: '', hidden: false,
+      isDefault: false, defaultReasoningEffort: 'medium',
+      supportedReasoningEfforts: [{ reasoningEffort: 'medium', description: '' }],
+    },
+    {
+      provider: 'other', model: 'shared-model', displayName: 'Shared Other', description: '', hidden: false,
+      isDefault: false, defaultReasoningEffort: 'medium',
+      supportedReasoningEfforts: [{ reasoningEffort: 'medium', description: '' }],
+    },
+  ],
+};
 
 function makeFixture(): string {
   const big = 'X'.repeat(5000);
@@ -129,14 +156,48 @@ test('readCodexSessionInferenceSettings reads the latest host turn settings', ()
   const lines = [
     { type: 'session_meta', payload: { model_provider: 'openai' } },
     { type: 'turn_context', payload: { model: 'gpt-old', effort: 'medium' } },
-    { type: 'turn_context', payload: { model: 'gpt-current', effort: 'xhigh' } },
+    { type: 'turn_context', payload: { model: 'gpt-current', effort: 'medium' } },
   ];
   writeFileSync(path, lines.map((line) => JSON.stringify(line)).join('\n'));
 
-  assert.deepEqual(readCodexSessionInferenceSettings(path), {
+  assert.deepEqual(readCodexSessionInferenceSettings(path, inferenceCatalog), {
     provider: 'openai',
     model: 'gpt-current',
+    reasoningEffort: 'medium',
+  });
+});
+
+test('readCodexSessionInferenceSettings resolves a switched model through the catalog', () => {
+  const dir = join(tmpdir(), `ind-codex-settings-switched-${Date.now()}`);
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, 'codex.jsonl');
+  const lines = [
+    { type: 'session_meta', payload: { model_provider: 'openai' } },
+    { type: 'turn_context', payload: { model: 'claude-opus-5', effort: 'xhigh' } },
+  ];
+  writeFileSync(path, lines.map((line) => JSON.stringify(line)).join('\n'));
+
+  assert.deepEqual(readCodexSessionInferenceSettings(path, inferenceCatalog), {
+    provider: 'anthropic',
+    model: 'claude-opus-5',
     reasoningEffort: 'xhigh',
+  });
+});
+
+test('readCodexSessionInferenceSettings uses session provider only to disambiguate model names', () => {
+  const dir = join(tmpdir(), `ind-codex-settings-ambiguous-${Date.now()}`);
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, 'codex.jsonl');
+  const lines = [
+    { type: 'session_meta', payload: { model_provider: 'other' } },
+    { type: 'turn_context', payload: { model: 'shared-model', effort: 'medium' } },
+  ];
+  writeFileSync(path, lines.map((line) => JSON.stringify(line)).join('\n'));
+
+  assert.deepEqual(readCodexSessionInferenceSettings(path, inferenceCatalog), {
+    provider: 'other',
+    model: 'shared-model',
+    reasoningEffort: 'medium',
   });
 });
 
@@ -145,5 +206,5 @@ test('readCodexSessionInferenceSettings rejects incomplete host metadata', () =>
   mkdirSync(dir, { recursive: true });
   const path = join(dir, 'codex.jsonl');
   writeFileSync(path, JSON.stringify({ type: 'turn_context', payload: { model: 'gpt-current' } }));
-  assert.equal(readCodexSessionInferenceSettings(path), undefined);
+  assert.equal(readCodexSessionInferenceSettings(path, inferenceCatalog), undefined);
 });
