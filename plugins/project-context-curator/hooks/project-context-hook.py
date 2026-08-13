@@ -16,6 +16,7 @@ LOG_PATH = Path.home() / ".codex" / "logs" / "project-context-curator-hooks.log"
 CONTEXT_FILE = Path("docs/context/context.json")
 CONTEXT_INDEX = Path("docs/context/index.md")
 IGNORE_MARKER = Path(".no-project-context")
+DISABLED_ENV = "PROJECT_CONTEXT_CURATOR_DISABLED"
 
 
 def read_payload() -> dict[str, Any]:
@@ -290,6 +291,9 @@ def log_exception() -> None:
 
 
 def main(argv: list[str]) -> int:
+    if os.environ.get(DISABLED_ENV) == "1":
+        return 0
+
     mode = argv[1] if len(argv) > 1 else ""
     payload = read_payload()
     try:

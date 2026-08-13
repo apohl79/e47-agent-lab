@@ -7,7 +7,7 @@
           {
             "type": "command",
             "description": "Activate repository project-context curation",
-            "command": "sh -c 'exec python3 \"${CLAUDE_PLUGIN_ROOT:-.}/hooks/project-context-hook.py\" session-start'",
+            "command": "sh -c 'test \"${PROJECT_CONTEXT_CURATOR_DISABLED:-0}\" = \"1\" || exec python3 \"${CLAUDE_PLUGIN_ROOT:-.}/hooks/project-context-hook.py\" session-start'",
             "async": false,
             "timeout": 10,
             "statusMessage": "Checking project context"

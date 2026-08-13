@@ -38,6 +38,11 @@ export interface ToolApprovalDecision {
 }
 
 const THREAD_CONCLUSION_REQUEST = 'Conclude this thread now. Follow the mandatory thread role and output contract.';
+const PROJECT_CONTEXT_CURATOR_DISABLED_ENV = 'PROJECT_CONTEXT_CURATOR_DISABLED';
+
+export function discussionAgentEnvironment(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  return { ...env, [PROJECT_CONTEXT_CURATOR_DISABLED_ENV]: '1' };
+}
 
 export const THREAD_AGENT_BASE_INSTRUCTIONS = [
   'NON-NEGOTIABLE THREAD ROLE AND OUTPUT CONTRACT',
@@ -448,7 +453,7 @@ class CodexAppServerClient {
     if (this.child) return;
     const child = spawn(this.opts.command, this.opts.args, {
       cwd: this.opts.cwd,
-      env: { ...process.env, CODEX_INLINE_DISCUSSION_CHILD: '1' },
+      env: { ...discussionAgentEnvironment(), CODEX_INLINE_DISCUSSION_CHILD: '1' },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     this.child = child;
@@ -1337,6 +1342,7 @@ export function sdkAgentFactory(): AgentFactory {
 
     const options: Options = {
       systemPrompt: buildThreadAgentInstructions(systemPreamble),
+      env: discussionAgentEnvironment(),
       // Restrict available tools to the allow-list.
       tools: allowList,
       ...(mcpConfig ? { mcpServers: buildMcpServers(mcpConfig) } : {}),
