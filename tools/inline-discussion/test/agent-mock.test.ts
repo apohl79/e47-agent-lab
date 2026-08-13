@@ -86,11 +86,10 @@ test('readOnlyMcpConfigFromEnv exposes configured MCP tools for interactive appr
   });
 });
 
-test('thread agent base instructions define the read-only main-agent handoff', () => {
-  assert.match(THREAD_AGENT_BASE_INSTRUCTIONS, /read-only inline discussion thread agent/i);
-  assert.match(THREAD_AGENT_BASE_INSTRUCTIONS, /main agent/i);
-  assert.match(THREAD_AGENT_BASE_INSTRUCTIONS, /Never edit files/);
-  assert.match(THREAD_AGENT_BASE_INSTRUCTIONS, /self-contained handoff/);
+test('thread agent base instructions prohibit implementation and require a main-agent handoff', () => {
+  assert.match(THREAD_AGENT_BASE_INSTRUCTIONS, /inline discussion thread agent, not the main agent/i);
+  assert.match(THREAD_AGENT_BASE_INSTRUCTIONS, /Never apply a requested repository, discussion-document, project-context, or code change or fix/);
+  assert.match(THREAD_AGENT_BASE_INSTRUCTIONS, /Your response is the handoff to the main agent/);
 });
 
 test('codexAgentFactory streams app-server deltas and records replies', async () => {
@@ -266,7 +265,7 @@ rl.on('line', (line) => {
     if (msg.params.approvalPolicy !== 'never') return fail(msg.id, 'approval policy missing');
     if (msg.params.sandbox !== 'read-only') return fail(msg.id, 'read-only thread sandbox missing');
     if (!String(msg.params.developerInstructions).includes('preamble')) return fail(msg.id, 'developer instructions missing');
-    if (!String(msg.params.developerInstructions).includes('read-only inline discussion thread agent')) return fail(msg.id, 'thread role instructions missing');
+    if (!String(msg.params.developerInstructions).includes('inline discussion thread agent, not the main agent')) return fail(msg.id, 'thread role instructions missing');
     send({ id: msg.id, result: { thread: { id: threadId } } });
     send({ method: 'thread/started', params: { threadId } });
     return;
@@ -278,11 +277,11 @@ rl.on('line', (line) => {
     turnSeq += 1;
     const turnId = \`turn-\${turnSeq}\`;
     const text = msg.params.input?.[0]?.text ?? '';
-    const deltas = text.startsWith('Propose a ') ? ['summary'] : ['streamed ', 'codex ', 'reply'];
+    const deltas = text.startsWith('Conclude this thread now.') ? ['summary'] : ['streamed ', 'codex ', 'reply'];
     const answer = deltas.join('');
     send({ id: msg.id, result: {} });
     send({ method: 'turn/started', params: { threadId, turn: { id: turnId, status: 'inProgress' } } });
-    if (!text.startsWith('Propose a ')) {
+    if (!text.startsWith('Conclude this thread now.')) {
       send({ method: 'item/started', params: { threadId, turnId, item: { id: 'tool-1', type: 'mcpToolCall', toolName: 'Read' } } });
       send({ method: 'item/completed', params: { threadId, turnId, item: { id: 'tool-1', type: 'mcpToolCall', toolName: 'Read' } } });
     }
