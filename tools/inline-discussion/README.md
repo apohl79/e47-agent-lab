@@ -88,6 +88,13 @@ inline-discussion wait  --session-dir <path> [--idle-exit-seconds <seconds>]
   turn. A thread's selectors are disabled while its turn is active. Switching
   providers replaces the backing app-server thread after the active turn
   finishes and carries the persisted discussion history forward.
+- Thread agents are non-implementing reviewers. Their final instruction block
+  follows all transcript, history, and document context so conflicting requests
+  cannot supersede it. Every requested mutation becomes a high-level action item
+  for the main agent; the thread agent never attempts the mutation itself. The
+  sole exception is a permission-gated tool call explicitly approved in the
+  browser: that exact call may mutate external state, without granting local
+  repository, discussion-document, or project-context write access.
 
 ## HTTP surface (relevant subset)
 
