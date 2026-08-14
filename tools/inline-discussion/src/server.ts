@@ -18,6 +18,7 @@ import {
 import { createAppServerSessionBridge, type MainSessionBridge } from './main-session.ts';
 import { logDiagnostic } from './diagnostics.ts';
 import { resolvedInferenceSettings, validInferenceSettings } from './inference-settings.ts';
+import { formatDocumentAnnotations } from './document-annotations.ts';
 import {
   persistMcpToolApproval,
   readDiscussionProjectSettings,
@@ -379,7 +380,7 @@ function createThreadAgent(state: ServerState, thread: Thread): ThreadAgent {
   return state.agentFactory({
     systemPreamble: preamble,
     tools: ['Read', 'Grep', 'Glob', 'WebSearch'],
-    turnContext: buildTurnContext(state, thread),
+    turnContext: () => buildTurnContext(state, thread),
     inferenceSettings: thread.inferenceSettings,
     requestToolApproval: (request) => requestThreadToolApproval(state, thread, request),
   });
@@ -495,11 +496,13 @@ function requestThreadToolApproval(
 
 function buildTurnContext(state: ServerState, thread: Thread): string {
   const quote = thread.anchor.quote?.replace(/\s+/g, ' ').trim();
+  const documentPath = threadDocumentPath(state, thread);
   return [
-    `Document under discussion: ${threadDocumentPath(state, thread)}`,
+    `Document under discussion: ${documentPath}`,
     `Anchor block: ${thread.anchor.blockId}`,
     `Anchor excerpt: ${quote ? quote.slice(0, 500) : '(entire block)'}`,
     'Use the supplied discussion-document context before announcing repository searches.',
+    formatDocumentAnnotations(documentThreads(state, documentPath), documentArchivedThreads(state, documentPath)),
   ].join('\n');
 }
 
