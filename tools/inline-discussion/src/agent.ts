@@ -18,7 +18,7 @@ import { logDiagnostic } from './diagnostics.ts';
 export interface AgentFactoryOptions {
   systemPreamble: string;
   tools: string[]; // allow-list
-  turnContext?: string;
+  turnContext?: string | (() => string);
   inferenceSettings?: InferenceSettings;
   requestToolApproval?: (request: ToolApprovalRequest) => Promise<ToolApprovalDecision>;
 }
@@ -164,8 +164,8 @@ function buildCodexDeveloperInstructions(systemPreamble: string): string {
   return buildThreadAgentInstructions(systemPreamble);
 }
 
-export function appendTurnContext(payload: string, turnContext?: string): string {
-  const context = turnContext?.trim();
+export function appendTurnContext(payload: string, turnContext?: string | (() => string)): string {
+  const context = (typeof turnContext === 'function' ? turnContext() : turnContext)?.trim();
   if (!context) return payload;
   return [
     payload,

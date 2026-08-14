@@ -328,9 +328,7 @@ function positionNoteOverlays(): void {
     const anchor = document.querySelector<HTMLElement>(`[data-block-id="${blockId}"]`);
     if (!anchor) continue;
     const target = overlayTarget(card, anchor);
-    const maxWidth = card.classList.contains('composer-overlay')
-      ? Math.max(240, Math.min(640, window.innerWidth - 16))
-      : Math.max(240, Math.min(560, window.innerWidth - 32));
+    const maxWidth = Math.max(240, Math.min(640, window.innerWidth - 16));
     const stackKey = `${blockId}:${Math.round(target.rect.top)}:${Math.round(target.rect.bottom)}`;
     const offset = stackHeights.get(stackKey) ?? 0;
     const placement = calculateOverlayPlacement({
