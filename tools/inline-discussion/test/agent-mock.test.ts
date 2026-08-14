@@ -60,12 +60,13 @@ test('mockAgentFactory streams a scripted reply and records messages', async () 
   assert.equal(snap[1]!.role, 'assistant');
 });
 
-test('appendTurnContext makes the document and anchor explicit without replacing the query', () => {
+test('appendTurnContext makes the document and anchor explicit without duplicating the thread contract', () => {
   const payload = appendTurnContext('Explain ALT B.', 'Document under discussion: docs/sap-oem-voice-auth.md\nAnchor block: 97ed12e755');
   assert.match(payload, /^Explain ALT B\./);
   assert.match(payload, /<inline-discussion-turn-context>/);
   assert.match(payload, /docs\/sap-oem-voice-auth\.md/);
   assert.match(payload, /97ed12e755/);
+  assert.doesNotMatch(payload, /inline discussion thread agent, not the main agent/i);
 });
 
 test('readOnlyMcpConfigFromEnv exposes configured MCP tools for interactive approval', () => {
@@ -265,6 +266,7 @@ function fail(id, message) {
 rl.on('line', (line) => {
   const msg = JSON.parse(line);
   if (msg.method === 'initialize') {
+    if (msg.params.capabilities?.experimentalApi !== true) return fail(msg.id, 'experimental app-server API must be enabled');
     send({ id: msg.id, result: { userAgent: 'fake', codexHome: '.', platformFamily: 'unix', platformOs: 'macos' } });
     return;
   }
@@ -328,6 +330,14 @@ rl.on('line', (line) => {
       : { model: 'model-b', effort: 'high' };
     if (msg.params.modelProvider !== 'openai' || msg.params.model !== expected.model || msg.params.effort !== expected.effort) {
       return fail(msg.id, 'turn settings missing');
+    }
+    const collaborationMode = msg.params.collaborationMode;
+    if (collaborationMode?.mode !== 'default') return fail(msg.id, 'default collaboration mode missing');
+    if (collaborationMode.settings?.model !== expected.model || collaborationMode.settings?.reasoning_effort !== expected.effort) {
+      return fail(msg.id, 'collaboration inference settings missing');
+    }
+    if (!String(collaborationMode.settings?.developer_instructions).includes('inline discussion thread agent, not the main agent')) {
+      return fail(msg.id, 'turn developer instructions missing');
     }
     const turnId = 'turn-' + turnSeq;
     const text = expected.model + ':' + expected.effort;
