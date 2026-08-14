@@ -143,13 +143,24 @@ back into that same main session through the generic app-server protocol.
 
    **Codex active-session rule.** In legacy mode, keep this main Codex turn open after publishing the URL. The same turn owns the `inline-discussion wait` heartbeat loop, reads each signal, and handles Apply directly. Do not start `inline-discussion watch`, `codex exec`, or a second agent session for Apply. The `--hold` launcher must remain alive while the browser is open so the detached server is not reaped by the host shell. In app-server handoff mode, the `screen` session owns the launcher and this turn ends after the URL is published.
 
-   **cmux integration.** When the environment indicates a cmux session (e.g. `$CMUX_WORKSPACE_ID` or `$CMUX_BUNDLE_ID` is set, or the `cmux` CLI is available and `cmux identify` succeeds), open the discussion URL with exactly:
+   **cmux integration.** When the environment indicates a cmux session (e.g. `$CMUX_WORKSPACE_ID` or `$CMUX_BUNDLE_ID` is set, or the `cmux` CLI is available and `cmux identify` succeeds), open the discussion URL in the workspace the user is actually looking at.
+
+   `cmux browser open` defaults to `$CMUX_WORKSPACE_ID` and defaults `--focus` to `false`. The agent's shell is often in a different workspace than the user's focused surface, so the bare form can report `OK ... placement=reuse` while the browser opens in a workspace the user cannot see. Resolve the focused workspace first and open there with focus:
 
    ```bash
-   cmux browser open "<URL>"
+   cmux identify            # read .focused.workspace_ref
+   cmux browser open "<URL>" --workspace <focused-workspace-ref> --focus true
    ```
 
-   Let cmux choose the browser placement. Do not resolve a pane or workspace, record a surface reference, or close the browser tab automatically. If the command fails, fall back to echoing the URL and mention the failure briefly; do not retry with another cmux command.
+   If `cmux identify` does not report a focused workspace, fall back to `cmux browser open "<URL>" --focus true`.
+
+   Verify the tab actually loaded before telling the user it is open, using the surface ref returned by `open`:
+
+   ```bash
+   cmux browser --surface <surface-ref> get url
+   ```
+
+   Report the surface ref and the workspace it opened in. Do not close the browser tab automatically. If the command fails, fall back to echoing the URL and mention the failure briefly; do not retry with another cmux command.
 
 6. **Loop on signal files (legacy mode only).** Steps 6a–6d repeat until the user clicks Pause or Finish. App-server handoff mode has already returned control to the running main session and must not enter this loop.
    For both Codex and Claude, continue with the loop below in the current main agent turn. Codex uses the bounded heartbeat form in step 6a; Claude may use the unbounded form.
