@@ -1,12 +1,13 @@
 // src/markdown.ts
 import { marked, type Tokens, type TokensList } from 'marked';
 import { createHash } from 'node:crypto';
-import { extname } from 'node:path';
+import { dirname, extname, resolve } from 'node:path';
 import type { Block, BlockKind } from './types.ts';
 import hljs from 'highlight.js';
 import DOMPurify from 'isomorphic-dompurify';
 import { JSDOM } from 'jsdom';
 import { escapeHtml } from './html.ts';
+import { formatSourceRange, parseSourceReference } from './source-reference.ts';
 
 const KIND_MAP: Record<string, BlockKind | undefined> = {
   heading: 'heading',
@@ -52,12 +53,26 @@ export function normalizeDetailsSpacing(md: string): string {
 }
 
 export function parseDoc(markdown: string): RawParsedDoc {
-  const tokens = marked.lexer(normalizeDetailsSpacing(markdown)) as TokensList;
+  const normalizedMarkdown = normalizeDetailsSpacing(markdown);
+  const insertedNewlineOffsets = detailsSpacingInsertions(markdown);
+  const tokens = marked.lexer(normalizedMarkdown) as TokensList;
   const links = tokens.links ?? {};
   const usedIds = new Map<string, number>();
   const blocks: Block[] = [];
+  let sourceOffset = 0;
 
   for (const token of tokens) {
+    const raw = token.raw ?? '';
+    const locatedOffset = raw ? normalizedMarkdown.indexOf(raw, sourceOffset) : sourceOffset;
+    const tokenOffset = locatedOffset >= 0 ? locatedOffset : sourceOffset;
+    const sourceStartLine = originalSourceLine(normalizedMarkdown, insertedNewlineOffsets, tokenOffset);
+    const contentLength = raw.replace(/(?:\r?\n)+$/, '').length;
+    const sourceEndLine = originalSourceLine(
+      normalizedMarkdown,
+      insertedNewlineOffsets,
+      tokenOffset + contentLength,
+    );
+    sourceOffset = tokenOffset + raw.length;
     const kind = KIND_MAP[token.type];
     if (!kind) continue;
     const lang = kind === 'code' ? (token as Tokens.Code).lang ?? '' : undefined;
@@ -73,12 +88,39 @@ export function parseDoc(markdown: string): RawParsedDoc {
     blocks.push({
       id,
       kind,
-      markdown: token.raw ?? '',
+      markdown: raw,
       html: marked.parser(singleton),
+      sourceStartLine,
+      sourceEndLine,
     });
   }
 
   return { blocks, blockIds: blocks.map((b) => b.id), links };
+}
+
+function detailsSpacingInsertions(markdown: string): number[] {
+  const offsets: number[] = [];
+  const pattern = /<\/details>\n(?=[^\n])/g;
+  let normalizedOffsetShift = 0;
+  for (const match of markdown.matchAll(pattern)) {
+    offsets.push((match.index ?? 0) + match[0].length + normalizedOffsetShift);
+    normalizedOffsetShift += 1;
+  }
+  return offsets;
+}
+
+function originalSourceLine(normalizedMarkdown: string, insertedOffsets: number[], offset: number): number {
+  const insertedBeforeOffset = insertedOffsets.filter((insertedOffset) => insertedOffset < offset).length;
+  return 1 + newlineCount(normalizedMarkdown.slice(0, offset)) - insertedBeforeOffset;
+}
+
+function newlineCount(text: string): number {
+  return text.match(/\n/g)?.length ?? 0;
+}
+
+export function renderedMarkdownText(markdown: string): string {
+  const dom = new JSDOM(`<body>${marked.parse(markdown) as string}</body>`);
+  return (dom.window.document.body.textContent ?? '').trim();
 }
 
 const renderer = new marked.Renderer();
@@ -100,7 +142,7 @@ marked.use({ renderer, gfm: true, breaks: false });
 
 const SANITIZE_OPTS = {
   ADD_TAGS: ['details', 'summary', 'del', 's', 'strike'],
-  ADD_ATTR: ['data-block-id', 'data-thread-id', 'checked', 'disabled', 'type'],
+  ADD_ATTR: ['data-block-id', 'data-thread-id', 'data-source-start-line', 'data-source-end-line', 'checked', 'disabled', 'type'],
 };
 
 export interface RenderedDoc extends RawParsedDoc {
@@ -143,6 +185,8 @@ export function renderSourceFile(source: string, path: string): RenderedDoc {
       id,
       kind: 'code' as const,
       markdown: line,
+      sourceStartLine: lineNumber,
+      sourceEndLine: lineNumber,
       html: `<pre class="source-line" data-block-id="${id}"><code class="hljs language-${language ?? 'plaintext'}"><span class="source-line-number">${lineNumber}</span><span class="source-line-code">${highlighted || ' '}</span></code></pre>`,
     };
   });
@@ -155,19 +199,19 @@ export function renderDoc(markdown: string, documentPath?: string): RenderedDoc 
   const pieces = parsed.blocks.map((block) => {
     const clean = DOMPurify.sanitize(preserveInlineSemantics(block.html), SANITIZE_OPTS);
     const withDocumentAssets = documentPath
-      ? rewriteRelativeImageUrls(clean, documentPath)
+      ? rewriteRelativeDocumentUrls(clean, documentPath)
       : clean;
-    return injectBlockIdViaDom(withDocumentAssets, block.id, headingIds);
+    return injectBlockIdViaDom(withDocumentAssets, block, headingIds);
   });
   return { ...parsed, html: pieces.join('\n') };
 }
 
-function rewriteRelativeImageUrls(fragmentHtml: string, documentPath: string): string {
+function rewriteRelativeDocumentUrls(fragmentHtml: string, documentPath: string): string {
   const dom = new JSDOM(`<div id="root">${fragmentHtml}</div>`);
   const root = dom.window.document.getElementById('root')!;
   for (const image of Array.from(root.querySelectorAll<HTMLImageElement>('img[src]'))) {
     const source = image.getAttribute('src')?.trim();
-    if (!source || !isRelativeImageUrl(source)) continue;
+    if (!source || !isRelativeUrl(source)) continue;
     const hash = source.indexOf('#');
     const withoutHash = hash >= 0 ? source.slice(0, hash) : source;
     const query = withoutHash.indexOf('?');
@@ -178,11 +222,35 @@ function rewriteRelativeImageUrls(fragmentHtml: string, documentPath: string): s
       `/api/assets?documentPath=${encodeURIComponent(documentPath)}&asset=${encodeURIComponent(assetPath)}${fragment}`,
     );
   }
+  for (const anchor of Array.from(root.querySelectorAll<HTMLAnchorElement>('a[href]'))) {
+    const target = anchor.getAttribute('href')?.trim();
+    if (!target || !isRelativeUrl(target)) continue;
+    anchor.setAttribute('href', resolveRelativeLinkTarget(target, documentPath));
+  }
   return root.innerHTML;
 }
 
-function isRelativeImageUrl(source: string): boolean {
-  return !/^(?:[a-z][a-z\d+.-]*:|\/\/|\/|#)/i.test(source);
+function resolveRelativeLinkTarget(target: string, documentPath: string): string {
+  const hashIndex = target.indexOf('#');
+  const beforeHash = hashIndex >= 0 ? target.slice(0, hashIndex) : target;
+  const fragment = hashIndex >= 0 ? target.slice(hashIndex) : '';
+  const queryIndex = beforeHash.indexOf('?');
+  const pathWithRange = queryIndex >= 0 ? beforeHash.slice(0, queryIndex) : beforeHash;
+  const query = queryIndex >= 0 ? beforeHash.slice(queryIndex) : '';
+  const { pathPart, range } = parseSourceReference(pathWithRange);
+  return `${resolve(dirname(documentPath), decodeLinkPath(pathPart))}${formatSourceRange(range)}${query}${fragment}`;
+}
+
+function isRelativeUrl(source: string): boolean {
+  return !/^(?:[a-z][a-z\d+.-]*:|\/\/|\/|#|\?)/i.test(source);
+}
+
+function decodeLinkPath(path: string): string {
+  try {
+    return decodeURIComponent(path);
+  } catch {
+    return path;
+  }
 }
 
 function preserveInlineSemantics(fragmentHtml: string): string {
@@ -203,13 +271,15 @@ function hasLineThrough(style: string): boolean {
   return /(?:^|;)\s*text-decoration(?:-line)?\s*:[^;]*\bline-through\b/i.test(style);
 }
 
-function injectBlockIdViaDom(fragmentHtml: string, blockId: string, headingIds: Map<string, number>): string {
+function injectBlockIdViaDom(fragmentHtml: string, block: Block, headingIds: Map<string, number>): string {
   const dom = new JSDOM(`<div id="root">${fragmentHtml}</div>`);
   const root = dom.window.document.getElementById('root')!;
   for (const node of Array.from(root.childNodes)) {
     if (node.nodeType === 1 /* ELEMENT_NODE */) {
       const element = node as Element;
-      element.setAttribute('data-block-id', blockId);
+      element.setAttribute('data-block-id', block.id);
+      if (block.sourceStartLine !== undefined) element.setAttribute('data-source-start-line', String(block.sourceStartLine));
+      if (block.sourceEndLine !== undefined) element.setAttribute('data-source-end-line', String(block.sourceEndLine));
       if (/^H[1-6]$/.test(element.tagName)) {
         const baseId = slugifyHeading(element.textContent ?? '');
         const count = headingIds.get(baseId) ?? 0;

@@ -10,6 +10,7 @@ import type {
   Highlight,
   InferenceCatalog,
   InferenceSettings,
+  SourceRange,
   Thread,
 } from '../types.ts';
 import {
@@ -40,6 +41,8 @@ import { updateApplyCount } from './apply-count.ts';
 import { HOVER_ACTION_DISMISS_MS, SELECTION_ACTION_DISMISS_MS } from './action-hover-timing.ts';
 import { toolApprovalModalOptions, type ToolApprovalPrompt } from './tool-approval.ts';
 import { createInferenceSelectors, setInferenceSelectorsDisabled } from './inference-selectors.ts';
+import { focusSourceRange } from './source-navigation.ts';
+import { installLinkTargetPreview } from './link-target-preview.ts';
 
 // Dedicated marked instance for rendering thread messages. GFM on so tables +
 // fenced code work. `breaks: true` so assistant single-newlines survive as
@@ -131,6 +134,8 @@ interface Bootstrap {
   applyCount?: number;
   hasMainSession?: boolean;
   targetLine?: number | null;
+  targetRange?: SourceRange | null;
+  targetText?: string | null;
   readOnly?: boolean;
   sourceView?: boolean;
   documentPath?: string;
@@ -503,6 +508,7 @@ async function init(): Promise<void> {
   document.getElementById('pause-bottom')!.addEventListener('click', pause);
   document.getElementById('apply-top')!.addEventListener('click', onApplyClick);
   document.getElementById('apply-bottom')!.addEventListener('click', onApplyClick);
+  installLinkTargetPreview(document.body);
 
   const sourcePath = window.location.pathname === '/' ? '' : `?${new URLSearchParams({ path: window.location.pathname }).toString()}`;
   const boot = (await (await fetch(`/api/bootstrap${sourcePath}`)).json()) as Bootstrap;
@@ -524,7 +530,6 @@ async function init(): Promise<void> {
     installBlockPluses();
     installThreadQuoteSelection();
   }
-  scrollToLine(boot.targetLine);
   for (const t of boot.threads) state.threads.set(t.id, t);
   for (const id of boot.activeThreads ?? []) {
     const turn = getTurnState(id);
@@ -534,6 +539,10 @@ async function init(): Promise<void> {
   for (const h of boot.highlights ?? []) state.highlights.set(h.id, h);
   for (const t of boot.archivedThreads) state.archived.set(t.id, t);
   renderExistingThreads();
+  focusSourceRange(
+    boot.targetRange ?? (boot.targetLine ? { startLine: boot.targetLine, endLine: boot.targetLine } : null),
+    boot.targetText,
+  );
   scrollToLocationHash();
   window.addEventListener('hashchange', scrollToLocationHash);
   window.addEventListener('resize', positionNoteOverlays);
@@ -926,18 +935,18 @@ function toggleWidth(): void {
 function renderDoc(html: string): void {
   const clean = DOMPurify.sanitize(html, {
     ADD_TAGS: ['details', 'summary', 'del', 's', 'strike'] as string[],
-    ADD_ATTR: ['data-block-id', 'data-thread-id', 'checked', 'disabled', 'type'] as string[],
+    ADD_ATTR: [
+      'data-block-id',
+      'data-thread-id',
+      'data-source-start-line',
+      'data-source-end-line',
+      'checked',
+      'disabled',
+      'type',
+    ] as string[],
   });
   document.getElementById('doc')!.innerHTML = clean;
   scheduleMermaidRender();
-}
-
-function scrollToLine(line: number | null | undefined): void {
-  if (!line) return;
-  const target = document.querySelector<HTMLElement>(`[data-block-id="line-${line}"]`);
-  if (!target) return;
-  target.classList.add('source-line-target');
-  target.scrollIntoView({ block: 'center' });
 }
 
 function scrollToLocationHash(): void {

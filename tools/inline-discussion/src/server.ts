@@ -4,7 +4,8 @@ import { mkdirSync, readFileSync, writeFileSync, chmodSync, realpathSync, exists
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve, sep } from 'node:path';
-import { isMarkdownFile, isSourceFile, renderDoc, renderSourceFile } from './markdown.ts';
+import { isMarkdownFile, isSourceFile, renderDoc, renderedMarkdownText, renderSourceFile } from './markdown.ts';
+import { parseSourceReference, selectedSourceText } from './source-reference.ts';
 import { parseArchivedThreads } from './archive.ts';
 import { readCodexSessionInferenceSettings, readJsonl, trimTranscript } from './transcript.ts';
 import { appendThreadDetails, removeAllArchivedBlocks, removeArchivedBlockByIndex, removeThreadDetailsById, replaceThreadDetails } from './doc-writer.ts';
@@ -35,6 +36,7 @@ import type {
   ApplyTask,
   InferenceCatalog,
   InferenceSettings,
+  SourceRange,
 } from './types.ts';
 
 const MAX_BODY_BYTES = 256 * 1024;
@@ -209,7 +211,7 @@ export async function createServer(opts: ServerOptions): Promise<ServerHandle> {
     removeThreadsOnApply: false,
     docWatcher: null,
     docReloadTimer: null,
-    targetLine: null,
+    targetRange: null,
     shutdownOnFinish: opts.shutdownOnFinish !== false,
     hasMainSession: hasMainSession || mainSession !== null,
     mainSession,
@@ -304,7 +306,7 @@ interface ServerState {
   removeThreadsOnApply: boolean;
   docWatcher: FSWatcher | null;
   docReloadTimer: NodeJS.Timeout | null;
-  targetLine: number | null;
+  targetRange: SourceRange | null;
   // False when the launcher passed no --main-jsonl (standalone CLI use).
   // The browser hides Apply controls in this mode because Apply delegates
   // to the main host agent.
@@ -798,24 +800,27 @@ function broadcastDocumentEvent(state: ServerState, event: string, documentPath:
 }
 
 function renderCurrentDoc(state: ServerState) {
-  return renderDocument(state.docPath, state.docMd, state.archivedThreads, state.targetLine);
+  return renderDocument(state.docPath, state.docMd, state.archivedThreads, state.targetRange);
 }
 
 function renderDocument(
   docPath: string,
   docMd: string,
   archivedThreads: Thread[],
-  targetLine: number | null,
+  targetRange: SourceRange | null,
   readOnly = false,
 ) {
   const sourceFile = isSourceFile(docPath);
   const rendered = sourceFile ? renderSourceFile(docMd, docPath) : renderDoc(docMd, docPath);
+  const selectedText = selectedSourceText(docMd, targetRange);
   return {
     html: rendered.html,
     blockIds: rendered.blockIds,
     title: computeDocTitle(rendered.blocks, docPath),
     archivedThreads,
-    targetLine,
+    targetLine: targetRange?.startLine ?? null,
+    targetRange,
+    targetText: selectedText === null || sourceFile ? selectedText : renderedMarkdownText(selectedText),
     readOnly: readOnly || (sourceFile && !isMarkdownFile(docPath)),
   };
 }
@@ -938,7 +943,7 @@ async function handle(state: ServerState, req: IncomingMessage, res: ServerRespo
       ? documentArchivedThreads(state, documentPath)
       : state.archivedThreads;
     const rendered = selected
-      ? renderDocument(documentPath, documentMd, archivedThreads, selected.line, !isMarkdownFile(documentPath))
+      ? renderDocument(documentPath, documentMd, archivedThreads, selected.range, !isMarkdownFile(documentPath))
       : renderCurrentDoc(state);
     res.setHeader('content-type', 'application/json');
     res.end(JSON.stringify({
@@ -960,6 +965,8 @@ async function handle(state: ServerState, req: IncomingMessage, res: ServerRespo
       applyAvailable: applyAvailable(state),
       applyCount: applyCount(state),
       targetLine: rendered.targetLine,
+      targetRange: rendered.targetRange,
+      targetText: rendered.targetText,
       readOnly: rendered.readOnly,
       sourceView,
       documentPath,
@@ -2103,17 +2110,15 @@ async function handle(state: ServerState, req: IncomingMessage, res: ServerRespo
   res.end('not found');
 }
 
-function resolveSourceReference(state: ServerState, rawReference: string): { path: string; line: number | null } | null {
+function resolveSourceReference(state: ServerState, rawReference: string): { path: string; range: SourceRange | null } | null {
   let decoded: string;
   try {
     decoded = decodeURIComponent(rawReference);
   } catch {
     return null;
   }
-  const match = decoded.match(/^(.*):(\d+)$/);
-  const pathPart = match ? match[1] : decoded;
-  const line = match ? Number.parseInt(match[2]!, 10) : null;
-  if (!pathPart || (line !== null && line < 1)) return null;
+  const { pathPart, range } = parseSourceReference(decoded);
+  if (!pathPart) return null;
   const serveRoots = resolveServeRoots(state.docPath, state.projectRoot);
   const candidates = pathPart.startsWith('/')
     ? [pathPart, ...serveRoots.map((serveRoot) => resolve(serveRoot, pathPart.replace(/^\/+/, '')))]
@@ -2122,7 +2127,7 @@ function resolveSourceReference(state: ServerState, rawReference: string): { pat
     .map((candidate) => resolveExistingRenderableFile(candidate, serveRoots))
     .find((candidate): candidate is string => candidate !== null);
   if (target === undefined) return null;
-  return { path: displayPathForResolvedFile(state, target), line };
+  return { path: displayPathForResolvedFile(state, target), range };
 }
 
 function displayPathForResolvedFile(state: ServerState, resolvedPath: string): string {
@@ -2262,12 +2267,11 @@ function tryServeRepoFile(
   const rel = decoded.replace(/^\/+/, '');
   if (!rel) return null;
   const serveRoots = resolveServeRoots(state.docPath, state.projectRoot);
-  const realTarget = serveRoots
-    .map((serveRoot) => ({
-      target: resolve(serveRoot, rel),
-      serveRoot,
-    }))
-    .map(({ target, serveRoot }) => resolveContainedFile(target, serveRoot))
+  const candidates = decoded.startsWith('/')
+    ? [decoded, ...serveRoots.map((serveRoot) => resolve(serveRoot, rel))]
+    : serveRoots.map((serveRoot) => resolve(serveRoot, rel));
+  const realTarget = candidates
+    .flatMap((target) => serveRoots.map((serveRoot) => resolveContainedFile(target, serveRoot)))
     .find((target): target is string => target !== null);
   if (!realTarget) return null;
   const dotIdx = realTarget.lastIndexOf('.');

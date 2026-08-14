@@ -5,7 +5,16 @@ export interface Block {
   kind: BlockKind;
   markdown: string;
   html: string;
+  sourceStartLine?: number;
+  sourceEndLine?: number;
 }
+
+export type SourceRange = Readonly<{
+  startLine: number;
+  startColumn?: number;
+  endLine: number;
+  endColumn?: number;
+}>;
 
 export interface Anchor {
   blockId: string;

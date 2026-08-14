@@ -1,0 +1,4 @@
+interface:
+  display_name: "Writing"
+  short_description: "Link files and prefer Mermaid diagrams"
+  default_prompt: "Use $writing for inline-discussion link and diagram conventions."
