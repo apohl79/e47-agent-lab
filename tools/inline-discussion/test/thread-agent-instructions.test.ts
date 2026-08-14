@@ -20,6 +20,11 @@ test('thread agent instructions require cumulative high-level handoffs without i
   assert.match(THREAD_AGENT_BASE_INSTRUCTIONS, /Approval never permits repository, discussion-document, docs\/context, commit, or Apply changes/);
   assert.match(THREAD_AGENT_BASE_INSTRUCTIONS, /Action items for the main agent/);
   assert.match(THREAD_AGENT_BASE_INSTRUCTIONS, /final section MUST be titled exactly/);
+  assert.match(THREAD_AGENT_BASE_INSTRUCTIONS, /CURRENT-THREAD SCOPE/);
+  assert.match(THREAD_AGENT_BASE_INSTRUCTIONS, /Action items are limited to requests and decisions made in this thread conversation/);
+  assert.match(THREAD_AGENT_BASE_INSTRUCTIONS, /Document notes and every other thread, open or closed, are reference evidence only/);
+  assert.match(THREAD_AGENT_BASE_INSTRUCTIONS, /Never copy, carry over, merge, or independently derive their action items into this list/);
+  assert.match(THREAD_AGENT_BASE_INSTRUCTIONS, /only when this thread itself explicitly requests or decides it/);
   assert.match(THREAD_AGENT_BASE_INSTRUCTIONS, /URGENT: after the first action item is derived/);
   assert.match(THREAD_AGENT_BASE_INSTRUCTIONS, /EVERY later response MUST end with the complete list of still-valid action items/);
   assert.match(THREAD_AGENT_BASE_INSTRUCTIONS, /Never silently drop an item/);
