@@ -283,6 +283,14 @@ class CodexAppServerClient {
           model: this.inferenceSettings.model,
           modelProvider: this.inferenceSettings.provider,
           effort: this.inferenceSettings.reasoningEffort,
+          collaborationMode: {
+            mode: 'default',
+            settings: {
+              model: this.inferenceSettings.model,
+              reasoning_effort: this.inferenceSettings.reasoningEffort,
+              developer_instructions: this.opts.developerInstructions,
+            },
+          },
         } : {}),
       });
       logDiagnostic('codex.turn.start.response', { provider: 'codex', threadId });
@@ -444,7 +452,7 @@ class CodexAppServerClient {
         title: 'Inline Discussion',
         version: '0.1.0',
       },
-      capabilities: null,
+      capabilities: { experimentalApi: true },
     });
     this.notify('initialized', {});
   }

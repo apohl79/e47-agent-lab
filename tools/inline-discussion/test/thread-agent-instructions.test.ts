@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
+  appendTurnContext,
   buildThreadAgentInstructions,
   THREAD_AGENT_BASE_INSTRUCTIONS,
 } from '../src/agent.ts';
@@ -33,4 +34,15 @@ test('binding thread contract follows all reference context', () => {
     buildThreadAgentInstructions(preamble),
     `<inline-discussion-reference-context>\n\n${preamble}\n\n</inline-discussion-reference-context>\n\n${THREAD_AGENT_BASE_INSTRUCTIONS}`,
   );
+});
+
+test('turn metadata does not duplicate the provider-level binding contract', () => {
+  const payload = appendTurnContext(
+    'Please apply the fix.',
+    'Document under discussion: docs/assessment.md\nAnchor block: 9101029530',
+  );
+
+  assert.match(payload, /<inline-discussion-turn-context>/);
+  assert.doesNotMatch(payload, /NON-NEGOTIABLE THREAD ROLE AND OUTPUT CONTRACT/);
+  assert.doesNotMatch(payload, /DO NOT IMPLEMENT/);
 });
