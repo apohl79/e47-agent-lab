@@ -2132,13 +2132,16 @@ function decorateResolvedThreadDetails(): void {
 function renderNoteCard(card: HTMLElement, thread: Thread): void {
   const noteText = thread.messages[0]?.text ?? '';
   card.innerHTML = `
-    <div class="thread-header">
-      <div class="thread-label"><span class="thread-icon">📝</span> <strong>Note</strong> <span class="anchor-quote">${thread.anchor.quote ? `“${escapeHtml(thread.anchor.quote)}”` : 'entire block'}</span></div>
-      <div class="thread-actions">
-        <button class="btn btn-ghost edit-note-btn">Edit</button>
-        <button class="btn btn-ghost to-thread-btn" title="Open an assistant conversation with this note as the first message">↪ Ask assistant</button>
-        <button class="btn btn-ghost delete-btn">Delete note</button>
+    <div class="thread-header note-header">
+      <div class="note-header-row">
+        <div class="thread-label"><span class="thread-icon">📝</span> <strong>Note</strong></div>
+        <div class="thread-actions">
+          <button class="btn btn-ghost edit-note-btn">Edit</button>
+          <button class="btn btn-ghost to-thread-btn" title="Open an assistant conversation with this note as the first message">↪ Ask assistant</button>
+          <button class="btn btn-ghost delete-btn">Delete note</button>
+        </div>
       </div>
+      <div class="anchor-quote">${thread.anchor.quote ? `“${escapeHtml(thread.anchor.quote)}”` : 'entire block'}</div>
     </div>
     <div class="messages">
       <div class="msg note">${renderMarkdown(noteText)}</div>
