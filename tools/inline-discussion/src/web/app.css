@@ -804,6 +804,31 @@ button.primary:hover {
 
 .thread-actions { flex-wrap: wrap; justify-content: flex-end; }
 
+.note-header { display: block; }
+
+.note-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.note-header .thread-actions {
+  flex: 0 0 auto;
+  flex-wrap: nowrap;
+}
+
+.note-header .thread-actions .btn {
+  padding-inline: 10px;
+  white-space: nowrap;
+}
+
+.note-header > .anchor-quote {
+  display: block;
+  margin-top: 6px;
+  overflow-wrap: anywhere;
+}
+
 .thread-icon { margin-right: 2px; }
 
 .thread-label strong {

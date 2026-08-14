@@ -47,3 +47,42 @@ test('thread annotation styles preserve active response bubble geometry', () => 
     },
   );
 });
+
+test('note header keeps actions in a compact row above the anchor quote', () => {
+  const dom = new JSDOM(`
+    <style>${stylesheet}</style>
+    <div class="thread-header note-header">
+      <div class="note-header-row">
+        <div class="thread-label"><strong>Note</strong></div>
+        <div class="thread-actions"><button class="btn">Ask assistant</button></div>
+      </div>
+      <div class="anchor-quote">A long anchored excerpt</div>
+    </div>
+  `);
+  const header = dom.window.document.querySelector<HTMLElement>('.note-header');
+  const row = dom.window.document.querySelector<HTMLElement>('.note-header-row');
+  const actions = dom.window.document.querySelector<HTMLElement>('.thread-actions');
+  const button = dom.window.document.querySelector<HTMLElement>('.btn');
+  const quote = dom.window.document.querySelector<HTMLElement>('.anchor-quote');
+
+  assert.ok(header);
+  assert.ok(row);
+  assert.ok(actions);
+  assert.ok(button);
+  assert.ok(quote);
+  assert.deepEqual({
+    headerDisplay: dom.window.getComputedStyle(header).display,
+    rowDisplay: dom.window.getComputedStyle(row).display,
+    rowJustification: dom.window.getComputedStyle(row).justifyContent,
+    actionWrap: dom.window.getComputedStyle(actions).flexWrap,
+    buttonWhiteSpace: dom.window.getComputedStyle(button).whiteSpace,
+    quoteDisplay: dom.window.getComputedStyle(quote).display,
+  }, {
+    headerDisplay: 'block',
+    rowDisplay: 'flex',
+    rowJustification: 'space-between',
+    actionWrap: 'nowrap',
+    buttonWhiteSpace: 'nowrap',
+    quoteDisplay: 'block',
+  });
+});
