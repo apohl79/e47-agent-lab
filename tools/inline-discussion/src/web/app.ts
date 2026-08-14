@@ -19,7 +19,7 @@ import {
   detectComposerPlatform,
 } from './composer-shortcuts.ts';
 import { dismissModal, modalChoice, modalConfirm, modalStatus, type ModalStatusHandle } from './modal.ts';
-import { scrollToFragment } from './navigation.ts';
+import { installInDocumentNavigation, scrollToFragment } from './navigation.ts';
 import { calculateOverlayPlacement } from './overlay-position.ts';
 import { quoteOccurrence } from './quote-position.ts';
 import { appendQuoteToTextarea } from './quote-insertion.ts';
@@ -509,6 +509,7 @@ async function init(): Promise<void> {
   document.getElementById('apply-top')!.addEventListener('click', onApplyClick);
   document.getElementById('apply-bottom')!.addEventListener('click', onApplyClick);
   installLinkTargetPreview(document.body);
+  installInDocumentNavigation(document.body, { document, history: window.history, location: window.location });
 
   const sourcePath = window.location.pathname === '/' ? '' : `?${new URLSearchParams({ path: window.location.pathname }).toString()}`;
   const boot = (await (await fetch(`/api/bootstrap${sourcePath}`)).json()) as Bootstrap;
