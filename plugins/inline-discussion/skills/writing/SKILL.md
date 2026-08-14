@@ -22,6 +22,24 @@ Lines and characters are 1-based and inclusive. Prefer a path relative to the Ma
 
 Use angle brackets around a Markdown link target containing spaces. Do not append this range syntax to remote HTTP(S) URLs.
 
+## In-document section links
+
+Use a hash-only Markdown link to navigate to a heading in the same document. This form is portable and scrolls the inline-discussion viewport without reloading the page.
+
+Heading targets are lowercased, with punctuation and spaces replaced by hyphens. Prefer the hash-only form over repeating the current document path.
+
+## Table of contents
+
+For a document with several major sections, add a concise table of contents after the title and introductory text. Use hash-only links, keep link labels aligned with their headings, and include only sections that help the reader navigate. Mirror one level of heading hierarchy when it materially clarifies the document.
+
+```markdown
+## Table of contents
+
+- [Deployment](#deployment)
+- [Failure handling](#failure-handling)
+  - [Retry policy](#retry-policy)
+```
+
 ## Diagram preference
 
 Prefer a fenced `mermaid` diagram over an SVG or PNG when expressing structure, flow, sequence, state, or relationships. Keep screenshots and other images whose exact visual appearance is the evidence.
