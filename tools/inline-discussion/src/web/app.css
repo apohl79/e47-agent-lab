@@ -484,6 +484,38 @@ button.primary:hover {
 
 #doc pre.source-line-target { background: var(--accent-soft); }
 
+#doc .source-block-target {
+  border-radius: 6px;
+  outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  outline-offset: 5px;
+  background: var(--accent-soft);
+}
+
+#doc mark.source-range-target {
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--accent) 42%, transparent);
+  color: inherit;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+.link-target-preview {
+  position: fixed;
+  z-index: 10000;
+  max-width: min(720px, calc(100vw - 32px));
+  padding: 7px 10px;
+  transform: translateY(-100%);
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  background: var(--bg-elev);
+  color: var(--fg);
+  box-shadow: var(--shadow-md);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  pointer-events: none;
+}
+
 /* ---------- Tables ---------- */
 
 #doc table {

@@ -56,11 +56,43 @@ test('renderDoc rewrites relative image URLs against the document path', () => {
   assert.match(html, /src="https:\/\/example\.com\/chart\.svg"/);
 });
 
+test('renderDoc rewrites relative file links against the document path', () => {
+  const md = '[Sibling](./evidence/other.md:40-45#decision)\n\n'
+    + '[Parent](../src/service.ts:10:3-10:9)\n\n'
+    + '[Root](/docs/root.md:2)\n\n'
+    + '[Remote](https://example.com/doc.md:2)\n';
+  const { html } = renderDoc(md, '/tmp/project/docs/review.md');
+  assert.match(html, /href="\/tmp\/project\/docs\/evidence\/other\.md:40-45#decision"/);
+  assert.match(html, /href="\/tmp\/project\/src\/service\.ts:10:3-10:9"/);
+  assert.match(html, /href="\/docs\/root\.md:2"/);
+  assert.match(html, /href="https:\/\/example\.com\/doc\.md:2"/);
+});
+
 test('renderDoc emits data-block-id on every top-level block', () => {
   const md = '# Title\n\nPara.\n';
   const { html, blocks } = renderDoc(md);
   assert.match(html, new RegExp(`data-block-id="${blocks[0]!.id}"`));
   assert.match(html, new RegExp(`data-block-id="${blocks[1]!.id}"`));
+});
+
+test('renderDoc emits source line spans on rendered Markdown blocks', () => {
+  const { html, blocks } = renderDoc('# Title\n\nParagraph\nwrapped.\n\n- first\n- second\n');
+  assert.deepEqual(
+    blocks.map(({ sourceStartLine, sourceEndLine }) => ({ sourceStartLine, sourceEndLine })),
+    [
+      { sourceStartLine: 1, sourceEndLine: 1 },
+      { sourceStartLine: 3, sourceEndLine: 4 },
+      { sourceStartLine: 6, sourceEndLine: 7 },
+    ],
+  );
+  assert.match(html, /data-source-start-line="3"[^>]*data-source-end-line="4"/);
+});
+
+test('parseDoc source spans retain on-disk lines when details spacing is normalized', () => {
+  const blocks = parseDoc('Anchor.\n\n<details>\nBody\n</details>\nAfter.\n').blocks;
+  assert.equal(blocks.at(-1)?.markdown.trim(), 'After.');
+  assert.equal(blocks.at(-1)?.sourceStartLine, 6);
+  assert.equal(blocks.at(-1)?.sourceEndLine, 6);
 });
 
 test('renderDoc emits stable section-link ids for headings', () => {
