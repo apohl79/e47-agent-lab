@@ -1,6 +1,6 @@
 {
   "name": "project-context-curator",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Proactively maintains durable repository domain context for fresh agent sessions.",
   "author": {
     "name": "Local developer"
@@ -10,7 +10,7 @@
       {
         "slot": "contextual_user",
         "position": "supplement",
-        "condition_shell": "test \"${PROJECT_CONTEXT_CURATOR_DISABLED:-0}\" != \"1\"",
+        "condition_shell": "test \"${PROJECT_CONTEXT_CURATOR_DISABLED:-0}\" != \"1\" && root=\"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" && common=\"$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)\" && case \"$common\" in */.git) root=\"${common%/.git}\" ;; esac && test ! -e \"$root/.no-project-context\"",
         "text": "Capture durable new learnings in docs/context. Capturing durable project-level insight is part of the work, not a follow-up \u2014 the turn you verify a stable term, component, API, ownership boundary, architecture rule, environment mapping, or deployment convention from repo evidence or user confirmation, run the updater that same turn before you reply."
       }
     ]

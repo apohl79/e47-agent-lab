@@ -7,10 +7,19 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 
 HOOK = Path(__file__).resolve().parents[1] / "project-context-hook.py"
 PLUGIN_ROOT = HOOK.parent.parent
 DISABLED_ENV = "PROJECT_CONTEXT_CURATOR_DISABLED"
+PLUGIN_CONTEXT_CONDITION_SHELL = (
+    'test "${PROJECT_CONTEXT_CURATOR_DISABLED:-0}" != "1" '
+    '&& root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)" '
+    '&& common="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)" '
+    '&& case "$common" in */.git) root="${common%/.git}" ;; esac '
+    '&& test ! -e "$root/.no-project-context"'
+)
 
 
 def load_hook_module():
@@ -46,6 +55,20 @@ def run_hook(mode: str, payload: dict) -> dict:
     assert proc.stderr == ""
     assert proc.stdout.strip()
     return json.loads(proc.stdout)
+
+
+def run_plugin_context_condition(cwd: Path, disabled: str) -> int:
+    process_env = os.environ.copy()
+    process_env[DISABLED_ENV] = disabled
+    proc = subprocess.run(
+        ["sh", "-c", PLUGIN_CONTEXT_CONDITION_SHELL],
+        cwd=cwd,
+        env=process_env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    return proc.returncode
 
 
 def git_init(repo: Path) -> None:
@@ -221,6 +244,48 @@ def test_non_disabled_environment_preserves_hook_output(tmp_path: Path) -> None:
     ) == (0, "", True)
 
 
+@pytest.mark.parametrize(
+    ("disabled", "marker_exists", "expected_returncode"),
+    [
+        pytest.param("0", False, 0, id="enabled-without-marker"),
+        pytest.param("0", True, 1, id="enabled-with-marker"),
+        pytest.param("1", False, 1, id="disabled-without-marker"),
+        pytest.param("1", True, 1, id="disabled-with-marker"),
+    ],
+)
+def test_plugin_context_condition_combines_environment_and_non_git_marker(
+    tmp_path: Path,
+    disabled: str,
+    marker_exists: bool,
+    expected_returncode: int,
+) -> None:
+    if marker_exists:
+        (tmp_path / ".no-project-context").touch()
+
+    returncode = run_plugin_context_condition(tmp_path, disabled)
+
+    assert returncode == expected_returncode
+
+
+def test_plugin_context_condition_uses_main_repo_marker_from_nested_linked_worktree(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    linked = tmp_path / "linked"
+    repo.mkdir()
+    git_init(repo)
+    git_commit(repo)
+    git_add_worktree(repo, linked)
+    nested = linked / "nested"
+    nested.mkdir()
+
+    returncode_without_marker = run_plugin_context_condition(nested, "0")
+    (repo / ".no-project-context").touch()
+    returncode_with_marker = run_plugin_context_condition(nested, "0")
+
+    assert (returncode_without_marker, returncode_with_marker) == (0, 1)
+
+
 def test_plugin_entrypoints_gate_on_disabled_environment() -> None:
     manifest = json.loads((PLUGIN_ROOT / ".codex-plugin/plugin.json").read_text(encoding="utf-8"))
     hooks = json.loads((PLUGIN_ROOT / "hooks/hooks.json").read_text(encoding="utf-8"))
@@ -229,6 +294,6 @@ def test_plugin_entrypoints_gate_on_disabled_environment() -> None:
         manifest["context"]["thread"][0]["condition_shell"],
         hooks["hooks"]["SessionStart"][0]["hooks"][0]["command"],
     ) == (
-        'test "${PROJECT_CONTEXT_CURATOR_DISABLED:-0}" != "1"',
+        PLUGIN_CONTEXT_CONDITION_SHELL,
         'sh -c \'test "${PROJECT_CONTEXT_CURATOR_DISABLED:-0}" = "1" || exec python3 "${CLAUDE_PLUGIN_ROOT:-.}/hooks/project-context-hook.py" session-start\'',
     )
