@@ -1,6 +1,6 @@
 {
   "name": "project-context-curator",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Proactively maintains durable repository domain context for fresh agent sessions.",
   "author": {
     "name": "Local developer"
