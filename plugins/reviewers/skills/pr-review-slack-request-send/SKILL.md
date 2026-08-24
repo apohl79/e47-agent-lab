@@ -20,12 +20,12 @@ For a PR stack:
 
 ```
 PR Stack: <very short summary, max 10 words>
-└ <pr1-url>
-  <pr2-url>
-  ...
+1. <pr1-url>
+2. <pr2-url>
+3. <final-pr-url>
 ```
 
-No greeting, no signature, or emojis. Preserve the supplied PR order.
+Number each PR consecutively, starting at 1; do not rely on indentation or tree symbols for the hierarchy. No greeting, no signature, or emojis. Preserve the supplied PR order.
 
 ## Steps
 
@@ -120,6 +120,6 @@ Use the Slack MCP server's `…slack_get_permalink` tool with the returned messa
 ## Notes
 
 - Never post without explicit user confirmation of the summary sentence.
-- For a single PR, send the summary then the PR URL. For a stack, send the `PR Stack:` heading then the tree-formatted PR URLs. Slack will unfurl each PR card from its link.
+- For a single PR, send the summary then the PR URL. For a stack, send the `PR Stack:` heading then consecutively numbered PR URLs. Slack will unfurl each PR card from its link.
 - Do not @-mention anyone unless the user asks.
 - Channel registry is managed by `reviewers:pr-review-slack-request-manage`; do not edit `channels.json` from this skill.
