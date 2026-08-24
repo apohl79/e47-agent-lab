@@ -1,6 +1,6 @@
 ---
 name: pr-review-slack-request-send
-description: Post a PR review request (link + one-sentence summary) to a configured Slack channel. Use when asking a team to review a GitHub pull request.
+description: Post a single-PR or PR-stack review request (summary + links) to a configured Slack channel. Use when asking a team to review GitHub pull requests.
 ---
 
 # Send PR Review Request to Slack
@@ -9,12 +9,23 @@ Post a short PR review request to a channel listed in `~/.config/pr-review-slack
 
 ## Message format
 
+For one PR:
+
 ```
-<pr-link>
 <very short summary, max 10 words>
+<pr-url>
 ```
 
-Two lines. No greeting, no signature, no emojis.
+For a PR stack:
+
+```
+PR Stack: <very short summary, max 10 words>
+└ <pr1-url>
+  <pr2-url>
+  ...
+```
+
+No greeting, no signature, or emojis. Preserve the supplied PR order.
 
 ## Steps
 
@@ -30,22 +41,22 @@ If the list has more than 4 entries, paginate the question (4 options at a time)
 
 Capture the chosen channel's `name` and `url`.
 
-### 3. Resolve the PR
+### 3. Resolve the PR or stack
 
 In order:
 
-1. If the user passed a GitHub PR URL as an argument, use it.
+1. If the user passed one or more GitHub PR URLs as arguments, use them. One URL is a single-PR review; two or more URLs are a PR stack.
 2. Else, check the current branch for an open PR:
    ```bash
    gh pr view --json url,title,body,number --jq '{url,title,body,number}'
    ```
-3. If neither yields a PR, use the host user-input tool to ask for the PR URL.
+3. If neither yields a PR, use the host user-input tool to ask for one or more PR URLs.
 
-Validate the URL matches `https://github.com/<owner>/<repo>/pull/<number>`.
+Validate every URL matches `https://github.com/<owner>/<repo>/pull/<number>`.
 
 ### 4. Build the one-sentence summary
 
-Generate a very short sentence (<= 10 words, hard limit) describing what the PR does. Source material, in order of preference:
+Generate a very short sentence (<= 10 words, hard limit) describing what the PR or stack implements. For a stack, summarize the whole stack. Source material, in order of preference:
 
 1. PR title + body (`gh pr view --json title,body`).
 2. Diff summary (`gh pr diff <url>` truncated).
@@ -69,7 +80,7 @@ Resolve the channel ID from the URL (last path segment of `https://workspace.exa
 ```
 mcp__<your-slack-mcp>__slack_send_message
   channel_id: <CHANNEL_ID>
-  text: "<pr-url>\n<summary sentence>"
+  text: "<formatted request>"
 ```
 
 Any MCP server that exposes Slack tools works. Tool names are namespaced by the
@@ -94,6 +105,6 @@ Use the Slack MCP server's `…slack_get_permalink` tool with the returned messa
 ## Notes
 
 - Never post without explicit user confirmation of the summary sentence.
-- Two lines exactly: PR link, then summary. Slack will unfurl the PR card from the link.
+- For a single PR, send the summary then the PR URL. For a stack, send the `PR Stack:` heading then the tree-formatted PR URLs. Slack will unfurl each PR card from its link.
 - Do not @-mention anyone unless the user asks.
 - Channel registry is managed by `reviewers:pr-review-slack-request-manage`; do not edit `channels.json` from this skill.
