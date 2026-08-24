@@ -45,7 +45,7 @@ Capture the chosen channel's `name` and `url`.
 
 In order:
 
-1. If the user passed one or more GitHub PR URLs as arguments, use them. One URL is a single-PR review; two or more URLs are a PR stack.
+1. If the user passed one or more GitHub PR URLs as arguments, use them.
 2. Else, check the current branch for an open PR:
    ```bash
    gh pr view --json url,title,body,number --jq '{url,title,body,number}'
@@ -53,6 +53,21 @@ In order:
 3. If neither yields a PR, use the host user-input tool to ask for one or more PR URLs.
 
 Validate every URL matches `https://github.com/<owner>/<repo>/pull/<number>`.
+
+### 3a. Check each PR for stack membership
+
+For every resolved PR URL, check whether it belongs to a conventional GitHub PR stack before choosing the message format:
+
+1. Read its `url`, `headRefName`, and `baseRefName` with `gh pr view <url> --json url,headRefName,baseRefName`.
+2. Derive `<owner>/<repo>` from that URL and list that repository's open PRs with `gh pr list --repo <owner>/<repo> --state open --json url,headRefName,baseRefName --limit 100`.
+3. A PR is part of a stack when its base branch is another open PR's head branch, or another open PR has it as its base branch. Follow those links to identify the full connected stack and order it from base to head.
+
+For every detected stack, use the host user-input tool to ask the user which mode to use:
+
+- **Stack mode**: send the complete detected stack in base-to-head order using the `PR Stack:` format.
+- **Single-PR mode**: send only the supplied PR URL using the single-PR format.
+
+Ask once per distinct detected stack, even if the user supplied multiple URLs from it. If no stack is detected, use single-PR mode without asking. Do not infer the user's preferred mode from the number of supplied URLs.
 
 ### 4. Build the one-sentence summary
 

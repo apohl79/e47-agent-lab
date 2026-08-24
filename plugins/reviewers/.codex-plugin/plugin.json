@@ -1,6 +1,6 @@
 {
   "name": "reviewers",
-  "version": "0.7.3",
+  "version": "0.7.4",
   "description": "PR finalization, reviewer-team, and Slack review-request workflows for Claude Code and Codex.",
   "author": {
     "name": "apohl79"
