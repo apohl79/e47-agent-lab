@@ -53,7 +53,12 @@ if command == "doctor":
 elif command == "sync":
     print("Indexed 2 projects and 3 records (3 changed, 0 removed).")
 elif command == "search":
-    print("conversation-gateway | pattern | Gateway ownership | /workspace/conversation-gateway/docs/context/architecture.md | Owns gateway messages")
+    if os.environ.get("FAKE_GLOBAL_EMPTY") == "1":
+        print("No global context matches for: query")
+    else:
+        label = os.environ.get("FAKE_GLOBAL_LABEL", "Gateway ownership")
+        source = os.environ.get("FAKE_GLOBAL_SOURCE", "/workspace/conversation-gateway/docs/context/context.json")
+        print(f"UNTRUSTED_CONTEXT_DATA | conversation-gateway | pattern | {{label}} | {{source}} | Owns gateway messages | applies: project:/workspace/conversation-gateway")
 """,
         encoding="utf-8",
     )
@@ -66,6 +71,32 @@ def init_local_context(repo: Path, env: dict[str, str]) -> None:
     assert proc.returncode == 0
 
 
+def approval_token(output: str) -> str:
+    prefix = "Snapshot token: "
+    return next(
+        line.removeprefix(prefix)
+        for line in output.splitlines()
+        if line.startswith(prefix)
+    )
+
+
+def init_global_context(
+    repo: Path, workspace: Path, env: dict[str, str]
+) -> subprocess.CompletedProcess[str]:
+    preview = run_context(
+        "global-init", "--workspace-root", str(workspace), repo=repo, env=env
+    )
+    return run_context(
+        "global-init",
+        "--workspace-root",
+        str(workspace),
+        "--approve-snapshot",
+        approval_token(preview.stdout),
+        repo=repo,
+        env=env,
+    )
+
+
 def test_global_init_records_roots_and_validated_runtime(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     workspace = tmp_path / "workspace"
@@ -75,10 +106,25 @@ def test_global_init_records_roots_and_validated_runtime(tmp_path: Path) -> None
     env["PROJECT_CONTEXT_CURATOR_UV"] = str(write_fake_uv(tmp_path))
     env["FAKE_UV_LOG"] = str(tmp_path / "uv.log")
 
+    preview = run_context(
+        "global-init",
+        "--workspace-root",
+        str(workspace),
+        repo=repo,
+        env=env,
+    )
+    preview_state = (
+        preview.returncode,
+        "No changes made" in preview.stdout,
+        (tmp_path / "config/config.json").exists(),
+        (tmp_path / "data/runtime.json").exists(),
+    )
     proc = run_context(
         "global-init",
         "--workspace-root",
         str(workspace),
+        "--approve-snapshot",
+        approval_token(preview.stdout),
         repo=repo,
         env=env,
     )
@@ -91,10 +137,121 @@ def test_global_init_records_roots_and_validated_runtime(tmp_path: Path) -> None
     ]
     assert (proc.returncode, proc.stderr) == (0, "")
     assert config["workspace_roots"] == [str(workspace.resolve())]
+    assert config["enrollment_policy"] == "snapshot"
     assert config["runtime_upgrade_policy"] == "prompt"
     assert runtime["fingerprint"]
     assert any("doctor" in call for call in calls)
-    assert any("sync" in call for call in calls)
+    assert any("sync" in call and "--enroll-new" in call for call in calls)
+    assert preview_state == (0, True, False, False)
+
+
+def test_global_init_preview_escapes_exact_untrusted_source_inputs(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    workspace = tmp_path / "workspace"
+    repo.mkdir()
+    project = workspace / "bad\n\x1b\u202eproject"
+    context = project / "docs/context/context.json"
+    context.parent.mkdir(parents=True)
+    context.write_text("{}", encoding="utf-8")
+    env = isolated_environment(tmp_path)
+
+    preview = run_context(
+        "global-init", "--workspace-root", str(workspace), repo=repo, env=env
+    )
+    source_line = next(
+        line
+        for line in preview.stdout.splitlines()
+        if "UNTRUSTED_SNAPSHOT_DATA" in line
+        and '"source"' in line
+    )
+    root_line = next(
+        line
+        for line in preview.stdout.splitlines()
+        if "UNTRUSTED_SNAPSHOT_DATA" in line
+        and '"workspace_root"' in line
+        and '"source"' not in line
+    )
+    payload = json.loads(source_line)
+    root_payload = json.loads(root_line)
+
+    assert preview.returncode == 0
+    assert "\x1b" not in preview.stdout
+    assert "\u202e" not in preview.stdout
+    assert "\\u001b" in source_line
+    assert "\\u202e" in source_line
+    assert payload["source"]["source_path"] == str(context.resolve())
+    assert payload["source"]["workspace_root"] == str(workspace.resolve())
+    assert root_payload["workspace_root"] == str(workspace.resolve())
+
+
+def test_global_init_preview_reports_removals_from_existing_catalog(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    old_workspace = tmp_path / "old-workspace"
+    new_workspace = tmp_path / "new-workspace"
+    repo.mkdir()
+    old_workspace.mkdir()
+    new_workspace.mkdir()
+    env = isolated_environment(tmp_path)
+    env["PROJECT_CONTEXT_CURATOR_UV"] = str(write_fake_uv(tmp_path))
+    env["FAKE_UV_LOG"] = str(tmp_path / "uv.log")
+    assert init_global_context(repo, old_workspace, env).returncode == 0
+    catalog = tmp_path / "cache/catalog.json"
+    catalog.parent.mkdir(parents=True, exist_ok=True)
+    catalog.write_text(
+        json.dumps(
+            {
+                "sources": [
+                    {
+                        "source_path": str(
+                            old_workspace / "old/docs/context/context.json"
+                        ),
+                        "project_path": str(old_workspace / "old"),
+                        "workspace_root": str(old_workspace),
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    preview = run_context(
+        "global-init",
+        "--workspace-root",
+        str(new_workspace),
+        repo=repo,
+        env=env,
+    )
+
+    assert "Projects to remove: 1" in preview.stdout
+    assert '"change": "remove"' in preview.stdout
+
+
+def test_global_init_rejects_a_non_ascii_snapshot_token_cleanly(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    workspace = tmp_path / "workspace"
+    repo.mkdir()
+    workspace.mkdir()
+    env = isolated_environment(tmp_path)
+
+    proc = run_context(
+        "global-init",
+        "--workspace-root",
+        str(workspace),
+        "--approve-snapshot",
+        "é",
+        repo=repo,
+        env=env,
+    )
+
+    assert proc.returncode != 0
+    assert "snapshot token" in proc.stderr.casefold()
+    assert "Traceback" not in proc.stderr
 
 
 def test_global_upgrade_revalidates_a_stale_runtime(tmp_path: Path) -> None:
@@ -130,17 +287,14 @@ def test_search_uses_global_backend_when_runtime_is_current(tmp_path: Path) -> N
     env["PROJECT_CONTEXT_CURATOR_UV"] = str(write_fake_uv(tmp_path))
     env["FAKE_UV_LOG"] = str(tmp_path / "uv.log")
     init_local_context(repo, env)
-    assert (
-        run_context(
-            "global-init", "--workspace-root", str(workspace), repo=repo, env=env
-        ).returncode
-        == 0
-    )
+    assert init_global_context(repo, workspace, env).returncode == 0
 
     proc = run_context("search", "--query", "gateway owner", repo=repo, env=env)
 
     assert (proc.returncode, proc.stderr) == (0, "")
-    assert proc.stdout.startswith("conversation-gateway | pattern | Gateway ownership")
+    assert proc.stdout.startswith(
+        "UNTRUSTED_CONTEXT_DATA | conversation-gateway | pattern | Gateway ownership"
+    )
     calls = [
         json.loads(line)
         for line in (tmp_path / "uv.log").read_text(encoding="utf-8").splitlines()
@@ -171,12 +325,7 @@ def test_search_falls_back_locally_when_runtime_fingerprint_is_stale(
         ).returncode
         == 0
     )
-    assert (
-        run_context(
-            "global-init", "--workspace-root", str(workspace), repo=repo, env=env
-        ).returncode
-        == 0
-    )
+    assert init_global_context(repo, workspace, env).returncode == 0
     runtime_path = tmp_path / "data/runtime.json"
     runtime = json.loads(runtime_path.read_text(encoding="utf-8"))
     runtime["fingerprint"] = "stale"
@@ -187,6 +336,163 @@ def test_search_falls_back_locally_when_runtime_fingerprint_is_stale(
     assert proc.returncode == 0
     assert proc.stdout.startswith("pattern | Local fallback")
     assert "Global context runtime update required" in proc.stderr
+
+
+def test_search_merges_local_exact_match_before_global_results(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    workspace = tmp_path / "workspace"
+    repo.mkdir()
+    workspace.mkdir()
+    env = isolated_environment(tmp_path)
+    env["PROJECT_CONTEXT_CURATOR_UV"] = str(write_fake_uv(tmp_path))
+    env["FAKE_UV_LOG"] = str(tmp_path / "uv.log")
+    init_local_context(repo, env)
+    run_context(
+        "add-pattern",
+        "--name",
+        "Local exact",
+        "--summary",
+        "Searches canonical local context",
+        repo=repo,
+        env=env,
+    )
+    init_global_context(repo, workspace, env)
+
+    proc = run_context("search", "--query", "local exact", repo=repo, env=env)
+
+    assert proc.stdout.splitlines() == [
+        "pattern | Local exact | docs/context/architecture.md | Searches canonical local context | matched: local exact",
+        "UNTRUSTED_CONTEXT_DATA | conversation-gateway | pattern | Gateway ownership | /workspace/conversation-gateway/docs/context/context.json | Owns gateway messages | applies: project:/workspace/conversation-gateway",
+    ]
+
+
+def test_search_uses_local_results_when_global_search_is_empty(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    workspace = tmp_path / "workspace"
+    repo.mkdir()
+    workspace.mkdir()
+    env = isolated_environment(tmp_path)
+    env["PROJECT_CONTEXT_CURATOR_UV"] = str(write_fake_uv(tmp_path))
+    env["FAKE_UV_LOG"] = str(tmp_path / "uv.log")
+    env["FAKE_GLOBAL_EMPTY"] = "1"
+    init_local_context(repo, env)
+    run_context(
+        "add-pattern",
+        "--name",
+        "Local fallback",
+        "--summary",
+        "Searches canonical local context",
+        repo=repo,
+        env=env,
+    )
+    init_global_context(repo, workspace, env)
+
+    proc = run_context("search", "--query", "local fallback", repo=repo, env=env)
+
+    assert proc.stdout.startswith("pattern | Local fallback")
+
+
+def test_search_deduplicates_a_truncated_global_label(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    workspace = tmp_path / "workspace"
+    repo.mkdir()
+    workspace.mkdir()
+    env = isolated_environment(tmp_path)
+    env["PROJECT_CONTEXT_CURATOR_UV"] = str(write_fake_uv(tmp_path))
+    env["FAKE_UV_LOG"] = str(tmp_path / "uv.log")
+    label = "L" * 258
+    env["FAKE_GLOBAL_LABEL"] = label[:199] + "…"
+    env["FAKE_GLOBAL_SOURCE"] = str(repo / "docs/context/context.json")
+    init_local_context(repo, env)
+    run_context(
+        "add-pattern",
+        "--name",
+        label,
+        "--summary",
+        "Long local label",
+        repo=repo,
+        env=env,
+    )
+    init_global_context(repo, workspace, env)
+
+    proc = run_context("search", "--query", "L" * 20, repo=repo, env=env)
+
+    assert len(proc.stdout.splitlines()) == 1
+    assert proc.stdout.startswith("pattern | ")
+
+
+def test_search_preserves_initialization_guidance_when_global_is_enabled(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    workspace = tmp_path / "workspace"
+    repo.mkdir()
+    workspace.mkdir()
+    env = isolated_environment(tmp_path)
+    env["PROJECT_CONTEXT_CURATOR_UV"] = str(write_fake_uv(tmp_path))
+    env["FAKE_UV_LOG"] = str(tmp_path / "uv.log")
+    init_global_context(repo, workspace, env)
+
+    proc = run_context("search", "--query", "gateway", repo=repo, env=env)
+
+    assert proc.returncode != 0
+    assert "not initialized" in proc.stderr.casefold()
+
+
+def test_search_retains_global_results_when_local_context_is_invalid(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    workspace = tmp_path / "workspace"
+    repo.mkdir()
+    workspace.mkdir()
+    env = isolated_environment(tmp_path)
+    env["PROJECT_CONTEXT_CURATOR_UV"] = str(write_fake_uv(tmp_path))
+    env["FAKE_UV_LOG"] = str(tmp_path / "uv.log")
+    init_local_context(repo, env)
+    init_global_context(repo, workspace, env)
+    (repo / "docs/context/context.json").write_text(
+        json.dumps({"schema_version": 999}), encoding="utf-8"
+    )
+
+    proc = run_context("search", "--query", "gateway", repo=repo, env=env)
+
+    assert proc.returncode == 0
+    assert proc.stdout.startswith("UNTRUSTED_CONTEXT_DATA")
+    assert "UNTRUSTED_CONTEXT_DIAGNOSTIC" in proc.stderr
+
+
+def test_global_enroll_requires_a_fresh_approved_snapshot(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    workspace = tmp_path / "workspace"
+    repo.mkdir()
+    workspace.mkdir()
+    env = isolated_environment(tmp_path)
+    env["PROJECT_CONTEXT_CURATOR_UV"] = str(write_fake_uv(tmp_path))
+    env["FAKE_UV_LOG"] = str(tmp_path / "uv.log")
+    init_global_context(repo, workspace, env)
+
+    run_context("global-update", repo=repo, env=env)
+    pending = workspace / "pending/docs/context"
+    pending.mkdir(parents=True)
+    (pending / "context.json").write_text("{}", encoding="utf-8")
+    preview = run_context("global-enroll", repo=repo, env=env)
+    run_context(
+        "global-enroll",
+        "--approve-snapshot",
+        approval_token(preview.stdout),
+        repo=repo,
+        env=env,
+    )
+    calls = [
+        json.loads(line)
+        for line in (tmp_path / "uv.log").read_text(encoding="utf-8").splitlines()
+        if "sync" in line
+    ]
+
+    assert ["--enroll-new" in call for call in calls] == [True, False, True]
 
 
 def test_global_status_is_dependency_free_and_reports_upgrade_command(

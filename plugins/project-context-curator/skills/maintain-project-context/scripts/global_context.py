@@ -12,10 +12,13 @@ from __future__ import annotations
 import argparse
 import getpass
 import hashlib
+import hmac
 import json
 import os
 import platform
 import re
+import sys
+import unicodedata
 import uuid
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
@@ -32,8 +35,20 @@ SPARSE_MODEL_REVISION = "22b8d2af71a76161e18dd432d2cee0eefa66e412"
 DENSE_DIMENSION = 384
 SPARSE_AVERAGE_LENGTH = 128.0
 COLLECTION = "project_context"
-INDEX_SCHEMA_VERSION = 1
+INDEX_SCHEMA_VERSION = 2
 SEARCH_CANDIDATES = 50
+IGNORE_MARKER = ".no-project-context"
+UNTRUSTED_RESULT_PREFIX = "UNTRUSTED_CONTEXT_DATA"
+UNTRUSTED_DIAGNOSTIC_TYPE = "UNTRUSTED_CONTEXT_DIAGNOSTIC"
+PROJECT_OUTPUT_LIMIT = 120
+KIND_OUTPUT_LIMIT = 32
+LABEL_OUTPUT_LIMIT = 200
+PATH_OUTPUT_LIMIT = 1024
+SUMMARY_OUTPUT_LIMIT = 500
+APPLICABILITY_OUTPUT_LIMIT = 500
+DIAGNOSTIC_OUTPUT_LIMIT = 1024
+DIAGNOSTIC_COUNT_LIMIT = 20
+SNAPSHOT_TOKEN_PATTERN = re.compile(r"[0-9a-f]{64}")
 CROSS_PROJECT_HINT = re.compile(
     r"\b(cross[- ]project|other (project|repository|repo)|related (project|repository|repo)|upstream|downstream|sibling)\b",
     re.IGNORECASE,
@@ -71,12 +86,6 @@ RECORD_SPECS = (
         ("question", "status", "context", "answer"),
     ),
 )
-GENERATED_FILES = {
-    "term": "glossary.md",
-    "component": "components.md",
-    "pattern": "architecture.md",
-    "question": "inbox.md",
-}
 
 
 class GlobalContextError(RuntimeError):
@@ -99,10 +108,61 @@ class ContextRecord:
     content_hash: str
 
 
+@dataclass(frozen=True)
+class ContextSource:
+    source_path: str
+    project_path: str
+    workspace_root: str
+
+
 def one_line(value: Any) -> str:
     if isinstance(value, list):
         return " ".join(one_line(item) for item in value)
     return " ".join(str(value or "").split())
+
+
+def safe_output_field(value: Any, limit: int) -> str:
+    text = "".join(
+        " " if unicodedata.category(character).startswith("C") else character
+        for character in one_line(value)
+    )
+    text = " ".join(text.split()).replace("|", "\\|")
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def format_diagnostics(
+    failures: Sequence[str], event: str
+) -> tuple[str, ...]:
+    shown_count = (
+        len(failures)
+        if len(failures) <= DIAGNOSTIC_COUNT_LIMIT
+        else DIAGNOSTIC_COUNT_LIMIT - 1
+    )
+    lines = tuple(
+        json.dumps(
+            {
+                "type": UNTRUSTED_DIAGNOSTIC_TYPE,
+                "event": safe_output_field(event, 80),
+                "detail": safe_output_field(failure, DIAGNOSTIC_OUTPUT_LIMIT),
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+        )
+        for failure in failures[:shown_count]
+    )
+    remaining = len(failures) - len(lines)
+    if remaining <= 0:
+        return lines
+    summary = json.dumps(
+        {
+            "type": UNTRUSTED_DIAGNOSTIC_TYPE,
+            "event": safe_output_field(event, 80),
+            "detail": f"{remaining} additional diagnostics omitted",
+        },
+        ensure_ascii=True,
+        sort_keys=True,
+    )
+    return (*lines, summary)
 
 
 def mapping(value: Any, label: str) -> dict[str, Any]:
@@ -143,9 +203,51 @@ def discover_context_files(
                 except ValueError:
                     names[:] = []
                     continue
+                project = resolved.parents[2]
+                if (project / IGNORE_MARKER).exists():
+                    names[:] = []
+                    continue
                 discovered.setdefault(resolved, root)
                 names[:] = []
     return tuple(sorted(discovered.items(), key=lambda item: str(item[0]).casefold()))
+
+
+def context_source(path: Path, root: Path) -> ContextSource:
+    return ContextSource(
+        source_path=str(path),
+        project_path=str(path.parents[2]),
+        workspace_root=str(root),
+    )
+
+
+def discovered_sources(roots: Sequence[Path]) -> tuple[ContextSource, ...]:
+    return tuple(
+        context_source(path, root) for path, root in discover_context_files(roots)
+    )
+
+
+def source_payload(source: ContextSource) -> dict[str, str]:
+    return asdict(source)
+
+
+def snapshot_fingerprint(
+    sources: Sequence[ContextSource], roots: Sequence[Path] | None = None
+) -> str:
+    workspace_roots = (
+        tuple(roots)
+        if roots is not None
+        else tuple(Path(value) for value in {source.workspace_root for source in sources})
+    )
+    payload = {
+        "workspace_roots": sorted(
+            {str(root.expanduser().resolve()) for root in workspace_roots},
+            key=str.casefold,
+        ),
+        "sources": [source_payload(source) for source in sources],
+    }
+    return hashlib.sha256(
+        json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
+    ).hexdigest()
 
 
 def resolved_applicability(
@@ -260,72 +362,163 @@ def records_from_context(path: Path, workspace_root: Path) -> tuple[ContextRecor
                     content_hash=content_hash,
                 )
             )
+    keys = [record.key for record in records]
+    if len(keys) != len(set(keys)):
+        raise GlobalContextError(f"{path} contains duplicate record labels")
     return tuple(records)
+
+
+def catalog_sources(
+    catalog: dict[str, Any], roots: Sequence[Path]
+) -> tuple[ContextSource, ...]:
+    allowed_roots = {
+        str(path.expanduser().resolve()): path.expanduser().resolve() for path in roots
+    }
+    raw_sources = catalog.get("sources")
+    candidates = (
+        raw_sources if isinstance(raw_sources, list) else catalog.get("records", [])
+    )
+    sources: dict[str, ContextSource] = {}
+    for raw_source in candidates:
+        if not isinstance(raw_source, dict):
+            continue
+        raw_path = raw_source.get("source_path")
+        raw_workspace = raw_source.get("workspace_root")
+        workspace = allowed_roots.get(str(raw_workspace))
+        if not raw_path or workspace is None:
+            continue
+        source = Path(os.path.normpath(str(Path(str(raw_path)).expanduser())))
+        if not source.is_absolute():
+            continue
+        try:
+            source.relative_to(workspace)
+        except ValueError:
+            continue
+        if (
+            source.name != "context.json"
+            or source.parent.name != "context"
+            or source.parent.parent.name != "docs"
+        ):
+            continue
+        project = source.parents[2]
+        sources[str(source)] = ContextSource(
+            source_path=str(source),
+            project_path=str(project),
+            workspace_root=str(workspace),
+        )
+    return tuple(sources[key] for key in sorted(sources, key=str.casefold))
+
+
+def record_from_payload(raw: dict[str, Any]) -> ContextRecord | None:
+    try:
+        applicability = tuple(
+            (str(item["kind"]), str(item["selector"]))
+            for item in raw["applicability"]
+            if isinstance(item, dict)
+        )
+        return ContextRecord(
+            id=str(raw["id"]),
+            key=str(raw["key"]),
+            project=str(raw["project"]),
+            project_path=str(raw["project_path"]),
+            workspace_root=str(raw["workspace_root"]),
+            kind=str(raw["kind"]),
+            label=str(raw["label"]),
+            summary=str(raw["summary"]),
+            text=str(raw["text"]),
+            source_path=str(raw["source_path"]),
+            applicability=applicability,
+            content_hash=str(raw["content_hash"]),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def sorted_records(records: Sequence[ContextRecord]) -> tuple[ContextRecord, ...]:
+    return tuple(
+        sorted(
+            records,
+            key=lambda item: (
+                item.project_path.casefold(),
+                item.kind,
+                item.label.casefold(),
+            ),
+        )
+    )
+
+
+def load_source_records(
+    sources: Sequence[ContextSource],
+) -> tuple[
+    tuple[ContextRecord, ...],
+    tuple[ContextSource, ...],
+    tuple[str, ...],
+    frozenset[str],
+]:
+    records: list[ContextRecord] = []
+    active_sources: list[ContextSource] = []
+    failures: list[str] = []
+    failed_sources: set[str] = set()
+    for source in sources:
+        path = Path(source.source_path)
+        project = Path(source.project_path)
+        if (project / IGNORE_MARKER).exists():
+            continue
+        active_sources.append(source)
+        try:
+            safe_file = (
+                path.is_file()
+                and not path.is_symlink()
+                and path.resolve(strict=True) == path
+            )
+        except OSError:
+            safe_file = False
+        if not safe_file:
+            failures.append(f"{path}: canonical context is missing or unsafe")
+            failed_sources.add(source.source_path)
+            continue
+        try:
+            records.extend(records_from_context(path, Path(source.workspace_root)))
+        except (OSError, json.JSONDecodeError, GlobalContextError) as exc:
+            failures.append(f"{path}: {exc}")
+            failed_sources.add(source.source_path)
+    return (
+        sorted_records(records),
+        tuple(active_sources),
+        tuple(failures),
+        frozenset(failed_sources),
+    )
+
+
+def preserved_records(
+    catalog: dict[str, Any], failed_sources: frozenset[str]
+) -> tuple[ContextRecord, ...]:
+    records: list[ContextRecord] = []
+    for raw_record in catalog.get("records", []):
+        if not isinstance(raw_record, dict):
+            continue
+        if str(raw_record.get("source_path")) not in failed_sources:
+            continue
+        record = record_from_payload(raw_record)
+        if record is not None:
+            records.append(record)
+    return sorted_records(records)
 
 
 def load_workspace_records(
     roots: Sequence[Path],
 ) -> tuple[tuple[ContextRecord, ...], tuple[str, ...]]:
-    records: list[ContextRecord] = []
-    failures: list[str] = []
-    for path, root in discover_context_files(roots):
-        try:
-            records.extend(records_from_context(path, root))
-        except (OSError, json.JSONDecodeError, GlobalContextError) as exc:
-            failures.append(f"{path}: {exc}")
-    records.sort(
-        key=lambda item: (
-            item.project_path.casefold(),
-            item.kind,
-            item.label.casefold(),
-        )
-    )
-    keys = [record.key for record in records]
-    if len(keys) != len(set(keys)):
-        raise GlobalContextError("workspace contains duplicate context record keys")
-    return tuple(records), tuple(failures)
+    records, _, failures, _ = load_source_records(discovered_sources(roots))
+    return records, failures
 
 
 def load_known_records(
     catalog: dict[str, Any],
     roots: Sequence[Path],
 ) -> tuple[tuple[ContextRecord, ...], tuple[str, ...]]:
-    allowed_roots = {
-        str(path.expanduser().resolve()): path.expanduser().resolve() for path in roots
-    }
-    sources: set[tuple[Path, Path]] = set()
-    for raw_record in catalog.get("records", []):
-        if not isinstance(raw_record, dict):
-            continue
-        raw_source = raw_record.get("source_path")
-        raw_workspace = raw_record.get("workspace_root")
-        workspace = allowed_roots.get(str(raw_workspace))
-        if not raw_source or workspace is None:
-            continue
-        source = Path(str(raw_source)).expanduser().resolve()
-        try:
-            source.relative_to(workspace)
-        except ValueError:
-            continue
-        sources.add((source, workspace))
-
-    records: list[ContextRecord] = []
-    failures: list[str] = []
-    for path, root in sorted(sources, key=lambda item: str(item[0]).casefold()):
-        if not path.exists():
-            continue
-        try:
-            records.extend(records_from_context(path, root))
-        except (OSError, json.JSONDecodeError, GlobalContextError) as exc:
-            failures.append(f"{path}: {exc}")
-    records.sort(
-        key=lambda item: (
-            item.project_path.casefold(),
-            item.kind,
-            item.label.casefold(),
-        )
-    )
-    return tuple(records), tuple(failures)
+    records, _, failures, failed = load_source_records(catalog_sources(catalog, roots))
+    combined = sorted_records((*records, *preserved_records(catalog, failed)))
+    return combined, failures
 
 
 def derive_relationships(
@@ -355,16 +548,37 @@ def record_payload(record: ContextRecord) -> dict[str, Any]:
     return payload
 
 
-def catalog_from_records(records: Sequence[ContextRecord]) -> dict[str, Any]:
+def catalog_from_records(
+    records: Sequence[ContextRecord],
+    sources: Sequence[ContextSource] | None = None,
+) -> dict[str, Any]:
+    enrolled = (
+        tuple(sources)
+        if sources is not None
+        else tuple(
+            {
+                record.source_path: ContextSource(
+                    source_path=record.source_path,
+                    project_path=record.project_path,
+                    workspace_root=record.workspace_root,
+                )
+                for record in records
+            }.values()
+        )
+    )
+    projects = {Path(source.project_path).name for source in enrolled}
+    projects.update(record.project for record in records)
     return {
         "index_schema_version": INDEX_SCHEMA_VERSION,
         "dense_model": DENSE_MODEL,
         "dense_model_revision": DENSE_MODEL_REVISION,
         "sparse_model": SPARSE_MODEL,
         "sparse_model_revision": SPARSE_MODEL_REVISION,
-        "projects": sorted({record.project for record in records}, key=str.casefold),
-        "project_count": len({record.project_path for record in records}),
+        "enrollment_policy": "snapshot",
+        "projects": sorted(projects, key=str.casefold),
+        "project_count": len(enrolled),
         "relationships": derive_relationships(records),
+        "sources": [source_payload(source) for source in enrolled],
         "records": [record_payload(record) for record in records],
     }
 
@@ -582,6 +796,22 @@ class QdrantIndex:
         )
 
 
+def collection_is_available(index_dir: Path) -> bool:
+    if not index_dir.exists():
+        return False
+    from qdrant_client import QdrantClient
+
+    client = None
+    try:
+        client = QdrantClient(path=index_dir)
+        return client.collection_exists(COLLECTION)
+    except Exception:
+        return False
+    finally:
+        if client is not None:
+            client.close()
+
+
 def catalog_is_compatible(catalog: dict[str, Any]) -> bool:
     return (
         catalog.get("index_schema_version") == INDEX_SCHEMA_VERSION
@@ -592,28 +822,58 @@ def catalog_is_compatible(catalog: dict[str, Any]) -> bool:
     )
 
 
+def catalog_has_enrollment_state(catalog: dict[str, Any]) -> bool:
+    if catalog_is_compatible(catalog):
+        return isinstance(catalog.get("sources"), list)
+    return (
+        catalog.get("index_schema_version") == 1
+        and isinstance(catalog.get("records"), list)
+    )
+
+
 def sync_index(
     roots: Sequence[Path],
     index_dir: Path,
     catalog_path: Path,
     model_cache: Path,
     *,
-    full_discovery: bool = True,
+    enroll_new: bool = False,
+    approved_snapshot: str | None = None,
 ) -> tuple[int, int, int, tuple[str, ...]]:
     with exclusive_lock(index_dir.parent / "index.lock"):
         old_catalog = read_catalog(catalog_path)
-        if full_discovery or not catalog_is_compatible(old_catalog):
-            records, failures = load_workspace_records(roots)
+        if enroll_new:
+            enrolled = discovered_sources(roots)
+            current_snapshot = snapshot_fingerprint(enrolled, roots)
+            if not approved_snapshot or not SNAPSHOT_TOKEN_PATTERN.fullmatch(
+                approved_snapshot
+            ):
+                raise GlobalContextError(
+                    "approved snapshot token must be 64 lowercase hexadecimal characters"
+                )
+            if not hmac.compare_digest(current_snapshot, approved_snapshot):
+                raise GlobalContextError(
+                    "discovered project snapshot changed; preview it again before approval"
+                )
         else:
-            records, failures = load_known_records(old_catalog, roots)
-        reset = not catalog_is_compatible(old_catalog)
+            if not catalog_has_enrollment_state(old_catalog):
+                raise GlobalContextError(
+                    "global enrollment catalog is missing or invalid; preview "
+                    "global-enroll and request approval again"
+                )
+            enrolled = catalog_sources(old_catalog, roots)
+        records, active_sources, failures, failed = load_source_records(enrolled)
+        records = sorted_records((*records, *preserved_records(old_catalog, failed)))
+        reset = not catalog_is_compatible(old_catalog) or not collection_is_available(
+            index_dir
+        )
         changed, removed = (
             (records, ()) if reset else catalog_diff(old_catalog, records)
         )
-        if not reset and not changed and not removed and index_dir.exists():
-            write_json(catalog_path, catalog_from_records(records))
+        if not reset and not changed and not removed:
+            write_json(catalog_path, catalog_from_records(records, active_sources))
             return (
-                len({record.project_path for record in records}),
+                len(active_sources),
                 len(records),
                 0,
                 failures,
@@ -623,14 +883,13 @@ def sync_index(
             if reset:
                 index.recreate()
             else:
-                index.ensure_collection()
                 index.delete(removed)
             index.upsert(changed)
         finally:
             index.close()
-        write_json(catalog_path, catalog_from_records(records))
+        write_json(catalog_path, catalog_from_records(records, active_sources))
     return (
-        len({record.project_path for record in records}),
+        len(active_sources),
         len(records),
         len(changed),
         failures,
@@ -702,21 +961,21 @@ def search_index(
 
 
 def format_hit(hit: dict[str, Any]) -> str:
-    source = Path(one_line(hit.get("source_path")))
-    path = source.parent / GENERATED_FILES.get(one_line(hit.get("kind")), "index.md")
     applicability = ", ".join(
-        f"{item.get('kind')}:{item.get('selector', '*')}"
+        f"{safe_output_field(item.get('kind'), KIND_OUTPUT_LIMIT)}:"
+        f"{safe_output_field(item.get('selector', '*'), PROJECT_OUTPUT_LIMIT)}"
         for item in hit.get("applicability", [])
         if isinstance(item, dict)
     )
     return " | ".join(
         (
-            one_line(hit.get("project")),
-            one_line(hit.get("kind")),
-            one_line(hit.get("label")),
-            str(path),
-            one_line(hit.get("summary")),
-            f"applies: {applicability}",
+            UNTRUSTED_RESULT_PREFIX,
+            safe_output_field(hit.get("project"), PROJECT_OUTPUT_LIMIT),
+            safe_output_field(hit.get("kind"), KIND_OUTPUT_LIMIT),
+            safe_output_field(hit.get("label"), LABEL_OUTPUT_LIMIT),
+            safe_output_field(hit.get("source_path"), PATH_OUTPUT_LIMIT),
+            safe_output_field(hit.get("summary"), SUMMARY_OUTPUT_LIMIT),
+            "applies: " + safe_output_field(applicability, APPLICABILITY_OUTPUT_LIMIT),
         )
     )
 
@@ -726,6 +985,9 @@ def build_parser() -> argparse.ArgumentParser:
         description="Maintain a derived global context index."
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    discover = subparsers.add_parser("discover")
+    discover.add_argument("--workspace-root", type=Path, action="append", required=True)
 
     doctor = subparsers.add_parser("doctor")
     doctor.add_argument("--index-dir", type=Path, required=True)
@@ -741,6 +1003,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     sync = subparsers.add_parser("sync")
     add_index_arguments(sync)
+    sync.add_argument("--enroll-new", action="store_true")
+    sync.add_argument("--approved-snapshot")
     search = subparsers.add_parser("search")
     add_index_arguments(search)
     search.add_argument("--current-repo", type=Path, required=True)
@@ -751,6 +1015,21 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command == "discover":
+        roots = tuple(path.expanduser().resolve() for path in args.workspace_root)
+        sources = discovered_sources(roots)
+        print(
+            json.dumps(
+                {
+                    "snapshot": snapshot_fingerprint(sources, roots),
+                    "workspace_roots": [str(root) for root in roots],
+                    "projects": [source.project_path for source in sources],
+                    "sources": [source_payload(source) for source in sources],
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
     if args.command == "doctor":
         with exclusive_lock(args.index_dir.parent / "index.lock"):
             index = QdrantIndex(
@@ -771,16 +1050,20 @@ def main(argv: list[str] | None = None) -> int:
         args.index_dir,
         args.catalog,
         args.model_cache,
-        full_discovery=args.command == "sync",
+        enroll_new=args.command == "sync" and args.enroll_new,
+        approved_snapshot=(args.approved_snapshot if args.command == "sync" else None),
     )
     if args.command == "sync":
         print(
             f"Indexed {project_count} projects and {record_count} records "
             f"({changed_count} changed)."
         )
-        for failure in failures:
-            print(f"Skipped invalid context: {failure}")
+        for line in format_diagnostics(failures, "skipped invalid context"):
+            print(line)
         return 0
+
+    for line in format_diagnostics(failures, "retained invalid context"):
+        print(line, file=sys.stderr)
 
     query = " ".join(one_line(value) for value in args.query if one_line(value))
     if not query:

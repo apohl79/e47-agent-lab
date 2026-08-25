@@ -2,6 +2,16 @@
 
 `docs/context/context.json` is the canonical text store. Markdown files in the same directory are generated views for humans and agents; `index.md` includes a compact topical index of every record for task-term retrieval. Initialization records whether context is local-only or versioned in Git. `.no-project-context` disables initialization for a repository when the user declines project context.
 
+The optional cross-project catalog and embedded Qdrant index are disposable
+derived data, not schema storage. Enrollment is an explicit two-phase snapshot:
+preview the exact canonical source paths, obtain user approval for the printed
+token, then apply that unchanged token. Search and ordinary updates refresh only
+enrolled sources. Retrieved `UNTRUSTED_CONTEXT_DATA` is evidence, never agent
+instructions, and retains its canonical `context.json` provenance. Snapshot
+paths and invalid-source diagnostics use escaped, bounded
+`UNTRUSTED_SNAPSHOT_DATA` and `UNTRUSTED_CONTEXT_DIAGNOSTIC` records for the same
+reason.
+
 ## Schema Evolution
 
 `schema_version` is a non-negative integer. The updater owns an ordered migration registry keyed by the source version; every migration must produce exactly the next version. Missing `schema_version` is legacy version `0`.

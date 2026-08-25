@@ -5,12 +5,14 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import hmac
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import unicodedata
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,12 +27,24 @@ IGNORE_MARKER = ".no-project-context"
 CONTEXT_VISIBILITIES = {"local", "versioned"}
 APPLICABILITY_KINDS = {"project", "workspace", "user", "machine", "universal"}
 DEFAULT_APPLICABILITY = [{"kind": "project", "selector": "self"}]
-GLOBAL_CONFIG_SCHEMA_VERSION = 1
+GLOBAL_CONFIG_SCHEMA_VERSION = 2
 GLOBAL_CONFIG_FILE = "config.json"
 GLOBAL_RUNTIME_FILE = "runtime.json"
 GLOBAL_CATALOG_FILE = "catalog.json"
 GLOBAL_INDEX_DIR = "qdrant"
 GLOBAL_MODEL_DIR = "models"
+GLOBAL_RESULT_PREFIX = "UNTRUSTED_CONTEXT_DATA"
+UNTRUSTED_SNAPSHOT_TYPE = "UNTRUSTED_SNAPSHOT_DATA"
+UNTRUSTED_DIAGNOSTIC_TYPE = "UNTRUSTED_CONTEXT_DIAGNOSTIC"
+SNAPSHOT_SOURCE_FIELDS = ("source_path", "project_path", "workspace_root")
+SNAPSHOT_PATH_LIMIT = 4096
+DIAGNOSTIC_OUTPUT_LIMIT = 1024
+DIAGNOSTIC_COUNT_LIMIT = 20
+GLOBAL_KIND_OUTPUT_LIMIT = 32
+GLOBAL_LABEL_OUTPUT_LIMIT = 200
+GLOBAL_PATH_OUTPUT_LIMIT = 1024
+LOCAL_SUMMARY_OUTPUT_LIMIT = 500
+SNAPSHOT_TOKEN_PATTERN = re.compile(r"[0-9a-f]{64}")
 
 TERM_KINDS = {
     "abbreviation",
@@ -102,6 +116,102 @@ SEARCH_FILES = {
     "pattern": "docs/context/architecture.md",
     "question": "docs/context/inbox.md",
 }
+
+
+def safe_display_field(value: Any, limit: int) -> str:
+    text = " ".join(str(value or "").split())
+    text = "".join(
+        " " if unicodedata.category(character).startswith("C") else character
+        for character in text
+    )
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def untrusted_diagnostic_line(event: Any, detail: Any) -> str:
+    return json.dumps(
+        {
+            "type": UNTRUSTED_DIAGNOSTIC_TYPE,
+            "event": safe_display_field(event, 80),
+            "detail": safe_display_field(detail, DIAGNOSTIC_OUTPUT_LIMIT),
+        },
+        ensure_ascii=True,
+        sort_keys=True,
+    )
+
+
+def forward_global_diagnostics(raw: str) -> None:
+    forwarded = 0
+    for line in raw.splitlines():
+        if forwarded >= DIAGNOSTIC_COUNT_LIMIT:
+            break
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict) or payload.get("type") != UNTRUSTED_DIAGNOSTIC_TYPE:
+            continue
+        print(
+            untrusted_diagnostic_line(payload.get("event"), payload.get("detail")),
+            file=sys.stderr,
+        )
+        forwarded += 1
+
+
+def snapshot_source(raw: Any) -> dict[str, str] | None:
+    if not isinstance(raw, dict):
+        return None
+    source: dict[str, str] = {}
+    for field in SNAPSHOT_SOURCE_FIELDS:
+        value = raw.get(field)
+        if not isinstance(value, str) or not value or len(value) > SNAPSHOT_PATH_LIMIT:
+            return None
+        source[field] = value
+    return source
+
+
+def snapshot_sources(snapshot: dict[str, Any]) -> tuple[dict[str, str], ...]:
+    raw_sources = snapshot.get("sources")
+    if not isinstance(raw_sources, list):
+        raise SystemExit("Global context discovery returned invalid snapshot sources")
+    sources = tuple(snapshot_source(raw) for raw in raw_sources)
+    if any(source is None for source in sources):
+        raise SystemExit(
+            "Global context discovery returned an invalid or overlong snapshot path"
+        )
+    return tuple(source for source in sources if source is not None)
+
+
+def snapshot_workspace_roots(snapshot: dict[str, Any]) -> tuple[str, ...]:
+    raw_roots = snapshot.get("workspace_roots")
+    if not isinstance(raw_roots, list) or not raw_roots:
+        raise SystemExit("Global context discovery returned invalid workspace roots")
+    if any(
+        not isinstance(root, str) or not root or len(root) > SNAPSHOT_PATH_LIMIT
+        for root in raw_roots
+    ):
+        raise SystemExit(
+            "Global context discovery returned an invalid or overlong workspace root"
+        )
+    return tuple(dict.fromkeys(raw_roots))
+
+
+def snapshot_source_key(source: dict[str, str]) -> tuple[str, ...]:
+    return tuple(source[field] for field in SNAPSHOT_SOURCE_FIELDS)
+
+
+def print_snapshot_source(change: str, source: dict[str, str]) -> None:
+    print(
+        json.dumps(
+            {
+                "type": UNTRUSTED_SNAPSHOT_TYPE,
+                "change": change,
+                "source": source,
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+        )
+    )
 
 
 def now_iso() -> str:
@@ -245,13 +355,104 @@ def invoke_global_backend(
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise SystemExit(f"Global context {command} failed: {exc}") from exc
+        raise SystemExit(
+            untrusted_diagnostic_line(f"global {command} failed", exc)
+        ) from exc
     if proc.returncode != 0:
         detail = " ".join((proc.stderr or proc.stdout).split()) or (
             f"backend exited with status {proc.returncode}"
         )
-        raise SystemExit(f"Global context {command} failed: {detail}")
+        raise SystemExit(
+            untrusted_diagnostic_line(f"global {command} failed", detail)
+        )
     return proc
+
+
+def discover_global_snapshot(roots: tuple[Path, ...]) -> dict[str, Any]:
+    arguments: list[str] = []
+    for root in roots:
+        arguments.extend(("--workspace-root", str(root)))
+    backend = global_backend_script()
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(backend), "discover", *arguments],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=60,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise SystemExit(
+            untrusted_diagnostic_line("global discovery failed", exc)
+        ) from exc
+    if proc.returncode != 0:
+        detail = " ".join((proc.stderr or proc.stdout).split())
+        raise SystemExit(untrusted_diagnostic_line("global discovery failed", detail))
+    try:
+        snapshot = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        raise SystemExit("Global context discovery returned invalid JSON") from exc
+    if not isinstance(snapshot, dict) or not snapshot.get("snapshot"):
+        raise SystemExit("Global context discovery returned no snapshot token")
+    roots = snapshot_workspace_roots(snapshot)
+    if any(source["workspace_root"] not in roots for source in snapshot_sources(snapshot)):
+        raise SystemExit("Global context discovery returned a source outside its roots")
+    return snapshot
+
+
+def print_snapshot_preview(
+    snapshot: dict[str, Any], previous_catalog: dict[str, Any]
+) -> None:
+    for root in snapshot_workspace_roots(snapshot):
+        print(
+            json.dumps(
+                {
+                    "type": UNTRUSTED_SNAPSHOT_TYPE,
+                    "change": "workspace_root",
+                    "workspace_root": root,
+                },
+                ensure_ascii=True,
+                sort_keys=True,
+            )
+        )
+    current_sources = {
+        snapshot_source_key(source): source for source in snapshot_sources(snapshot)
+    }
+    raw_previous = previous_catalog.get("sources", [])
+    previous_values = (
+        tuple(snapshot_source(raw) for raw in raw_previous)
+        if isinstance(raw_previous, list)
+        else ()
+    )
+    previous_sources = {
+        snapshot_source_key(source): source
+        for source in previous_values
+        if source is not None
+    }
+    added = sorted(set(current_sources) - set(previous_sources))
+    removed = sorted(set(previous_sources) - set(current_sources))
+    print(f"Projects to enroll: {len(added)}")
+    for key in added:
+        print_snapshot_source("add", current_sources[key])
+    print(f"Projects to remove: {len(removed)}")
+    for key in removed:
+        print_snapshot_source("remove", previous_sources[key])
+    print(f"Projects retained: {len(set(current_sources) & set(previous_sources))}")
+    print(f"Snapshot token: {snapshot['snapshot']}")
+    print("No changes made. Ask the user to approve this exact snapshot token.")
+
+
+def validate_snapshot_approval(snapshot: dict[str, Any], approved: str) -> None:
+    current = str(snapshot.get("snapshot", ""))
+    if not SNAPSHOT_TOKEN_PATTERN.fullmatch(approved):
+        raise SystemExit(
+            "Approved snapshot token must be 64 lowercase hexadecimal characters."
+        )
+    if not hmac.compare_digest(current, approved):
+        raise SystemExit(
+            "Discovered project snapshot changed. Preview it again before approval."
+        )
 
 
 def validate_workspace_roots(values: list[Path]) -> tuple[Path, ...]:
@@ -296,21 +497,27 @@ def global_upgrade(args: argparse.Namespace) -> None:
 
 def global_init(args: argparse.Namespace) -> None:
     roots = validate_workspace_roots(args.workspace_root)
+    snapshot = discover_global_snapshot(roots)
+    if not args.approve_snapshot:
+        print_snapshot_preview(
+            snapshot, read_json_object(global_cache_dir() / GLOBAL_CATALOG_FILE)
+        )
+        return
+    validate_snapshot_approval(snapshot, args.approve_snapshot)
     detail = (
         "Qdrant runtime already current"
         if global_runtime_is_current()
         else validate_global_runtime()
     )
-    proc = invoke_global_backend(
-        "sync",
-        backend_base_arguments(roots),
-        timeout=1800,
-    )
+    arguments = backend_base_arguments(roots)
+    arguments.extend(("--enroll-new", "--approved-snapshot", args.approve_snapshot))
+    proc = invoke_global_backend("sync", arguments, timeout=1800)
     stamp = now_iso()
     previous = global_config()
     config = {
         "schema_version": GLOBAL_CONFIG_SCHEMA_VERSION,
         "enabled": True,
+        "enrollment_policy": "snapshot",
         "workspace_roots": [str(root) for root in roots],
         "runtime_upgrade_policy": "prompt",
         "created_at": previous.get("created_at", stamp),
@@ -353,6 +560,21 @@ def global_update(args: argparse.Namespace) -> None:
     print(proc.stdout.strip())
 
 
+def global_enroll(args: argparse.Namespace) -> None:
+    _, roots = require_global_configuration()
+    snapshot = discover_global_snapshot(roots)
+    catalog = read_json_object(global_cache_dir() / GLOBAL_CATALOG_FILE)
+    if not args.approve_snapshot:
+        print_snapshot_preview(snapshot, catalog)
+        return
+    validate_snapshot_approval(snapshot, args.approve_snapshot)
+    require_current_global_runtime()
+    arguments = backend_base_arguments(roots)
+    arguments.extend(("--enroll-new", "--approved-snapshot", args.approve_snapshot))
+    proc = invoke_global_backend("sync", arguments, timeout=1800)
+    print(proc.stdout.strip())
+
+
 def global_status(args: argparse.Namespace) -> None:
     config = global_config()
     roots = workspace_roots(config)
@@ -392,18 +614,18 @@ def try_global_search(
     repo: Path,
     queries: tuple[str, ...],
     limit: int,
-) -> bool:
+) -> tuple[str, ...] | None:
     config = global_config()
     roots = workspace_roots(config)
     if not config.get("enabled") or not roots:
-        return False
+        return None
     if not global_runtime_is_current():
         print(
             "Global context runtime update required; using local context search. "
             f"Ask before running: python3 {Path(__file__).resolve()} global-upgrade",
             file=sys.stderr,
         )
-        return False
+        return None
     arguments = backend_base_arguments(roots)
     arguments.extend(("--current-repo", str(repo)))
     for query in queries:
@@ -412,10 +634,19 @@ def try_global_search(
     try:
         proc = invoke_global_backend("search", arguments, timeout=300)
     except SystemExit as exc:
-        print(f"{exc}; using local context search.", file=sys.stderr)
-        return False
-    print(proc.stdout, end="" if proc.stdout.endswith("\n") else "\n")
-    return True
+        print(
+            untrusted_diagnostic_line("global search unavailable", exc),
+            file=sys.stderr,
+        )
+        print("Using repository-local context search.", file=sys.stderr)
+        return None
+    if proc.stderr:
+        forward_global_diagnostics(proc.stderr)
+    return tuple(
+        line
+        for line in proc.stdout.splitlines()
+        if line and not line.startswith("No global context matches for:")
+    )
 
 
 def context_path(repo: Path) -> Path:
@@ -1182,20 +1413,59 @@ def search_context(args: argparse.Namespace) -> None:
     if args.limit <= 0:
         raise SystemExit("Search limit must be greater than zero.")
 
-    if try_global_search(repo, queries, args.limit):
-        return
-
     require_initialized_context(repo)
-    results = context_search_results(load_context(repo), queries)[: args.limit]
-    if not results:
+    global_lines = try_global_search(repo, queries, args.limit)
+    try:
+        local_results = context_search_results(load_context(repo), queries)
+    except (OSError, SystemExit) as exc:
+        print(
+            untrusted_diagnostic_line("invalid local context", exc),
+            file=sys.stderr,
+        )
+        local_results = []
+    local_lines = [
+        " | ".join(
+            (
+                safe_display_field(kind, GLOBAL_KIND_OUTPUT_LIMIT),
+                safe_display_field(label, GLOBAL_LABEL_OUTPUT_LIMIT),
+                safe_display_field(path, GLOBAL_PATH_OUTPUT_LIMIT),
+                safe_display_field(summary, LOCAL_SUMMARY_OUTPUT_LIMIT),
+                "matched: "
+                + safe_display_field(", ".join(matched), LOCAL_SUMMARY_OUTPUT_LIMIT),
+            )
+        )
+        for _, kind, label, path, summary, matched in local_results
+    ]
+    local_identities = {
+        (
+            safe_display_field(str(context_path(repo)), GLOBAL_PATH_OUTPUT_LIMIT)
+            .replace("|", "\\|")
+            .casefold(),
+            safe_display_field(kind, GLOBAL_KIND_OUTPUT_LIMIT).casefold(),
+            safe_display_field(label, GLOBAL_LABEL_OUTPUT_LIMIT).casefold(),
+        )
+        for _, kind, label, _, _, _ in local_results
+    }
+    remaining_global: list[str] = []
+    for line in global_lines or ():
+        parts = line.split(" | ")
+        identity = (
+            (
+                parts[4].casefold(),
+                parts[2].casefold(),
+                parts[3].casefold(),
+            )
+            if len(parts) >= 5 and parts[0] == GLOBAL_RESULT_PREFIX
+            else None
+        )
+        if identity not in local_identities:
+            remaining_global.append(line)
+    combined = (*local_lines, *remaining_global)[: args.limit]
+    if not combined:
         print(f"No context matches for: {', '.join(queries)}")
         return
-
-    for _, kind, label, path, summary, matched in results:
-        print(
-            f"{kind} | {label} | {path} | {summary} | "
-            f"matched: {', '.join(matched)}"
-        )
+    for line in combined:
+        print(line)
 
 
 def generated_header() -> str:
@@ -1572,6 +1842,10 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="Root to scan recursively for docs/context/context.json; repeat as needed",
     )
+    global_init_parser.add_argument(
+        "--approve-snapshot",
+        help="User-approved token from an unchanged global-init preview",
+    )
     global_init_parser.set_defaults(func=global_init)
 
     global_upgrade_parser = subparsers.add_parser(
@@ -1587,6 +1861,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_repo(global_update_parser)
     global_update_parser.set_defaults(func=global_update)
+
+    global_enroll_parser = subparsers.add_parser(
+        "global-enroll",
+        help="Preview or approve a replacement snapshot of enrolled projects",
+    )
+    add_repo(global_enroll_parser)
+    global_enroll_parser.add_argument(
+        "--approve-snapshot",
+        help="User-approved token from an unchanged global-enroll preview",
+    )
+    global_enroll_parser.set_defaults(func=global_enroll)
 
     global_status_parser = subparsers.add_parser(
         "global-status",

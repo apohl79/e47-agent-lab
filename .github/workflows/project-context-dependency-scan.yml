@@ -1,0 +1,59 @@
+name: Project Context Dependency Scan
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/project-context-dependency-scan.yml"
+      - "plugins/project-context-curator/skills/maintain-project-context/scripts/global_context.py"
+      - "plugins/project-context-curator/skills/maintain-project-context/scripts/global_context.py.lock"
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pip-audit:
+    name: pip-audit (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install pinned uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.9.26"
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+          cache-dependency-glob: plugins/project-context-curator/skills/maintain-project-context/scripts/global_context.py.lock
+
+      - name: Export the frozen PEP 723 lock
+        run: >-
+          uv --no-config export
+          --script plugins/project-context-curator/skills/maintain-project-context/scripts/global_context.py
+          --frozen
+          --python "${{ matrix.python-version }}"
+          --default-index https://pypi.org/simple
+          --format requirements.txt
+          --no-hashes
+          --output-file "${RUNNER_TEMP}/project-context-requirements.txt"
+
+      - name: Audit exact locked dependencies
+        run: >-
+          uv --no-config tool run
+          --python "${{ matrix.python-version }}"
+          --default-index https://pypi.org/simple
+          --from pip-audit==2.10.1 pip-audit
+          --requirement "${RUNNER_TEMP}/project-context-requirements.txt"
+          --no-deps
+          --disable-pip
+          --strict
+          --progress-spinner off
