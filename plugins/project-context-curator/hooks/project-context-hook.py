@@ -219,7 +219,7 @@ def global_context_status(repo: Path, script: Path) -> str:
     except (OSError, subprocess.TimeoutExpired):
         return ""
     status = proc.stdout.strip() if proc.returncode == 0 else ""
-    return "" if status == "Global context index: disabled." else status
+    return status
 
 
 def session_start(payload: dict[str, Any]) -> None:

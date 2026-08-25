@@ -212,6 +212,36 @@ def discover_context_files(
     return tuple(sorted(discovered.items(), key=lambda item: str(item[0]).casefold()))
 
 
+def discover_primary_git_repositories(
+    roots: Sequence[Path],
+) -> tuple[tuple[Path, Path], ...]:
+    discovered: dict[Path, Path] = {}
+    for raw_root in roots:
+        root = raw_root.expanduser().resolve()
+        if not root.is_dir():
+            continue
+        for directory, names, _files in os.walk(root, followlinks=False):
+            current = Path(directory)
+            git_directory = current / ".git"
+            has_git_directory = ".git" in names and not git_directory.is_symlink()
+            names[:] = sorted(name for name in names if name not in SKIPPED_DIRECTORIES)
+            if not has_git_directory:
+                continue
+            if current.is_symlink():
+                names[:] = []
+                continue
+            project = current.resolve()
+            try:
+                project.relative_to(root)
+            except ValueError:
+                names[:] = []
+                continue
+            if (project / IGNORE_MARKER).exists():
+                continue
+            discovered.setdefault(project, root)
+    return tuple(sorted(discovered.items(), key=lambda item: str(item[0]).casefold()))
+
+
 def context_source(path: Path, root: Path) -> ContextSource:
     return ContextSource(
         source_path=str(path),
@@ -223,6 +253,40 @@ def context_source(path: Path, root: Path) -> ContextSource:
 def discovered_sources(roots: Sequence[Path]) -> tuple[ContextSource, ...]:
     return tuple(
         context_source(path, root) for path, root in discover_context_files(roots)
+    )
+
+
+def discover_context_candidates(
+    roots: Sequence[Path],
+) -> tuple[tuple[ContextSource, ...], tuple[ContextSource, ...]]:
+    sources = {
+        Path(source.source_path): source for source in discovered_sources(roots)
+    }
+    requiring_initialization: dict[Path, ContextSource] = {}
+    for project, root in discover_primary_git_repositories(roots):
+        path = project / "docs/context/context.json"
+        if path in sources:
+            continue
+        directories = (path.parent.parent, path.parent)
+        if any(
+            directory.is_symlink()
+            or (directory.exists() and not directory.is_dir())
+            for directory in directories
+        ):
+            continue
+        if path.exists() or path.is_symlink():
+            continue
+        candidate = context_source(path, root)
+        sources[path] = candidate
+        requiring_initialization[path] = candidate
+    source_order = sorted(sources, key=lambda path: str(path).casefold())
+    initialization_order = sorted(
+        requiring_initialization,
+        key=lambda path: str(path).casefold(),
+    )
+    return (
+        tuple(sources[path] for path in source_order),
+        tuple(requiring_initialization[path] for path in initialization_order),
     )
 
 
@@ -1017,7 +1081,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "discover":
         roots = tuple(path.expanduser().resolve() for path in args.workspace_root)
-        sources = discovered_sources(roots)
+        sources, requiring_initialization = discover_context_candidates(roots)
         print(
             json.dumps(
                 {
@@ -1025,6 +1089,9 @@ def main(argv: list[str] | None = None) -> int:
                     "workspace_roots": [str(root) for root in roots],
                     "projects": [source.project_path for source in sources],
                     "sources": [source_payload(source) for source in sources],
+                    "missing_sources": [
+                        source_payload(source) for source in requiring_initialization
+                    ],
                 },
                 sort_keys=True,
             )

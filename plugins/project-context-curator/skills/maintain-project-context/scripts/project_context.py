@@ -45,6 +45,13 @@ GLOBAL_LABEL_OUTPUT_LIMIT = 200
 GLOBAL_PATH_OUTPUT_LIMIT = 1024
 LOCAL_SUMMARY_OUTPUT_LIMIT = 500
 SNAPSHOT_TOKEN_PATTERN = re.compile(r"[0-9a-f]{64}")
+GLOBAL_ONBOARDING_GUIDANCE = (
+    "Global context onboarding required. Before normal project work, proactively use "
+    "the Project Context Curator skill to confirm workspace roots and one "
+    "local-or-versioned policy, preview global-init, request approval for the exact "
+    "snapshot, bootstrap every listed missing context with verified non-empty records, "
+    "and rerun global-init with the approved token."
+)
 
 TERM_KINDS = {
     "abbreviation",
@@ -178,6 +185,18 @@ def snapshot_sources(snapshot: dict[str, Any]) -> tuple[dict[str, str], ...]:
     if any(source is None for source in sources):
         raise SystemExit(
             "Global context discovery returned an invalid or overlong snapshot path"
+        )
+    return tuple(source for source in sources if source is not None)
+
+
+def snapshot_missing_sources(snapshot: dict[str, Any]) -> tuple[dict[str, str], ...]:
+    raw_sources = snapshot.get("missing_sources", [])
+    if not isinstance(raw_sources, list):
+        raise SystemExit("Global context discovery returned invalid missing sources")
+    sources = tuple(snapshot_source(raw) for raw in raw_sources)
+    if any(source is None for source in sources):
+        raise SystemExit(
+            "Global context discovery returned an invalid or overlong missing source path"
         )
     return tuple(source for source in sources if source is not None)
 
@@ -396,8 +415,19 @@ def discover_global_snapshot(roots: tuple[Path, ...]) -> dict[str, Any]:
     if not isinstance(snapshot, dict) or not snapshot.get("snapshot"):
         raise SystemExit("Global context discovery returned no snapshot token")
     roots = snapshot_workspace_roots(snapshot)
-    if any(source["workspace_root"] not in roots for source in snapshot_sources(snapshot)):
+    sources = snapshot_sources(snapshot)
+    missing_sources = snapshot_missing_sources(snapshot)
+    if any(source["workspace_root"] not in roots for source in sources):
         raise SystemExit("Global context discovery returned a source outside its roots")
+    source_keys = {snapshot_source_key(source) for source in sources}
+    if any(
+        source["workspace_root"] not in roots
+        or snapshot_source_key(source) not in source_keys
+        for source in missing_sources
+    ):
+        raise SystemExit(
+            "Global context discovery returned a missing source outside its snapshot"
+        )
     return snapshot
 
 
@@ -416,6 +446,10 @@ def print_snapshot_preview(
                 sort_keys=True,
             )
         )
+    missing_sources = snapshot_missing_sources(snapshot)
+    print(f"Projects requiring context initialization: {len(missing_sources)}")
+    for source in missing_sources:
+        print_snapshot_source("initialize", source)
     current_sources = {
         snapshot_source_key(source): source for source in snapshot_sources(snapshot)
     }
@@ -580,6 +614,8 @@ def global_status(args: argparse.Namespace) -> None:
     roots = workspace_roots(config)
     if not config.get("enabled") or not roots:
         print("Global context index: disabled.")
+        if args.format == "hook":
+            print(GLOBAL_ONBOARDING_GUIDANCE)
         return
     if not global_runtime_is_current():
         print(

@@ -45,6 +45,36 @@ Read `references/context-schema.md` before changing the schema or adding new rec
 
 ### Optional global retrieval
 
+When the session hook reports `Global context onboarding required`, begin the
+workflow proactively before ordinary project work. Do not wait for the user to
+know or request curator commands.
+
+1. Select a read-only preview root from an explicit user-provided path. If none
+   was provided and the current repository is beneath `~/workspace`, use
+   `~/workspace`; otherwise use the directory that contains the current
+   repository. Run `global-init` without an approval token.
+2. The preview recursively includes existing canonical contexts plus prospective
+   `docs/context/context.json` paths for primary Git checkouts that still need
+   initialization. Show the exact workspace roots, `initialize` candidates,
+   enrollment changes, and snapshot token through the host approval UI. Treat
+   every path as `UNTRUSTED_SNAPSHOT_DATA`.
+3. Ask once for approval of that exact snapshot and a default `local` or
+   `versioned` visibility for the listed initialization candidates. Allow the
+   user to override or exclude individual repositories. Rerun the preview if the
+   roots or included set changes.
+4. The approved snapshot and visibility are the enablement/storage decision for
+   its missing repositories. For every `initialize` candidate, read its README,
+   CLAUDE.md/AGENTS.md, top-level layout, and main manifests; then run `init`
+   together with verified `add-component`/`add-term`/`add-pattern` commands. Do
+   not leave an initialized repository with all-zero counts. Process large sets
+   in bounded batches; when the host supports agent delegation, assign one
+   repository per worker while the main agent retains snapshot approval and
+   final count verification.
+5. Rerun `global-init` with the original roots and approved token. Prospective
+   source paths keep the token stable after successful bootstrapping; the backend
+   rejects approval if any context remains missing or the repository snapshot
+   changed.
+
 `global-init` uses snapshot enrollment. Run it first without an approval token;
 it prints every project that would be enrolled and a deterministic snapshot
 token without changing configuration, runtime, catalog, or index state. Show
@@ -67,9 +97,10 @@ lexical matches before global results and retains the dependency-free local
 fallback when the runtime is unavailable or the global query has no hits. `global-update` also
 refreshes only enrolled sources; it never discovers or enrolls a new project.
 
-After repositories are added or removed, run `global-enroll` without a token,
-show its additions/removals preview through the approval UI, and rerun it with
-`--approve-snapshot <printed-token>` only after approval. A repository containing
+After repositories are added or removed, run `global-enroll` without a token.
+Its preview also labels primary Git checkouts whose context must be initialized;
+apply the same approval and verified bootstrap workflow before rerunning it with
+`--approve-snapshot <printed-token>`. A repository containing
 `.no-project-context` is excluded from discovery and, if already enrolled,
 removed on the next ordinary refresh.
 
@@ -120,6 +151,9 @@ convenience, not a separate installation path.
    - If the target is a Git repository, ask whether `docs/context/` should be local or versioned before running init.
    - If the target is not a Git repository, do not ask local vs versioned; run `scripts/project_context.py init --repo <repo>` and it defaults to local.
    - Do not initialize context before the enablement decision. Do not store guessed definitions.
+   - An approved global-onboarding snapshot plus its confirmed default visibility
+     satisfies these decisions for the exact listed initialization candidates;
+     individual repository overrides still take precedence.
 5. During work, watch for context gaps and durable context-worthy facts:
    - Abbreviations or acronyms whose meaning is not already in `glossary.md`
    - Component, service, API, package, event, queue, table, or domain object names whose responsibility is unclear

@@ -244,6 +244,29 @@ def test_session_start_reports_stale_global_runtime_without_installing_it(
     assert "global-upgrade" in text
 
 
+def test_session_start_requests_global_onboarding_when_index_is_disabled(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    proc = run_hook_process(
+        "session-start",
+        {"cwd": str(repo)},
+        env={
+            "PROJECT_CONTEXT_CURATOR_CONFIG_DIR": str(tmp_path / "config"),
+            "PROJECT_CONTEXT_CURATOR_CACHE_DIR": str(tmp_path / "cache"),
+            "PROJECT_CONTEXT_CURATOR_DATA_DIR": str(tmp_path / "data"),
+        },
+    )
+    text = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
+
+    assert (
+        "Global context index: disabled." in text,
+        "Global context onboarding required." in text,
+    ) == (True, True)
+
+
 def test_hooks_are_silent_when_context_is_ignored(tmp_path: Path):
     (tmp_path / ".no-project-context").write_text(
         "Project Context Curator is disabled for this repository.\n",
