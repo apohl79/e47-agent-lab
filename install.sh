@@ -16,6 +16,7 @@ CODEX_PERSONAL_PLUGIN_CLEANUP_NAMES=("plan-executor" "inline-discussion" "projec
 TARGET_MODE="auto"
 ACTION="install"
 SOURCE_OVERRIDE="${E47_MARKETPLACE_SOURCE:-}"
+WITH_CONTEXT_RUNTIME=false
 
 CODEX_PLUGIN_REGISTRY=(
     "reviewers|PR finalization and reviewer-team workflows"
@@ -66,7 +67,7 @@ error() { printf "Error: %s\n" "$1" >&2; exit 1; }
 
 usage() {
     cat <<EOF
-Usage: ./install.sh [install|uninstall] [--all|--claude|--codex] [--source SOURCE]
+Usage: ./install.sh [install|uninstall] [--all|--claude|--codex] [--source SOURCE] [--with-context-runtime]
 
 Without a target flag, installs host-appropriate plugins into each available CLI:
 Claude Code and/or Codex.
@@ -77,6 +78,9 @@ Options:
   --codex          Install into Codex only.
   --source SOURCE  Marketplace source path or GitHub slug. Defaults to the local
                    checkout when run from this repo, otherwise ${REPO_SLUG}.
+  --with-context-runtime
+                   Provision the pinned optional Qdrant/FastEmbed runtime. This
+                   downloads about 277 MiB, plus a managed Python when needed.
 EOF
 }
 
@@ -99,6 +103,9 @@ parse_args() {
                 shift
                 [ "$#" -gt 0 ] || error "--source requires a value"
                 SOURCE_OVERRIDE="$1"
+                ;;
+            --with-context-runtime)
+                WITH_CONTEXT_RUNTIME=true
                 ;;
             -h|--help)
                 usage
@@ -493,6 +500,62 @@ ensure_cli_tools_checkout() {
     return 0
 }
 
+resolve_marketplace_tree() {
+    local source="$1"
+    if [ -d "$source" ]; then
+        printf "%s\n" "$source"
+        return 0
+    fi
+    if [ -d "$CLI_TOOLS_CHECKOUT_DIR" ]; then
+        printf "%s\n" "$CLI_TOOLS_CHECKOUT_DIR"
+        return 0
+    fi
+    ensure_cli_tools_checkout "$source"
+}
+
+install_project_context_runtime() {
+    local source="$1"
+    local tree
+    tree="$(resolve_marketplace_tree "$source")" || return 0
+    [ -n "$tree" ] || return 0
+    local script="${tree}/plugins/project-context-curator/skills/maintain-project-context/scripts/project_context.py"
+    if [ ! -f "$script" ]; then
+        warn "Project context updater missing at ${script}; skipping optional runtime."
+        return 0
+    fi
+    if ! command_exists python3; then
+        warn "python3 not found; skipping optional project context runtime."
+        return 0
+    fi
+
+    if [ "$WITH_CONTEXT_RUNTIME" = true ]; then
+        info "Provisioning pinned project context retrieval runtime..."
+        python3 "$script" global-upgrade
+        ok "Project context retrieval runtime ready."
+        return 0
+    fi
+
+    local status
+    status="$(python3 "$script" global-status 2>/dev/null || true)"
+    case "$status" in
+        *"runtime update required"*)
+            if [ -t 0 ] || [ -t 1 ] || [ -t 2 ]; then
+                local reply
+                printf "Project context retrieval runtime changed (~277 MiB plus Python if needed). Upgrade now? [y/N] " >/dev/tty || true
+                read -r reply </dev/tty || reply=""
+                case "$reply" in
+                    y|Y|yes|YES)
+                        python3 "$script" global-upgrade
+                        ok "Project context retrieval runtime ready."
+                        return 0
+                        ;;
+                esac
+            fi
+            warn "Project context runtime remains unchanged. Run install.sh --with-context-runtime after approval."
+            ;;
+    esac
+}
+
 remove_cli_tools() {
     if [ -z "${HOME:-}" ]; then
         warn "\$HOME is empty; skipping CLI tool removal."
@@ -601,6 +664,7 @@ run_for_selected_targets() {
     # asked for a plugin target and neither CLI was available.
     if [ "$action" = "install" ]; then
         install_cli_tools "$source"
+        install_project_context_runtime "$source"
     else
         remove_cli_tools
     fi

@@ -4,8 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 import re
+import shutil
 import subprocess
 import sys
 from copy import deepcopy
@@ -14,12 +17,20 @@ from pathlib import Path
 from typing import Any, Callable
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 CONTEXT_DIR = Path("docs/context")
 CONTEXT_FILE = CONTEXT_DIR / "context.json"
 GIT_EXCLUDE_ENTRY = "docs/context/"
 IGNORE_MARKER = ".no-project-context"
 CONTEXT_VISIBILITIES = {"local", "versioned"}
+APPLICABILITY_KINDS = {"project", "workspace", "user", "machine", "universal"}
+DEFAULT_APPLICABILITY = [{"kind": "project", "selector": "self"}]
+GLOBAL_CONFIG_SCHEMA_VERSION = 1
+GLOBAL_CONFIG_FILE = "config.json"
+GLOBAL_RUNTIME_FILE = "runtime.json"
+GLOBAL_CATALOG_FILE = "catalog.json"
+GLOBAL_INDEX_DIR = "qdrant"
+GLOBAL_MODEL_DIR = "models"
 
 TERM_KINDS = {
     "abbreviation",
@@ -52,28 +63,36 @@ SEARCH_SPECS: tuple[SearchSpec, ...] = (
         "terms",
         "term",
         "definition",
-        ("term", "kind", "definition", "scope", "aliases", "notes"),
+        (
+            "term",
+            "kind",
+            "definition",
+            "scope",
+            "aliases",
+            "notes",
+            "applicability",
+        ),
     ),
     (
         "component",
         "components",
         "name",
         "responsibility",
-        ("name", "responsibility", "paths", "interfaces", "notes"),
+        ("name", "responsibility", "paths", "interfaces", "notes", "applicability"),
     ),
     (
         "pattern",
         "patterns",
         "name",
         "summary",
-        ("name", "summary", "applies_to", "notes"),
+        ("name", "summary", "applies_to", "notes", "applicability"),
     ),
     (
         "question",
         "open_questions",
         "question",
         "context",
-        ("question", "status", "context", "answer"),
+        ("question", "status", "context", "answer", "applicability"),
     ),
 )
 
@@ -87,6 +106,316 @@ SEARCH_FILES = {
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def environment_path(variable: str, fallback: Path) -> Path:
+    value = os.environ.get(variable)
+    return (
+        Path(value).expanduser().resolve() if value else fallback.expanduser().resolve()
+    )
+
+
+def global_config_dir() -> Path:
+    return environment_path(
+        "PROJECT_CONTEXT_CURATOR_CONFIG_DIR",
+        Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+        / "project-context-curator",
+    )
+
+
+def global_cache_dir() -> Path:
+    return environment_path(
+        "PROJECT_CONTEXT_CURATOR_CACHE_DIR",
+        Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
+        / "project-context-curator",
+    )
+
+
+def global_data_dir() -> Path:
+    return environment_path(
+        "PROJECT_CONTEXT_CURATOR_DATA_DIR",
+        Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share"))
+        / "project-context-curator",
+    )
+
+
+def global_backend_script() -> Path:
+    return Path(__file__).resolve().with_name("global_context.py")
+
+
+def runtime_fingerprint() -> str:
+    backend = global_backend_script()
+    candidates = (
+        backend.with_name("global-runtime.json"),
+        backend.with_suffix(backend.suffix + ".lock"),
+    )
+    digest = hashlib.sha256()
+    found = False
+    for path in candidates:
+        if path.exists():
+            digest.update(path.name.encode())
+            digest.update(path.read_bytes())
+            found = True
+    if not found:
+        digest.update(backend.read_bytes())
+    return digest.hexdigest()
+
+
+def read_json_object(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def write_json_object(path: Path, value: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.chmod(0o700)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(
+        json.dumps(value, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    temporary.chmod(0o600)
+    temporary.replace(path)
+
+
+def global_config() -> dict[str, Any]:
+    return read_json_object(global_config_dir() / GLOBAL_CONFIG_FILE)
+
+
+def global_runtime_state() -> dict[str, Any]:
+    return read_json_object(global_data_dir() / GLOBAL_RUNTIME_FILE)
+
+
+def global_runtime_is_current() -> bool:
+    return global_runtime_state().get("fingerprint") == runtime_fingerprint()
+
+
+def workspace_roots(config: dict[str, Any]) -> tuple[Path, ...]:
+    values = config.get("workspace_roots", [])
+    if not isinstance(values, list):
+        return ()
+    return tuple(Path(str(value)).expanduser().resolve() for value in values)
+
+
+def backend_base_arguments(roots: tuple[Path, ...]) -> list[str]:
+    cache = global_cache_dir()
+    arguments: list[str] = []
+    for root in roots:
+        arguments.extend(("--workspace-root", str(root)))
+    arguments.extend(
+        (
+            "--index-dir",
+            str(cache / GLOBAL_INDEX_DIR),
+            "--catalog",
+            str(cache / GLOBAL_CATALOG_FILE),
+            "--model-cache",
+            str(cache / GLOBAL_MODEL_DIR),
+        )
+    )
+    return arguments
+
+
+def invoke_global_backend(
+    command: str,
+    arguments: list[str],
+    *,
+    timeout: int,
+) -> subprocess.CompletedProcess[str]:
+    uv = os.environ.get("PROJECT_CONTEXT_CURATOR_UV") or shutil.which("uv")
+    if not uv:
+        raise SystemExit(
+            "Global context requires uv. Install uv, then rerun the deterministic "
+            "global-init or global-upgrade command."
+        )
+    backend = global_backend_script()
+    if not backend.exists():
+        raise SystemExit(f"Global context backend is missing: {backend}")
+    try:
+        proc = subprocess.run(
+            [uv, "run", "--frozen", "--script", str(backend), command, *arguments],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise SystemExit(f"Global context {command} failed: {exc}") from exc
+    if proc.returncode != 0:
+        detail = " ".join((proc.stderr or proc.stdout).split()) or (
+            f"backend exited with status {proc.returncode}"
+        )
+        raise SystemExit(f"Global context {command} failed: {detail}")
+    return proc
+
+
+def validate_workspace_roots(values: list[Path]) -> tuple[Path, ...]:
+    roots = tuple(dict.fromkeys(path.expanduser().resolve() for path in values))
+    missing = tuple(path for path in roots if not path.is_dir())
+    if missing:
+        raise SystemExit(
+            "Workspace root is not a directory: "
+            + ", ".join(str(path) for path in missing)
+        )
+    return roots
+
+
+def record_validated_runtime() -> None:
+    write_json_object(
+        global_data_dir() / GLOBAL_RUNTIME_FILE,
+        {"fingerprint": runtime_fingerprint(), "validated_at": now_iso()},
+    )
+
+
+def validate_global_runtime() -> str:
+    cache = global_cache_dir()
+    proc = invoke_global_backend(
+        "doctor",
+        [
+            "--index-dir",
+            str(cache / GLOBAL_INDEX_DIR),
+            "--model-cache",
+            str(cache / GLOBAL_MODEL_DIR),
+        ],
+        timeout=1800,
+    )
+    record_validated_runtime()
+    return proc.stdout.strip()
+
+
+def global_upgrade(args: argparse.Namespace) -> None:
+    detail = validate_global_runtime()
+    print(detail or "Qdrant runtime ready")
+    print(f"Runtime fingerprint: {runtime_fingerprint()}")
+
+
+def global_init(args: argparse.Namespace) -> None:
+    roots = validate_workspace_roots(args.workspace_root)
+    detail = (
+        "Qdrant runtime already current"
+        if global_runtime_is_current()
+        else validate_global_runtime()
+    )
+    proc = invoke_global_backend(
+        "sync",
+        backend_base_arguments(roots),
+        timeout=1800,
+    )
+    stamp = now_iso()
+    previous = global_config()
+    config = {
+        "schema_version": GLOBAL_CONFIG_SCHEMA_VERSION,
+        "enabled": True,
+        "workspace_roots": [str(root) for root in roots],
+        "runtime_upgrade_policy": "prompt",
+        "created_at": previous.get("created_at", stamp),
+        "updated_at": stamp,
+    }
+    write_json_object(global_config_dir() / GLOBAL_CONFIG_FILE, config)
+    print(detail or "Qdrant runtime ready")
+    print(proc.stdout.strip())
+    print(f"Global context configured: {global_config_dir() / GLOBAL_CONFIG_FILE}")
+
+
+def require_global_configuration() -> tuple[dict[str, Any], tuple[Path, ...]]:
+    config = global_config()
+    roots = workspace_roots(config)
+    if not config.get("enabled") or not roots:
+        raise SystemExit(
+            "Global context is not configured. Run global-init with at least one "
+            "--workspace-root."
+        )
+    return config, roots
+
+
+def require_current_global_runtime() -> None:
+    if global_runtime_is_current():
+        return
+    raise SystemExit(
+        "Global context runtime update required. Ask the user before running "
+        f"python3 {Path(__file__).resolve()} global-upgrade."
+    )
+
+
+def global_update(args: argparse.Namespace) -> None:
+    _, roots = require_global_configuration()
+    require_current_global_runtime()
+    proc = invoke_global_backend(
+        "sync",
+        backend_base_arguments(roots),
+        timeout=1800,
+    )
+    print(proc.stdout.strip())
+
+
+def global_status(args: argparse.Namespace) -> None:
+    config = global_config()
+    roots = workspace_roots(config)
+    if not config.get("enabled") or not roots:
+        print("Global context index: disabled.")
+        return
+    if not global_runtime_is_current():
+        print(
+            "Global context runtime update required. Ask the user before running: "
+            f"python3 {Path(__file__).resolve()} global-upgrade"
+        )
+        return
+
+    catalog = read_json_object(global_cache_dir() / GLOBAL_CATALOG_FILE)
+    projects = catalog.get("projects", [])
+    project_count = catalog.get("project_count", len(projects))
+    records = catalog.get("records", [])
+    print(
+        f"Global context index: active across {project_count} projects and "
+        f"{len(records)} records."
+    )
+    print("Workspace roots: " + ", ".join(str(root) for root in roots))
+    current_repo = context_repo(args.repo)
+    relationships = catalog.get("relationships", {})
+    related = (
+        relationships.get(str(current_repo), [])
+        if isinstance(relationships, dict)
+        else []
+    )
+    if related:
+        print(f"Related projects for {current_repo.name}: {', '.join(related)}")
+    if args.format == "hook":
+        print("The standard search command queries this global index automatically.")
+
+
+def try_global_search(
+    repo: Path,
+    queries: tuple[str, ...],
+    limit: int,
+) -> bool:
+    config = global_config()
+    roots = workspace_roots(config)
+    if not config.get("enabled") or not roots:
+        return False
+    if not global_runtime_is_current():
+        print(
+            "Global context runtime update required; using local context search. "
+            f"Ask before running: python3 {Path(__file__).resolve()} global-upgrade",
+            file=sys.stderr,
+        )
+        return False
+    arguments = backend_base_arguments(roots)
+    arguments.extend(("--current-repo", str(repo)))
+    for query in queries:
+        arguments.extend(("--query", query))
+    arguments.extend(("--limit", str(limit)))
+    try:
+        proc = invoke_global_backend("search", arguments, timeout=300)
+    except SystemExit as exc:
+        print(f"{exc}; using local context search.", file=sys.stderr)
+        return False
+    print(proc.stdout, end="" if proc.stdout.endswith("\n") else "\n")
+    return True
 
 
 def context_path(repo: Path) -> Path:
@@ -238,6 +567,7 @@ def remove_git_exclude_entry(repo: Path) -> bool:
 def default_context() -> dict[str, Any]:
     return {
         "schema_version": SCHEMA_VERSION,
+        "default_applicability": deepcopy(DEFAULT_APPLICABILITY),
         "terms": [],
         "components": [],
         "patterns": [],
@@ -268,9 +598,76 @@ def migrate_v0_to_v1(data: dict[str, Any]) -> dict[str, Any]:
     return migrated
 
 
+def migrate_v1_to_v2(data: dict[str, Any]) -> dict[str, Any]:
+    migrated = deepcopy(data)
+    migrated.setdefault("default_applicability", deepcopy(DEFAULT_APPLICABILITY))
+    migrated["schema_version"] = 2
+    return migrated
+
+
 MIGRATIONS: dict[int, Migration] = {
     0: migrate_v0_to_v1,
+    1: migrate_v1_to_v2,
 }
+
+
+def normalize_applicability(
+    value: Any,
+    label: str,
+) -> list[dict[str, str]]:
+    if not isinstance(value, list) or not value:
+        raise SystemExit(f"Invalid {label}: expected a non-empty list")
+
+    normalized: dict[tuple[str, str], dict[str, str]] = {}
+    for raw_selector in value:
+        if not isinstance(raw_selector, dict):
+            raise SystemExit(f"Invalid {label}: each selector must be an object")
+        kind = str(raw_selector.get("kind", "")).strip().casefold()
+        if kind not in APPLICABILITY_KINDS:
+            allowed = ", ".join(sorted(APPLICABILITY_KINDS))
+            raise SystemExit(
+                f"Invalid applicability kind {kind!r} in {label}. Allowed: {allowed}"
+            )
+        raw_value = str(raw_selector.get("selector", "")).strip()
+        if kind == "universal":
+            if raw_value:
+                raise SystemExit(
+                    f"Invalid {label}: universal applicability has no selector"
+                )
+            selector = "*"
+            item = {"kind": kind}
+        else:
+            if not raw_value:
+                raise SystemExit(
+                    f"Invalid {label}: {kind} applicability requires a selector"
+                )
+            selector = raw_value
+            item = {"kind": kind, "selector": selector}
+        normalized[(kind, selector.casefold())] = item
+    return [normalized[key] for key in sorted(normalized)]
+
+
+def parse_applicability(values: list[str] | None) -> list[dict[str, str]] | None:
+    if values is None:
+        return None
+    selectors: list[dict[str, str]] = []
+    for value in values:
+        raw = value.strip()
+        kind, separator, selector = raw.partition(":")
+        kind = kind.casefold()
+        if kind not in APPLICABILITY_KINDS:
+            allowed = ", ".join(sorted(APPLICABILITY_KINDS))
+            raise SystemExit(f"Invalid applicability kind {kind!r}. Allowed: {allowed}")
+        if kind == "universal":
+            if separator:
+                raise SystemExit("Universal applicability does not accept a selector")
+            selectors.append({"kind": kind})
+            continue
+        resolved_selector = selector.strip() if separator else "self"
+        if not resolved_selector:
+            raise SystemExit(f"Applicability {kind!r} requires a non-blank selector")
+        selectors.append({"kind": kind, "selector": resolved_selector})
+    return normalize_applicability(selectors, "applicability")
 
 
 def context_schema_version(data: dict[str, Any]) -> int:
@@ -362,6 +759,21 @@ def load_context_with_migrations(
     for key in ("terms", "components", "patterns", "open_questions"):
         if not isinstance(merged.get(key), list):
             raise SystemExit(f"Invalid context field {key}: expected list")
+    merged["default_applicability"] = normalize_applicability(
+        merged.get("default_applicability"),
+        "default_applicability",
+    )
+    for collection in ("terms", "components", "patterns", "open_questions"):
+        for index, record in enumerate(merged[collection]):
+            if not isinstance(record, dict):
+                raise SystemExit(
+                    f"Invalid context field {collection}[{index}]: expected object"
+                )
+            if "applicability" in record:
+                record["applicability"] = normalize_applicability(
+                    record["applicability"],
+                    f"{collection}[{index}].applicability",
+                )
     return merged, applied
 
 
@@ -441,6 +853,10 @@ def ensure_context_gitignore(ctx_dir: Path) -> None:
 
 def normalize(data: dict[str, Any]) -> None:
     data["schema_version"] = SCHEMA_VERSION
+    data["default_applicability"] = normalize_applicability(
+        data.get("default_applicability", deepcopy(DEFAULT_APPLICABILITY)),
+        "default_applicability",
+    )
     policy = data.get("storage_policy")
     if isinstance(policy, dict) and "gitignore_docs_context" in policy:
         policy["git_exclude_docs_context"] = policy.pop("gitignore_docs_context")
@@ -491,6 +907,12 @@ def upsert_common(record: dict[str, Any], source: str | None) -> None:
         record["source"] = source
 
 
+def set_applicability(record: dict[str, Any], values: list[str] | None) -> None:
+    applicability = parse_applicability(values)
+    if applicability is not None:
+        record["applicability"] = applicability
+
+
 def add_term(args: argparse.Namespace) -> None:
     repo = context_repo(args.repo)
     require_initialized_context(repo)
@@ -509,6 +931,7 @@ def add_term(args: argparse.Namespace) -> None:
     record["scope"] = args.scope
     set_if_present(record, "aliases", split_values(args.aliases))
     set_if_present(record, "notes", args.notes)
+    set_applicability(record, args.applicability)
     upsert_common(record, args.source)
     save_context(repo, data)
     print(f"Updated term: {args.term}")
@@ -527,6 +950,7 @@ def add_component(args: argparse.Namespace) -> None:
     set_if_present(record, "paths", split_values(args.paths))
     set_if_present(record, "interfaces", split_values(args.interfaces))
     set_if_present(record, "notes", args.notes)
+    set_applicability(record, args.applicability)
     upsert_common(record, args.source)
     save_context(repo, data)
     print(f"Updated component: {args.name}")
@@ -544,6 +968,7 @@ def add_pattern(args: argparse.Namespace) -> None:
     record["summary"] = args.summary
     set_if_present(record, "applies_to", split_values(args.applies_to))
     set_if_present(record, "notes", args.notes)
+    set_applicability(record, args.applicability)
     upsert_common(record, args.source)
     save_context(repo, data)
     print(f"Updated pattern: {args.name}")
@@ -559,6 +984,7 @@ def add_question(args: argparse.Namespace) -> None:
         data["open_questions"].append(record)
 
     set_if_present(record, "context", args.context)
+    set_applicability(record, args.applicability)
     stamp = now_iso()
     record.setdefault("created_at", stamp)
     record["updated_at"] = stamp
@@ -594,6 +1020,9 @@ def init_context(args: argparse.Namespace) -> None:
         visibility = "local"
 
     data = load_context(repo)
+    default_applicability = parse_applicability(args.default_applicability)
+    if default_applicability is not None:
+        data["default_applicability"] = default_applicability
     existing_policy = data.get("storage_policy")
     data["storage_policy"] = storage_policy(
         visibility,
@@ -747,13 +1176,16 @@ def context_search_results(
 
 def search_context(args: argparse.Namespace) -> None:
     repo = context_repo(args.repo)
-    require_initialized_context(repo)
     queries = normalized_queries(args.query)
     if not queries:
         raise SystemExit("Search query must contain at least one non-blank term.")
     if args.limit <= 0:
         raise SystemExit("Search limit must be greater than zero.")
 
+    if try_global_search(repo, queries, args.limit):
+        return
+
+    require_initialized_context(repo)
     results = context_search_results(load_context(repo), queries)[: args.limit]
     if not results:
         print(f"No context matches for: {', '.join(queries)}")
@@ -778,6 +1210,25 @@ def md_escape(value: Any) -> str:
 def markdown_anchor(value: Any) -> str:
     text = re.sub(r"[^\w\s-]", "", str(value).casefold())
     return re.sub(r"[\s-]+", "-", text).strip("-")
+
+
+def applicability_text(value: Any) -> str:
+    if not isinstance(value, list):
+        return ""
+    return ", ".join(
+        (
+            str(selector.get("kind", ""))
+            if selector.get("kind") == "universal"
+            else f"{selector.get('kind', '')}:{selector.get('selector', '')}"
+        )
+        for selector in value
+        if isinstance(selector, dict)
+    )
+
+
+def topical_applicability(record: dict[str, Any]) -> str:
+    value = applicability_text(record.get("applicability"))
+    return f" [applies: {value}]" if value else ""
 
 
 def render_topical_index(data: dict[str, Any]) -> list[str]:
@@ -812,7 +1263,7 @@ def render_topical_index(data: dict[str, Any]) -> list[str]:
             suffix = f" ({details})" if details else ""
             lines.append(
                 f"- [{one_line(term.get('term'))}](glossary.md){suffix} — "
-                f"{compact_summary(term.get('definition'))}"
+                f"{compact_summary(term.get('definition'))}{topical_applicability(term)}"
             )
     else:
         lines.append("- None recorded.")
@@ -824,6 +1275,7 @@ def render_topical_index(data: dict[str, Any]) -> list[str]:
             lines.append(
                 f"- [{name}](components.md#{markdown_anchor(name)}) — "
                 f"{compact_summary(component.get('responsibility'))}"
+                f"{topical_applicability(component)}"
             )
     else:
         lines.append("- None recorded.")
@@ -834,7 +1286,7 @@ def render_topical_index(data: dict[str, Any]) -> list[str]:
             name = one_line(pattern.get("name"))
             lines.append(
                 f"- [{name}](architecture.md#{markdown_anchor(name)}) — "
-                f"{compact_summary(pattern.get('summary'))}"
+                f"{compact_summary(pattern.get('summary'))}{topical_applicability(pattern)}"
             )
     else:
         lines.append("- None recorded.")
@@ -847,7 +1299,7 @@ def render_topical_index(data: dict[str, Any]) -> list[str]:
             suffix = f" — {context}" if context else ""
             lines.append(
                 f"- [{one_line(question.get('status', 'open'))}] "
-                f"[{label}](inbox.md){suffix}"
+                f"[{label}](inbox.md){suffix}{topical_applicability(question)}"
             )
     else:
         lines.append("- None recorded.")
@@ -896,6 +1348,15 @@ def render_index(data: dict[str, Any]) -> str:
         )
     lines.extend(
         [
+            "## Applicability",
+            "",
+            f"- Collection default: {applicability_text(data['default_applicability'])}",
+            "- Individual records may override this default.",
+            "",
+        ]
+    )
+    lines.extend(
+        [
             "## Counts",
             "",
             f"- Terms: {len(data['terms'])}",
@@ -921,18 +1382,19 @@ def render_glossary(data: dict[str, Any]) -> str:
 
     lines.extend(
         [
-            "| Term | Kind | Definition | Scope | Aliases | Source |",
-            "| --- | --- | --- | --- | --- | --- |",
+            "| Term | Kind | Definition | Scope | Applicability | Aliases | Source |",
+            "| --- | --- | --- | --- | --- | --- | --- |",
         ]
     )
     for term in data["terms"]:
         aliases = ", ".join(term.get("aliases", []))
         lines.append(
-            "| {term} | {kind} | {definition} | {scope} | {aliases} | {source} |".format(
+            "| {term} | {kind} | {definition} | {scope} | {applicability} | {aliases} | {source} |".format(
                 term=md_escape(term.get("term", "")),
                 kind=md_escape(term.get("kind", "")),
                 definition=md_escape(term.get("definition", "")),
                 scope=md_escape(term.get("scope", "")),
+                applicability=md_escape(applicability_text(term.get("applicability"))),
                 aliases=md_escape(aliases),
                 source=md_escape(term.get("source", "")),
             )
@@ -970,6 +1432,10 @@ def render_components(data: dict[str, Any]) -> str:
             lines.append("")
         if component.get("notes"):
             lines.extend([f"Notes: {component['notes']}", ""])
+        if component.get("applicability"):
+            lines.extend(
+                [f"Applicability: {applicability_text(component['applicability'])}", ""]
+            )
         if component.get("source"):
             lines.extend([f"Source: {component['source']}", ""])
     return "\n".join(lines)
@@ -1000,6 +1466,10 @@ def render_architecture(data: dict[str, Any]) -> str:
             lines.append("")
         if pattern.get("notes"):
             lines.extend([f"Notes: {pattern['notes']}", ""])
+        if pattern.get("applicability"):
+            lines.extend(
+                [f"Applicability: {applicability_text(pattern['applicability'])}", ""]
+            )
         if pattern.get("source"):
             lines.extend([f"Source: {pattern['source']}", ""])
     return "\n".join(lines)
@@ -1028,6 +1498,10 @@ def render_inbox(data: dict[str, Any]) -> str:
             lines.extend([f"Context: {question['context']}", ""])
         if question.get("answer"):
             lines.extend([f"Answer: {question['answer']}", ""])
+        if question.get("applicability"):
+            lines.extend(
+                [f"Applicability: {applicability_text(question['applicability'])}", ""]
+            )
     return "\n".join(lines)
 
 
@@ -1037,6 +1511,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     def add_repo(subparser: argparse.ArgumentParser) -> None:
         subparser.add_argument("--repo", type=Path, default=Path("."), help="Repository root")
+
+    def add_applicability(subparser: argparse.ArgumentParser) -> None:
+        subparser.add_argument(
+            "--applicability",
+            action="append",
+            help=(
+                "Override collection applicability with kind[:selector]; repeat for "
+                "project, workspace, user, machine, or universal selectors. "
+                "A missing selector means self."
+            ),
+        )
 
     init_parser = subparsers.add_parser("init", help="Create docs/context files")
     add_repo(init_parser)
@@ -1051,6 +1536,14 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     init_parser.add_argument("--source", default="user-confirmed")
+    init_parser.add_argument(
+        "--default-applicability",
+        action="append",
+        help=(
+            "Collection default as kind[:selector]; repeat for project, workspace, "
+            "user, machine, or universal selectors. Defaults to project:self."
+        ),
+    )
     init_parser.set_defaults(func=init_context)
 
     ignore_parser = subparsers.add_parser(
@@ -1067,6 +1560,44 @@ def build_parser() -> argparse.ArgumentParser:
     add_repo(update_parser)
     update_parser.set_defaults(func=update_context)
 
+    global_init_parser = subparsers.add_parser(
+        "global-init",
+        help="Provision the pinned Qdrant runtime and index configured workspace roots",
+    )
+    add_repo(global_init_parser)
+    global_init_parser.add_argument(
+        "--workspace-root",
+        type=Path,
+        action="append",
+        required=True,
+        help="Root to scan recursively for docs/context/context.json; repeat as needed",
+    )
+    global_init_parser.set_defaults(func=global_init)
+
+    global_upgrade_parser = subparsers.add_parser(
+        "global-upgrade",
+        help="Provision or update the pinned Qdrant runtime after user approval",
+    )
+    add_repo(global_upgrade_parser)
+    global_upgrade_parser.set_defaults(func=global_upgrade)
+
+    global_update_parser = subparsers.add_parser(
+        "global-update",
+        help="Incrementally synchronize configured canonical contexts into Qdrant",
+    )
+    add_repo(global_update_parser)
+    global_update_parser.set_defaults(func=global_update)
+
+    global_status_parser = subparsers.add_parser(
+        "global-status",
+        help="Report global-index configuration and runtime compatibility",
+    )
+    add_repo(global_status_parser)
+    global_status_parser.add_argument(
+        "--format", choices=("text", "hook"), default="text"
+    )
+    global_status_parser.set_defaults(func=global_status)
+
     term_parser = subparsers.add_parser("add-term", help="Add or update a glossary term")
     add_repo(term_parser)
     term_parser.add_argument("--term", required=True)
@@ -1076,6 +1607,7 @@ def build_parser() -> argparse.ArgumentParser:
     term_parser.add_argument("--aliases", nargs="*")
     term_parser.add_argument("--notes")
     term_parser.add_argument("--source", default="user-confirmed")
+    add_applicability(term_parser)
     term_parser.set_defaults(func=add_term)
 
     component_parser = subparsers.add_parser("add-component", help="Add or update a component")
@@ -1086,6 +1618,7 @@ def build_parser() -> argparse.ArgumentParser:
     component_parser.add_argument("--interfaces", nargs="*")
     component_parser.add_argument("--notes")
     component_parser.add_argument("--source", default="user-confirmed")
+    add_applicability(component_parser)
     component_parser.set_defaults(func=add_component)
 
     pattern_parser = subparsers.add_parser("add-pattern", help="Add or update an architecture pattern")
@@ -1095,12 +1628,14 @@ def build_parser() -> argparse.ArgumentParser:
     pattern_parser.add_argument("--applies-to", nargs="*")
     pattern_parser.add_argument("--notes")
     pattern_parser.add_argument("--source", default="user-confirmed")
+    add_applicability(pattern_parser)
     pattern_parser.set_defaults(func=add_pattern)
 
     question_parser = subparsers.add_parser("add-question", help="Record an unresolved question")
     add_repo(question_parser)
     question_parser.add_argument("--question", required=True)
     question_parser.add_argument("--context")
+    add_applicability(question_parser)
     question_parser.set_defaults(func=add_question)
 
     remove_parser = subparsers.add_parser(

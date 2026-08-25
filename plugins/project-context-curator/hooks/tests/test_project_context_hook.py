@@ -135,8 +135,9 @@ def test_session_start_emits_context(tmp_path: Path):
     assert output["hookSpecificOutput"]["hookEventName"] == "SessionStart"
     assert "Project Context Curator is active" in text
     assert "Capturing durable project-level insight is part of the work" in text
-    assert "Stay at project scope" in text
-    assert "never store task, feature, or research-specific details" in text
+    assert "Facts default to project applicability" in text
+    assert "workspace, user, machine, or universal applicability" in text
+    assert "never store task, feature, or research-specific details" in text.casefold()
     assert "you are unsure whether it belongs" in text
     assert "user-confirmed enablement decision" in text
     assert ".no-project-context" in text
@@ -180,7 +181,7 @@ def test_session_start_migrates_context_and_refreshes_views(tmp_path: Path) -> N
     index = (tmp_path / "docs/context/index.md").read_text(encoding="utf-8")
 
     assert (data["schema_version"], "## Topical Index" in index, "ACS" in index) == (
-        1,
+        2,
         True,
         True,
     )
@@ -197,6 +198,48 @@ def test_context_update_failure_is_non_blocking_and_logged(tmp_path: Path) -> No
         warning.startswith("Automatic project context update failed:"),
         "Automatic project context update failed:" in module.LOG_PATH.read_text(encoding="utf-8"),
     ) == (True, True)
+
+
+def test_session_start_reports_stale_global_runtime_without_installing_it(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    workspace = tmp_path / "workspace"
+    config_dir = tmp_path / "config"
+    data_dir = tmp_path / "data"
+    repo.mkdir()
+    workspace.mkdir()
+    config_dir.mkdir()
+    data_dir.mkdir()
+    (config_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "enabled": True,
+                "workspace_roots": [str(workspace)],
+                "runtime_upgrade_policy": "prompt",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (data_dir / "runtime.json").write_text(
+        json.dumps({"fingerprint": "stale"}), encoding="utf-8"
+    )
+
+    proc = run_hook_process(
+        "session-start",
+        {"cwd": str(repo)},
+        env={
+            "PROJECT_CONTEXT_CURATOR_CONFIG_DIR": str(config_dir),
+            "PROJECT_CONTEXT_CURATOR_CACHE_DIR": str(tmp_path / "cache"),
+            "PROJECT_CONTEXT_CURATOR_DATA_DIR": str(data_dir),
+        },
+    )
+
+    text = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert "Global context runtime update required" in text
+    assert "Ask the user before running" in text
+    assert "global-upgrade" in text
 
 
 def test_hooks_are_silent_when_context_is_ignored(tmp_path: Path):

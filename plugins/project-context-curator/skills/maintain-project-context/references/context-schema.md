@@ -19,7 +19,10 @@ When changing the canonical schema:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
+  "default_applicability": [
+    {"kind": "project", "selector": "self"}
+  ],
   "storage_policy": {
     "context_visibility": "local",
     "git_initialized": true,
@@ -35,6 +38,41 @@ When changing the canonical schema:
   "open_questions": []
 }
 ```
+
+## Applicability
+
+Applicability describes where a fact is relevant; it does not control where the
+canonical record is stored or who may read it. Every collection has a
+`default_applicability`. A record may replace that default with its own
+`applicability` array.
+
+Selectors are typed objects:
+
+- `project`, `workspace`, `user`, and `machine` require a `selector`.
+- `self` resolves while indexing to the owning project, discovered workspace,
+  current user, or current machine.
+- `universal` has no selector and denotes knowledge that is independent of
+  those boundaries.
+
+Examples:
+
+```json
+{"applicability": [{"kind": "workspace", "selector": "self"}]}
+```
+
+```json
+{
+  "applicability": [
+    {"kind": "user", "selector": "self"},
+    {"kind": "machine", "selector": "self"}
+  ]
+}
+```
+
+CLI values use `kind[:selector]`, for example `--applicability user:self` or
+`--applicability universal`. Omitting a non-universal selector means `self`.
+Existing schema-v1 collections migrate to `project:self`; individual records
+remain unchanged and inherit that default.
 
 ## Storage Policy
 
@@ -66,6 +104,7 @@ Optional fields:
 
 - `aliases`: alternate names or spellings
 - `notes`: short implementation or usage notes
+- `applicability`: typed applicability selectors overriding the collection default
 
 ## Component
 
@@ -83,6 +122,7 @@ Optional fields:
 - `paths`: code or docs paths
 - `interfaces`: APIs, events, topics, queues, ports, or external dependencies
 - `notes`: boundary or implementation notes
+- `applicability`: typed applicability selectors overriding the collection default
 
 ## Pattern
 
@@ -99,6 +139,7 @@ Optional fields:
 
 - `applies_to`: paths, components, or layers
 - `notes`: examples, exceptions, or pitfalls
+- `applicability`: typed applicability selectors overriding the collection default
 
 ## Open Question
 
@@ -114,3 +155,4 @@ Optional fields:
 
 - `context`: where the question came from
 - `answer`: confirmed answer once known
+- `applicability`: typed applicability selectors overriding the collection default

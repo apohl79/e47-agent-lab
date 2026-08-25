@@ -1,7 +1,7 @@
 {
   "name": "project-context-curator",
-  "version": "0.2.2",
-  "description": "Proactively maintains durable repository domain context for fresh agent sessions.",
+  "version": "0.3.0",
+  "description": "Maintains durable scoped context with optional cross-project hybrid retrieval.",
   "author": {
     "name": "Local developer"
   },
@@ -11,7 +11,7 @@
         "slot": "contextual_user",
         "position": "supplement",
         "condition_shell": "test \"${PROJECT_CONTEXT_CURATOR_DISABLED:-0}\" != \"1\" && root=\"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" && common=\"$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)\" && case \"$common\" in */.git) root=\"${common%/.git}\" ;; esac && test ! -e \"$root/.no-project-context\"",
-        "text": "Capture durable new learnings in docs/context. Capturing durable project-level insight is part of the work, not a follow-up \u2014 the turn you verify a stable term, component, API, ownership boundary, architecture rule, environment mapping, or deployment convention from repo evidence or user confirmation, run the updater that same turn before you reply."
+        "text": "Capture durable new learnings in docs/context. Capturing durable insight is part of the work, not a follow-up \u2014 the turn you verify a stable term, component, API, ownership boundary, architecture rule, environment mapping, or deployment convention from repo evidence or user confirmation, run the updater that same turn before you reply. Facts default to project applicability; use workspace, user, machine, or universal applicability only when verified."
       }
     ]
   },
@@ -19,7 +19,7 @@
   "interface": {
     "displayName": "Project Context Curator",
     "shortDescription": "Capture durable project context.",
-    "longDescription": "Project Context Curator helps agents automatically activate project-context curation, proactively store durable repo/user-confirmed insights, detect unclear project terms, ask concise clarification questions, and update local ignored context files under docs/context for future sessions.",
+    "longDescription": "Project Context Curator captures durable scoped knowledge in canonical context files and can retrieve relevant facts across configured projects through an optional local hybrid index.",
     "developerName": "Local developer",
     "category": "Productivity",
     "capabilities": [

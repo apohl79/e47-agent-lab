@@ -27,7 +27,7 @@
     },
     {
       "name": "project-context-curator",
-      "description": "Proactively maintains durable repository domain context for fresh agent sessions.",
+      "description": "Maintains durable scoped context with optional cross-project hybrid retrieval.",
       "source": "./plugins/project-context-curator",
       "category": "workflow"
     }

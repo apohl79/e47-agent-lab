@@ -198,6 +198,30 @@ def update_existing_context(repo: Path, script: Path) -> str:
     return warning
 
 
+def global_context_status(repo: Path, script: Path) -> str:
+    try:
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(script),
+                "global-status",
+                "--format",
+                "hook",
+                "--repo",
+                str(repo),
+            ],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    status = proc.stdout.strip() if proc.returncode == 0 else ""
+    return "" if status == "Global context index: disabled." else status
+
+
 def session_start(payload: dict[str, Any]) -> None:
     cwd = cwd_from_payload(payload)
     current_worktree = worktree_root(cwd)
@@ -207,6 +231,7 @@ def session_start(payload: dict[str, Any]) -> None:
 
     script = updater_script()
     update_warning = update_existing_context(repo, script)
+    global_status = global_context_status(repo, script)
     data = load_context(repo)
     index = repo / CONTEXT_INDEX
     git_initialized = is_git_initialized(repo)
@@ -231,8 +256,9 @@ def session_start(payload: dict[str, Any]) -> None:
             "investigation and answering questions count. The turn you verify a stable term, "
             "component, API, ownership boundary, architecture rule, environment mapping, or "
             "deployment convention from repo evidence, tool results, or user confirmation, run the "
-            "updater that same turn, before you reply. Stay at project scope; never store task, "
-            "feature, or research-specific details. If such an item is undocumented and its meaning "
+            "updater that same turn, before you reply. Facts default to project applicability; use "
+            "explicit workspace, user, machine, or universal applicability only when verified. Never "
+            "store task, feature, or research-specific details. If such an item is undocumented and its meaning "
             "is unclear, or you are unsure whether it belongs, ask one concise question first."
         ),
         (
@@ -260,6 +286,8 @@ def session_start(payload: dict[str, Any]) -> None:
     ]
     if update_warning:
         lines.insert(2, update_warning)
+    if global_status:
+        lines.insert(2, global_status)
     if current_worktree != repo:
         lines.insert(2, f"Current worktree: {current_worktree}")
 

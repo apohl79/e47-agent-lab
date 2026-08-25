@@ -22,7 +22,8 @@ Use text files as the canonical store:
 - If the user chooses versioned context, the updater removes an exact `docs/context/` entry from `.git/info/exclude` if one exists and leaves repository `.gitignore` files unchanged.
 - If the target directory is not a Git repository, context is local by default and no local-vs-versioned question is needed.
 - If the current repository directory is a Git linked worktree, store and read project context from the primary checkout that owns the shared `.git` directory, not from the linked worktree directory.
-- Do not use vector databases or SQLite as canonical storage. They may be added later only as derived indexes.
+- `default_applicability` describes the collection boundary. Individual records may override it with typed `project`, `workspace`, `user`, `machine`, or `universal` selectors.
+- Do not use vector databases or SQLite as canonical storage. The optional global Qdrant index is disposable derived data; every result retains its canonical file and project provenance.
 
 Use the updater script for writes:
 
@@ -30,6 +31,8 @@ Use the updater script for writes:
 python3 <skill-dir>/scripts/project_context.py init --repo . --visibility local
 python3 <skill-dir>/scripts/project_context.py update --repo .
 python3 <skill-dir>/scripts/project_context.py ignore --repo .
+python3 <skill-dir>/scripts/project_context.py global-init --repo . \
+  --workspace-root ~/workspace
 ```
 
 For initialized repositories, the session-start hook runs `update` before loading context. The command applies each registered schema migration in order and regenerates all Markdown views. Update failures do not block session start; the hook reports the failure and writes it to its log.
@@ -39,6 +42,34 @@ Use `python3 <skill-dir>/scripts/project_context.py --help` and
 
 Read `references/context-schema.md` before changing the schema or adding new record types.
 
+### Optional global retrieval
+
+`global-init` is an explicit, user-approved operation. It uses uv's frozen script
+lock to provision the Qdrant client, FastEmbed, and exact model revisions, then
+recursively discovers `docs/context/context.json` below each configured workspace
+root. Qdrant runs in embedded local mode; no server or daemon is installed. The
+runtime, model cache, catalog, and index live outside repositories under XDG user
+data/cache directories.
+
+The ordinary `search` command uses the global hybrid dense+BM25 index when it is
+configured and compatible. It refreshes known canonical files, hashes records,
+and embeds only changed or new records. Run `global-update` after adding or
+removing repositories so recursive discovery refreshes the catalog. If the
+runtime or backend is unavailable, search reports the reason and preserves the
+dependency-free repository-local fallback.
+
+Marketplace updates may change the pinned runtime without running `install.sh`.
+The session hook performs only a dependency-free fingerprint check. When it
+reports drift, ask the user before running:
+
+```bash
+python3 <skill-dir>/scripts/project_context.py global-upgrade
+```
+
+Do not substitute improvised pip/venv commands. `install.sh
+--with-context-runtime` invokes the same deterministic bootstrap; it is a
+convenience, not a separate installation path.
+
 ## Workflow
 
 1. At the start of feature work, research, planning, or review, check whether `docs/context/index.md` exists.
@@ -46,14 +77,14 @@ Read `references/context-schema.md` before changing the schema or adding new rec
 2. If it exists, retrieve context in this order:
    1. Read `index.md`, including its topical index.
    2. Derive one to three distinctive project-specific terms from the task, relevant paths, or named components. Avoid broad words such as `service`, `feature`, or `test`.
-   3. Run the updater search command with each term supplied as `--query`. Search is case-insensitive, matches canonical record metadata, and ranks records that match more query terms first:
+   3. Run the updater search command with each term supplied as `--query`. When global retrieval is enabled, search incrementally refreshes the configured catalog and uses hybrid semantic/identifier retrieval across projects; otherwise it performs the existing case-insensitive local match:
 
       ```bash
       python3 <skill-dir>/scripts/project_context.py search --repo <repo> \
         --query "<task term>" --query "<another term>"
       ```
 
-   4. Read only the matching generated sections or files reported by search.
+   4. Read only the matching generated sections or files reported by search. Global results include the originating project and canonical path.
    5. If search returns no matches, fall back to `rg -n -i '<term1>|<term2>' docs/context/context.json docs/context/*.md`.
    6. Load an entire large generated view only when the task itself is broad enough to require it.
 3. If `.no-project-context` exists at the repository root, do not initialize context and do not ask again.
@@ -77,6 +108,7 @@ Read `references/context-schema.md` before changing the schema or adding new rec
 6. If a relevant project-specific term, abbreviation, component, API, event, ownership boundary, or architecture rule is unclear and not documented in context or repo evidence, ask a concise clarification question before proceeding or storing anything. Prefer one to three concise questions.
 7. Store durable insights immediately with the updater script once they are clear from repository evidence, tool results, or user confirmation. Do not wait for a separate "remember this" request.
 8. If the user cannot answer yet, add an open question instead of guessing.
+9. Use the collection default for ordinary project facts. Add `--applicability` only when evidence or user confirmation establishes a broader or different boundary; workspace scope is not shorthand for user, machine, or universal scope.
 
 ## Question Style
 
@@ -141,9 +173,18 @@ python3 <skill-dir>/scripts/project_context.py search --repo <repo> \
 
 Search is read-only. Repeating `--query` broadens results and ranks entries matching more supplied terms first; `--limit` defaults to 20.
 
+Set a collection default during initialization or override one fact:
+
+```bash
+python3 <skill-dir>/scripts/project_context.py init --repo . \
+  --visibility local --default-applicability user:self
+python3 <skill-dir>/scripts/project_context.py add-pattern --repo . \
+  --name "Signed commits" --summary "..." --applicability universal
+```
+
 ## Rules
 
-- Store only durable project knowledge, and keep it local unless the user explicitly asks to commit/share it.
+- Store only durable knowledge with a verified applicability boundary, and keep it local unless the user explicitly asks to commit/share it.
 - Mark user-confirmed answers with `--source "user-confirmed"` and repository-verified facts with `--source "repo-docs"`.
 - Prefer exact definitions over vague descriptions.
 - Include code paths for components whenever known.

@@ -32,7 +32,8 @@ def write_context(repo: Path, data: dict[str, object], index: str = "stale\n") -
 
 def current_context() -> dict[str, object]:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
+        "default_applicability": [{"kind": "project", "selector": "self"}],
         "terms": [
             {
                 "term": "ACS",
@@ -58,7 +59,7 @@ def test_update_current_context_preserves_data_and_refreshes_views(tmp_path: Pat
     assert (proc.returncode, proc.stdout, proc.stderr, updated, "## Topical Index" in index) == (
         0,
         f"Updated project context: {tmp_path / 'docs/context'}\n"
-        "Schema version: 1\n"
+        "Schema version: 2\n"
         "Migrations applied: none\n"
         "Generated views: refreshed\n",
         "",
@@ -84,15 +85,43 @@ def test_update_migrates_legacy_context_without_schema_version(tmp_path: Path) -
 
     assert (
         proc.returncode,
-        "Migrations applied: 0 -> 1\n" in proc.stdout,
+        "Migrations applied: 0 -> 1, 1 -> 2\n" in proc.stdout,
         data["schema_version"],
         data["storage_policy"].get("git_exclude_docs_context"),
         "gitignore_docs_context" in data["storage_policy"],
         data["terms"],
-    ) == (0, True, 1, False, False, current_context()["terms"])
+    ) == (0, True, 2, False, False, current_context()["terms"])
 
 
-@pytest.mark.parametrize("schema_version", [-1, "1", 2])
+def test_update_migrates_v1_context_with_project_default_applicability(
+    tmp_path: Path,
+) -> None:
+    version_one = current_context()
+    version_one["schema_version"] = 1
+    del version_one["default_applicability"]
+    write_context(tmp_path, version_one)
+
+    proc = run_context("update", repo=tmp_path)
+    data = json.loads(
+        (tmp_path / "docs/context/context.json").read_text(encoding="utf-8")
+    )
+
+    assert (
+        proc.returncode,
+        "Migrations applied: 1 -> 2\n" in proc.stdout,
+        data["schema_version"],
+        data["default_applicability"],
+        "applicability" in data["terms"][0],
+    ) == (
+        0,
+        True,
+        2,
+        [{"kind": "project", "selector": "self"}],
+        False,
+    )
+
+
+@pytest.mark.parametrize("schema_version", [-1, "1", 3])
 def test_update_rejects_unsupported_schema_without_writes(
     tmp_path: Path,
     schema_version: int | str,

@@ -1,0 +1,20 @@
+{
+  "dependencies": {
+    "fastembed": "0.8.0",
+    "qdrant-client": "1.19.0"
+  },
+  "models": {
+    "dense": {
+      "id": "sentence-transformers/all-MiniLM-L6-v2",
+      "repository": "qdrant/all-MiniLM-L6-v2-onnx",
+      "revision": "5f1b8cd78bc4fb444dd171e59b18f3a3af89a079"
+    },
+    "sparse": {
+      "id": "Qdrant/bm25",
+      "repository": "Qdrant/bm25",
+      "revision": "22b8d2af71a76161e18dd432d2cee0eefa66e412"
+    }
+  },
+  "python": ">=3.10,<3.13",
+  "schema_version": 1
+}

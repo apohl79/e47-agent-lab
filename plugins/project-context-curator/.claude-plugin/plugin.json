@@ -1,7 +1,7 @@
 {
   "name": "project-context-curator",
-  "version": "0.2.2",
-  "description": "Proactively maintains durable repository domain context for fresh agent sessions.",
+  "version": "0.3.0",
+  "description": "Maintains durable scoped context with optional cross-project hybrid retrieval.",
   "author": {
     "name": "Local developer"
   }

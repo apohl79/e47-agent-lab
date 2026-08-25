@@ -107,6 +107,7 @@ def test_init_without_visibility_defaults_local_for_non_git(tmp_path: Path):
     assert "Git initialized: False" in proc.stdout
     assert "Git exclude: skipped (not a Git repository)" in proc.stdout
     data = read_context(tmp_path)
+    assert data["default_applicability"] == [{"kind": "project", "selector": "self"}]
     assert data["storage_policy"]["context_visibility"] == "local"
     assert data["storage_policy"]["git_initialized"] is False
     assert data["storage_policy"]["git_exclude_docs_context"] is False
@@ -382,3 +383,65 @@ def test_save_appends_hook_state_to_existing_context_gitignore(tmp_path: Path):
         "custom-entry",
         ".hook-state.json",
     ]
+
+
+def test_add_pattern_stores_typed_applicability(tmp_path: Path):
+    assert init_context(tmp_path).returncode == 0
+
+    proc = run_context(
+        "add-pattern",
+        "--name",
+        "Signed commits",
+        "--summary",
+        "Sign Git commits for this user on this machine",
+        "--applicability",
+        "user:self",
+        "--applicability",
+        "machine:self",
+        repo=tmp_path,
+    )
+
+    assert proc.returncode == 0
+    assert read_context(tmp_path)["patterns"][0]["applicability"] == [
+        {"kind": "machine", "selector": "self"},
+        {"kind": "user", "selector": "self"},
+    ]
+    architecture = (tmp_path / "docs/context/architecture.md").read_text(
+        encoding="utf-8"
+    )
+    assert "Applicability: machine:self, user:self" in architecture
+
+
+def test_init_can_set_collection_default_applicability(tmp_path: Path):
+    proc = run_context(
+        "init",
+        "--default-applicability",
+        "user:self",
+        repo=tmp_path,
+    )
+
+    assert proc.returncode == 0
+    assert read_context(tmp_path)["default_applicability"] == [
+        {"kind": "user", "selector": "self"}
+    ]
+
+
+def test_add_component_rejects_invalid_applicability_without_writing_record(
+    tmp_path: Path,
+):
+    assert init_context(tmp_path).returncode == 0
+
+    proc = run_context(
+        "add-component",
+        "--name",
+        "Gateway",
+        "--responsibility",
+        "Routes messages",
+        "--applicability",
+        "planet:mars",
+        repo=tmp_path,
+    )
+
+    assert proc.returncode == 1
+    assert "Invalid applicability kind 'planet'" in proc.stderr
+    assert read_context(tmp_path)["components"] == []
