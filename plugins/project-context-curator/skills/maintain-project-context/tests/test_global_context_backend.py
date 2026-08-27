@@ -532,31 +532,33 @@ def test_relationships_derive_from_explicit_project_names_only(tmp_path: Path) -
     assert str(unrelated.resolve()) not in relationships
 
 
-def test_relationship_boost_is_gated_by_cross_project_intent(tmp_path: Path) -> None:
+def test_related_project_boost_does_not_require_special_query_wording(
+    tmp_path: Path,
+) -> None:
     module = load_backend_module()
+    payments = tmp_path / "payments"
+    gateway = tmp_path / "conversation-gateway"
     hits = (
-        {"project": "payments", "label": "Generic owner", "score": 0.9},
         {
-            "project": "conversation-gateway",
-            "label": "Gateway owner",
+            "project": "payments",
+            "project_path": str(payments),
+            "label": "Generic owner",
             "score": 0.5,
         },
+        {
+            "project": "conversation-gateway",
+            "project_path": str(gateway),
+            "label": "Gateway owner",
+            "score": 0.6,
+        },
+    )
+    projects = (
+        module.RetrievalProject("payments", str(payments), "current", 0, 1.0),
+        module.RetrievalProject(
+            "conversation-gateway", str(gateway), "related", 1, 0.9
+        ),
     )
 
-    ordinary = module.rerank_hits(
-        hits,
-        "who owns this behavior",
-        ("payments", "conversation-gateway"),
-        ("conversation-gateway",),
-        2,
-    )
-    cross_project = module.rerank_hits(
-        hits,
-        "which related project owns this behavior",
-        ("payments", "conversation-gateway"),
-        ("conversation-gateway",),
-        2,
-    )
+    ranked = module.rerank_hits(hits, "who owns this behavior", projects, 2)
 
-    assert ordinary[0]["project"] == "payments"
-    assert cross_project[0]["project"] == "conversation-gateway"
+    assert ranked[0]["project"] == "conversation-gateway"

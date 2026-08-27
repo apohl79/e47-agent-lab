@@ -109,14 +109,24 @@ index live outside repositories under XDG user data/cache directories.
 
 The ordinary `search` command uses the global hybrid dense+BM25 index when it is
 configured and compatible. It refreshes enrolled project files plus canonical
-XDG scope files, hashes
-records, and embeds only changed or new records. It merges repository-local
-lexical matches before global results and retains the dependency-free local
-fallback when the runtime is unavailable or the global query has no hits. Both
-paths filter results to the active repository, registered domains, configured
-workspaces, current user and machine, and universal scope. `global-update` also
-refreshes only enrolled project sources and XDG scope stores; it never discovers
-or enrolls a new project.
+XDG scope files, hashes records, and embeds only changed or new records. It
+merges repository-local lexical matches before global results and retains the
+dependency-free local fallback when the runtime is unavailable or the global
+query has no hits.
+
+The disposable catalog derives a typed relationship graph with confidence and
+canonical record evidence. Project applicability is a truth scope, not a rule
+that limits retrieval to the active repository. Global search admits records
+from the current repository, an exactly named repository, and repositories
+with a direct relationship or a high-confidence path of at most two graph hops;
+explicit workspace-wide queries admit all enrolled repositories, and strongly
+matched otherwise unrelated records are eligible individually. Non-project
+applicability remains conjunctive and strict: every domain, workspace, user,
+machine, or universal selector must be active. Ranking combines hybrid
+relevance, graph distance and confidence, and per-project quotas.
+
+`global-update` refreshes only enrolled project sources and XDG scope stores; it
+never discovers or enrolls a new project.
 
 After repositories are added or removed, run `global-enroll` without a token.
 Its preview also labels primary Git checkouts whose context must be initialized;

@@ -9,7 +9,7 @@ Dual-host plugin marketplace for Codex and Claude Code.
 | `reviewers` | `0.7.1` | PR finalization, reviewer-team, and Slack review-request workflows. | `plugins/reviewers` | Codex, Claude Code |
 | `auto-compaction` | `0.1.0` | Claude Code auto-compaction gate with setup skill and checkpoint hooks. | `plugins/auto-compaction` | Claude Code |
 | `inline-discussion` | `1.7.7` | Browser UI for markdown docs with threaded AI conversations. Requires the `inline-discussion` CLI on PATH (installed by `./install.sh`). | `plugins/inline-discussion` | Codex, Claude Code |
-| `project-context-curator` | `2.0.1` | Canonical project and XDG-scoped context with filtered hybrid retrieval. | `plugins/project-context-curator` | Codex, Claude Code |
+| `project-context-curator` | `2.1.0` | Canonical project and XDG-scoped context with graph-assisted hybrid retrieval. | `plugins/project-context-curator` | Codex, Claude Code |
 
 ## Install
 
@@ -37,6 +37,15 @@ that still need context, requests approval for the exact snapshot and storage
 policy, bootstraps approved repositories with verified context, and provisions
 pinned Python packages and models through the deterministic `global-init`
 command.
+
+The disposable catalog derives a typed, evidence-backed relationship graph from
+canonical context. Search considers the current repository, repositories named
+in the query, direct relationships, and high-confidence relationships within two
+graph hops. Explicit workspace-wide queries consider every enrolled repository,
+while strongly matched otherwise unrelated records are eligible individually.
+Applicability remains the truth scope: non-project selectors such as domain,
+workspace, user, machine, and universal must still all be active. Ranking
+combines hybrid relevance, graph distance and confidence, and per-project quotas.
 
 `./install.sh --with-context-runtime` remains a deterministic convenience for
 provisioning the same runtime directly.

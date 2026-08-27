@@ -93,7 +93,12 @@ def install_fake_index(module: ModuleType, hits: Sequence[dict[str, object]]) ->
         def upsert(self, _values: Sequence[object]) -> None:
             pass
 
-        def search(self, _query: str, _limit: int) -> tuple[dict[str, object], ...]:
+        def search(
+            self,
+            _query: str,
+            _limit: int,
+            _project_paths: Sequence[str] | None = None,
+        ) -> tuple[dict[str, object], ...]:
             return tuple(hits)
 
         def close(self) -> None:

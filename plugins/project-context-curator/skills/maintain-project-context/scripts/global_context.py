@@ -39,6 +39,9 @@ INDEX_SCHEMA_VERSION = 3
 LEGACY_RECORD_CATALOG_SCHEMA_VERSION = 1
 SOURCE_CATALOG_SCHEMA_VERSIONS = frozenset({2, INDEX_SCHEMA_VERSION})
 SEARCH_CANDIDATES = 50
+RELATIONSHIP_GRAPH_SCHEMA_VERSION = 1
+RELATIONSHIP_GRAPH_MAX_DEPTH = 2
+RELATIONSHIP_GRAPH_MIN_TRANSITIVE_CONFIDENCE = 0.7
 IGNORE_MARKER = ".no-project-context"
 UNTRUSTED_RESULT_PREFIX = "UNTRUSTED_CONTEXT_DATA"
 UNTRUSTED_DIAGNOSTIC_TYPE = "UNTRUSTED_CONTEXT_DIAGNOSTIC"
@@ -51,9 +54,57 @@ APPLICABILITY_OUTPUT_LIMIT = 500
 DIAGNOSTIC_OUTPUT_LIMIT = 1024
 DIAGNOSTIC_COUNT_LIMIT = 20
 SNAPSHOT_TOKEN_PATTERN = re.compile(r"[0-9a-f]{64}")
-CROSS_PROJECT_HINT = re.compile(
-    r"\b(cross[- ]project|other (project|repository|repo)|related (project|repository|repo)|upstream|downstream|sibling)\b",
+ALL_PROJECTS_HINT = re.compile(
+    r"\b((all|every) (projects|repositories|repos)|any (project|repository|repo)|"
+    r"across (the )?(workspace|projects|repositories|repos)|cross[- ]project|"
+    r"workspace[- ]wide)\b",
     re.IGNORECASE,
+)
+RELATIONSHIP_PATTERNS = (
+    (
+        "depends_on",
+        re.compile(
+            r"\b(depends? on|dependency|dependencies|requires?)\b",
+            re.IGNORECASE,
+        ),
+        0.95,
+    ),
+    (
+        "integrates_with",
+        re.compile(
+            r"\b(integrat(?:e|es|ed|ing|ion|ions)|calls?|"
+            r"connect(?:s|ed|ing)?|routes?|proxies?|forwards?|talks? to)\b",
+            re.IGNORECASE,
+        ),
+        0.9,
+    ),
+    (
+        "owns",
+        re.compile(r"\b(owns?|owner|ownership|maintains?|manages?)\b", re.IGNORECASE),
+        0.9,
+    ),
+    (
+        "produces",
+        re.compile(r"\b(produces?|publishes?|emits?|provides?)\b", re.IGNORECASE),
+        0.85,
+    ),
+    (
+        "consumes",
+        re.compile(r"\b(consumes?|subscribes?|reads?|uses?)\b", re.IGNORECASE),
+        0.85,
+    ),
+)
+DISTINCTIVE_QUERY_TOKEN = re.compile(r"[\w-]{5,}", re.UNICODE)
+STRONG_QUERY_STOP_TOKENS = frozenset(
+    {
+        "about",
+        "behavior",
+        "context",
+        "explain",
+        "integration",
+        "project",
+        "repository",
+    }
 )
 SKIPPED_DIRECTORIES = frozenset(
     {".git", ".my", ".venv", "build", "dist", "node_modules", "target"}
@@ -115,6 +166,40 @@ class ContextSource:
     source_path: str
     project_path: str
     workspace_root: str
+
+
+@dataclass(frozen=True)
+class ProjectNode:
+    project: str
+    project_path: str
+
+
+@dataclass(frozen=True)
+class RelationshipEvidence:
+    record_id: str
+    record_kind: str
+    record_label: str
+    source_path: str
+
+
+@dataclass(frozen=True)
+class RelationshipEdge:
+    source_project: str
+    source_project_path: str
+    target_project: str
+    target_project_path: str
+    relation: str
+    confidence: float
+    evidence: tuple[RelationshipEvidence, ...]
+
+
+@dataclass(frozen=True)
+class RetrievalProject:
+    project: str
+    project_path: str
+    reason: str
+    distance: int
+    confidence: float
 
 
 def one_line(value: Any) -> str:
@@ -659,25 +744,199 @@ def load_known_records(
     return combined, failures
 
 
-def derive_relationships(
+def project_nodes_from_records(
     records: Sequence[ContextRecord],
-) -> dict[str, tuple[str, ...]]:
-    projects = sorted({record.project for record in records}, key=len, reverse=True)
-    relationships: dict[str, set[str]] = {}
+) -> tuple[ProjectNode, ...]:
+    nodes = {
+        record.project_path: ProjectNode(record.project, record.project_path)
+        for record in records
+        if record.project_path
+    }
+    return tuple(
+        nodes[path]
+        for path in sorted(nodes, key=lambda value: value.casefold())
+    )
+
+
+def project_nodes_from_sources(
+    sources: Sequence[ContextSource],
+) -> tuple[ProjectNode, ...]:
+    nodes = {
+        source.project_path: ProjectNode(
+            Path(source.project_path).name,
+            source.project_path,
+        )
+        for source in sources
+        if source.project_path
+    }
+    return tuple(
+        nodes[path]
+        for path in sorted(nodes, key=lambda value: value.casefold())
+    )
+
+
+def relationship_signal(
+    text: str,
+    start: int,
+    end: int,
+) -> tuple[str, float]:
+    window = text[max(0, start - 120) : min(len(text), end + 120)]
+    for relation, pattern, confidence in RELATIONSHIP_PATTERNS:
+        if pattern.search(window):
+            return relation, confidence
+    return "references", 0.6
+
+
+def project_mention_matcher(
+    nodes: Sequence[ProjectNode],
+) -> tuple[re.Pattern[str] | None, dict[str, str]]:
+    name_counts: dict[str, int] = {}
+    for node in nodes:
+        key = node.project.casefold()
+        name_counts[key] = name_counts.get(key, 0) + 1
+    aliases = {
+        (
+            node.project.casefold()
+            if name_counts[node.project.casefold()] == 1
+            else node.project_path.casefold()
+        ): node.project_path
+        for node in nodes
+    }
+    if not aliases:
+        return None, {}
+    alternatives = "|".join(
+        re.escape(alias)
+        for alias in sorted(aliases, key=lambda value: (-len(value), value))
+    )
+    return (
+        re.compile(rf"(?<![\w-])(?:{alternatives})(?![\w-])", re.IGNORECASE),
+        aliases,
+    )
+
+
+def record_target_mentions(
+    record: ContextRecord,
+    matcher: re.Pattern[str] | None,
+    aliases: dict[str, str],
+) -> dict[str, tuple[tuple[int, int], ...]]:
+    if matcher is None:
+        return {}
+    mentions: dict[str, list[tuple[int, int]]] = {}
+    for match in matcher.finditer(record.text):
+        target_path = aliases.get(match.group(0).casefold())
+        if target_path and target_path != record.project_path:
+            mentions.setdefault(target_path, []).append(
+                (match.start(), match.end())
+            )
+    return {
+        target_path: tuple(positions)
+        for target_path, positions in mentions.items()
+    }
+
+
+def relationship_edge_payload(edge: RelationshipEdge) -> dict[str, Any]:
+    return {
+        "source_project": edge.source_project,
+        "source_project_path": edge.source_project_path,
+        "target_project": edge.target_project,
+        "target_project_path": edge.target_project_path,
+        "relation": edge.relation,
+        "confidence": edge.confidence,
+        "evidence": [asdict(item) for item in edge.evidence],
+    }
+
+
+def derive_relationship_graph(
+    records: Sequence[ContextRecord],
+) -> dict[str, Any]:
+    nodes = project_nodes_from_records(records)
+    matcher, aliases = project_mention_matcher(nodes)
+    aggregated: dict[
+        tuple[str, str, str],
+        tuple[ProjectNode, ProjectNode, float, dict[str, RelationshipEvidence]],
+    ] = {}
+    nodes_by_path = {node.project_path: node for node in nodes}
     for record in records:
-        if not record.project_path:
+        source = nodes_by_path.get(record.project_path)
+        if source is None:
             continue
-        haystack = record.text.casefold()
-        for project in projects:
-            if project == record.project:
-                continue
-            pattern = rf"(?<![\w-]){re.escape(project.casefold())}(?![\w-])"
-            if re.search(pattern, haystack):
-                relationships.setdefault(record.project_path, set()).add(project)
+        for target_path, mentions in record_target_mentions(
+            record,
+            matcher,
+            aliases,
+        ).items():
+            target = nodes_by_path[target_path]
+            relation, confidence = max(
+                (
+                    relationship_signal(record.text, start, end)
+                    for start, end in mentions
+                ),
+                key=lambda item: item[1],
+            )
+            key = (source.project_path, target.project_path, relation)
+            evidence = RelationshipEvidence(
+                record.id,
+                record.kind,
+                record.label,
+                record.source_path,
+            )
+            existing = aggregated.get(key)
+            evidence_by_id = dict(existing[3]) if existing is not None else {}
+            evidence_by_id[record.id] = evidence
+            aggregated[key] = (
+                source,
+                target,
+                max(confidence, existing[2] if existing is not None else 0.0),
+                evidence_by_id,
+            )
+    edges = tuple(
+        RelationshipEdge(
+            source.project,
+            source.project_path,
+            target.project,
+            target.project_path,
+            relation,
+            confidence,
+            tuple(
+                evidence_by_id[record_id]
+                for record_id in sorted(evidence_by_id)
+            ),
+        )
+        for (source_path, target_path, relation), (
+            source,
+            target,
+            confidence,
+            evidence_by_id,
+        ) in sorted(aggregated.items())
+    )
+    return {
+        "schema_version": RELATIONSHIP_GRAPH_SCHEMA_VERSION,
+        "edges": [relationship_edge_payload(edge) for edge in edges],
+    }
+
+
+def relationships_from_graph(
+    graph: dict[str, Any],
+) -> dict[str, tuple[str, ...]]:
+    relationships: dict[str, set[str]] = {}
+    for raw_edge in graph["edges"]:
+        edge = mapping(raw_edge, "relationship edge")
+        source_path = one_line(edge.get("source_project_path"))
+        source_name = one_line(edge.get("source_project"))
+        target_path = one_line(edge.get("target_project_path"))
+        target_name = one_line(edge.get("target_project"))
+        relationships.setdefault(source_path, set()).add(target_name)
+        relationships.setdefault(target_path, set()).add(source_name)
     return {
         project: tuple(sorted(related, key=str.casefold))
         for project, related in sorted(relationships.items())
     }
+
+
+def derive_relationships(
+    records: Sequence[ContextRecord],
+) -> dict[str, tuple[str, ...]]:
+    return relationships_from_graph(derive_relationship_graph(records))
 
 
 def record_payload(record: ContextRecord) -> dict[str, Any]:
@@ -707,7 +966,8 @@ def catalog_from_records(
             }.values()
         )
     )
-    projects = {Path(source.project_path).name for source in enrolled}
+    nodes = project_nodes_from_sources(enrolled)
+    graph = derive_relationship_graph(records)
     return {
         "index_schema_version": INDEX_SCHEMA_VERSION,
         "dense_model": DENSE_MODEL,
@@ -715,9 +975,11 @@ def catalog_from_records(
         "sparse_model": SPARSE_MODEL,
         "sparse_model_revision": SPARSE_MODEL_REVISION,
         "enrollment_policy": "snapshot",
-        "projects": sorted(projects, key=str.casefold),
+        "project_nodes": [asdict(node) for node in nodes],
+        "projects": sorted({node.project for node in nodes}, key=str.casefold),
         "project_count": len(enrolled),
-        "relationships": derive_relationships(records),
+        "relationships": relationships_from_graph(graph),
+        "relationship_graph": graph,
         "sources": [source_payload(source) for source in enrolled],
         "records": [record_payload(record) for record in records],
     }
@@ -909,10 +1171,27 @@ class QdrantIndex:
             wait=True,
         )
 
-    def search(self, query: str, limit: int) -> tuple[dict[str, Any], ...]:
+    def search(
+        self,
+        query: str,
+        limit: int,
+        project_paths: Sequence[str] | None = None,
+    ) -> tuple[dict[str, Any], ...]:
         models = self.models_api
         dense = next(iter(self.dense.query_embed([query])))
         sparse = next(iter(self.sparse.query_embed([query])))
+        query_filter = (
+            models.Filter(
+                should=[
+                    models.FieldCondition(
+                        key="project_path",
+                        match=models.MatchAny(any=sorted(set(project_paths))),
+                    )
+                ]
+            )
+            if project_paths
+            else None
+        )
         response = self.client.query_points(
             COLLECTION,
             prefetch=[
@@ -928,6 +1207,7 @@ class QdrantIndex:
                 ),
             ],
             query=models.RrfQuery(rrf=models.Rrf(k=60)),
+            query_filter=query_filter,
             limit=max(limit * 3, limit),
         )
         return tuple(
@@ -1053,41 +1333,446 @@ def sync_index(
     )
 
 
+def catalog_project_nodes(catalog: dict[str, Any]) -> tuple[ProjectNode, ...]:
+    nodes: dict[str, ProjectNode] = {}
+    raw_nodes = catalog.get("project_nodes", [])
+    if isinstance(raw_nodes, list):
+        for raw_node in raw_nodes:
+            if not isinstance(raw_node, dict):
+                continue
+            project = one_line(raw_node.get("project"))
+            project_path = one_line(raw_node.get("project_path"))
+            if project and project_path:
+                nodes[project_path] = ProjectNode(project, project_path)
+    if not nodes:
+        raw_sources = catalog.get("sources", [])
+        if isinstance(raw_sources, list):
+            for raw_source in raw_sources:
+                if not isinstance(raw_source, dict):
+                    continue
+                project_path = one_line(raw_source.get("project_path"))
+                if project_path:
+                    nodes[project_path] = ProjectNode(
+                        Path(project_path).name,
+                        project_path,
+                    )
+    return tuple(
+        nodes[path]
+        for path in sorted(nodes, key=lambda value: value.casefold())
+    )
+
+
+def relationship_evidence_from_payload(
+    raw_evidence: Any,
+) -> tuple[RelationshipEvidence, ...]:
+    if not isinstance(raw_evidence, list):
+        return ()
+    evidence: list[RelationshipEvidence] = []
+    for raw_item in raw_evidence:
+        if not isinstance(raw_item, dict):
+            continue
+        values = tuple(
+            one_line(raw_item.get(field))
+            for field in ("record_id", "record_kind", "record_label", "source_path")
+        )
+        if all(values):
+            evidence.append(RelationshipEvidence(*values))
+    return tuple(sorted(evidence, key=lambda item: item.record_id))
+
+
+def relationship_edge_from_payload(raw_edge: Any) -> RelationshipEdge | None:
+    if not isinstance(raw_edge, dict):
+        return None
+    values = tuple(
+        one_line(raw_edge.get(field))
+        for field in (
+            "source_project",
+            "source_project_path",
+            "target_project",
+            "target_project_path",
+            "relation",
+        )
+    )
+    raw_confidence = raw_edge.get("confidence")
+    if not all(values) or not isinstance(raw_confidence, (int, float)):
+        return None
+    confidence = float(raw_confidence)
+    if not 0.0 <= confidence <= 1.0:
+        return None
+    return RelationshipEdge(
+        *values,
+        confidence,
+        relationship_evidence_from_payload(raw_edge.get("evidence")),
+    )
+
+
+def catalog_relationship_edges(
+    catalog: dict[str, Any],
+    nodes: Sequence[ProjectNode],
+) -> tuple[RelationshipEdge, ...]:
+    raw_graph = catalog.get("relationship_graph")
+    if isinstance(raw_graph, dict) and raw_graph.get(
+        "schema_version"
+    ) == RELATIONSHIP_GRAPH_SCHEMA_VERSION:
+        raw_edges = raw_graph.get("edges", [])
+        if isinstance(raw_edges, list):
+            edges = tuple(
+                edge
+                for edge in (
+                    relationship_edge_from_payload(raw_edge)
+                    for raw_edge in raw_edges
+                )
+                if edge is not None
+            )
+            if edges or not raw_edges:
+                return tuple(
+                    sorted(
+                        edges,
+                        key=lambda edge: (
+                            edge.source_project_path.casefold(),
+                            edge.target_project_path.casefold(),
+                            edge.relation,
+                        ),
+                    )
+                )
+    nodes_by_name: dict[str, list[ProjectNode]] = {}
+    for node in nodes:
+        nodes_by_name.setdefault(node.project.casefold(), []).append(node)
+    raw_relationships = catalog.get("relationships", {})
+    if not isinstance(raw_relationships, dict):
+        return ()
+    fallback: list[RelationshipEdge] = []
+    for source_path, raw_targets in raw_relationships.items():
+        source = next(
+            (node for node in nodes if node.project_path == str(source_path)),
+            None,
+        )
+        if source is None or not isinstance(raw_targets, list):
+            continue
+        for raw_target in raw_targets:
+            matches = nodes_by_name.get(one_line(raw_target).casefold(), [])
+            if len(matches) != 1:
+                continue
+            target = matches[0]
+            fallback.append(
+                RelationshipEdge(
+                    source.project,
+                    source.project_path,
+                    target.project,
+                    target.project_path,
+                    "references",
+                    0.5,
+                    (),
+                )
+            )
+    return tuple(
+        sorted(
+            fallback,
+            key=lambda edge: (
+                edge.source_project_path.casefold(),
+                edge.target_project_path.casefold(),
+            ),
+        )
+    )
+
+
 def mentioned_projects(query: str, projects: Sequence[str]) -> frozenset[str]:
     haystack = query.casefold()
     return frozenset(
         project
         for project in projects
-        if re.search(rf"(?<![\w-]){re.escape(project.casefold())}(?![\w-])", haystack)
+        if re.search(
+            rf"(?<![\w-]){re.escape(project.casefold())}(?![\w-])",
+            haystack,
+        )
     )
+
+
+def mentioned_project_paths(
+    query: str,
+    nodes: Sequence[ProjectNode],
+) -> frozenset[str]:
+    mentioned_names = mentioned_projects(query, tuple(node.project for node in nodes))
+    normalized_query = query.casefold()
+    return frozenset(
+        node.project_path
+        for node in nodes
+        if node.project in mentioned_names
+        or node.project_path.casefold() in normalized_query
+    )
+
+
+def graph_reach(
+    seeds: frozenset[str],
+    edges: Sequence[RelationshipEdge],
+) -> dict[str, tuple[int, float]]:
+    adjacency: dict[str, list[tuple[str, float]]] = {}
+    for edge in edges:
+        adjacency.setdefault(edge.source_project_path, []).append(
+            (edge.target_project_path, edge.confidence)
+        )
+        adjacency.setdefault(edge.target_project_path, []).append(
+            (edge.source_project_path, edge.confidence)
+        )
+    reached = {seed: (0, 1.0) for seed in seeds}
+    frontier = frozenset(seeds)
+    for distance in range(1, RELATIONSHIP_GRAPH_MAX_DEPTH + 1):
+        next_frontier: set[str] = set()
+        for project_path in sorted(frontier, key=str.casefold):
+            source_confidence = reached[project_path][1]
+            for target_path, edge_confidence in adjacency.get(project_path, []):
+                confidence = round(source_confidence * edge_confidence, 6)
+                if (
+                    distance > 1
+                    and confidence
+                    < RELATIONSHIP_GRAPH_MIN_TRANSITIVE_CONFIDENCE
+                ):
+                    continue
+                existing = reached.get(target_path)
+                if existing is not None and (
+                    existing[0] < distance
+                    or (existing[0] == distance and existing[1] >= confidence)
+                ):
+                    continue
+                reached[target_path] = (distance, confidence)
+                next_frontier.add(target_path)
+        frontier = frozenset(next_frontier)
+        if not frontier:
+            break
+    return reached
+
+
+def query_requests_all_projects(query: str) -> bool:
+    return ALL_PROJECTS_HINT.search(query) is not None
+
+
+def retrieval_projects(
+    query: str,
+    current_repo: Path,
+    catalog: dict[str, Any],
+) -> tuple[RetrievalProject, ...]:
+    current_path = str(current_repo.expanduser().resolve())
+    nodes = catalog_project_nodes(catalog)
+    nodes_by_path = {node.project_path: node for node in nodes}
+    current_node = nodes_by_path.get(
+        current_path,
+        ProjectNode(current_repo.name, current_path),
+    )
+    explicit_paths = mentioned_project_paths(query, nodes)
+    seeds = frozenset((current_path, *explicit_paths))
+    reached = graph_reach(seeds, catalog_relationship_edges(catalog, nodes))
+    projects: dict[str, RetrievalProject] = {
+        current_path: RetrievalProject(
+            current_node.project,
+            current_path,
+            "current",
+            0,
+            1.0,
+        )
+    }
+    for project_path in explicit_paths:
+        node = nodes_by_path[project_path]
+        projects[project_path] = RetrievalProject(
+            node.project,
+            project_path,
+            "explicit",
+            0,
+            1.0,
+        )
+    for project_path, (distance, confidence) in reached.items():
+        if project_path in projects or distance == 0:
+            continue
+        node = nodes_by_path.get(project_path)
+        if node is not None:
+            projects[project_path] = RetrievalProject(
+                node.project,
+                project_path,
+                "related",
+                distance,
+                confidence,
+            )
+    if query_requests_all_projects(query):
+        for node in nodes:
+            projects.setdefault(
+                node.project_path,
+                RetrievalProject(
+                    node.project,
+                    node.project_path,
+                    "global",
+                    RELATIONSHIP_GRAPH_MAX_DEPTH + 1,
+                    0.0,
+                ),
+            )
+    reason_order = {"current": 0, "explicit": 1, "related": 2, "global": 3}
+    return tuple(
+        sorted(
+            projects.values(),
+            key=lambda item: (
+                reason_order[item.reason],
+                item.distance,
+                item.project.casefold(),
+                item.project_path.casefold(),
+            ),
+        )
+    )
+
+
+def hit_project_path(hit: dict[str, Any]) -> str:
+    project_path = one_line(hit.get("project_path"))
+    if project_path:
+        return project_path
+    raw = hit.get("applicability")
+    if not isinstance(raw, list):
+        return ""
+    project_selectors = tuple(
+        one_line(item.get("selector"))
+        for item in raw
+        if isinstance(item, dict)
+        and one_line(item.get("kind")).casefold() == "project"
+        and one_line(item.get("selector"))
+    )
+    return project_selectors[0] if len(project_selectors) == 1 else ""
+
+
+def hit_is_retrievable(
+    hit: dict[str, Any],
+    active: frozenset[tuple[str, str]],
+    project_paths: frozenset[str],
+) -> bool:
+    raw = hit.get("applicability")
+    if not isinstance(raw, list) or not raw:
+        return False
+    selectors: list[tuple[str, str]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            return False
+        kind = one_line(item.get("kind")).casefold()
+        selector = one_line(item.get("selector", "*"))
+        if not kind or not selector:
+            return False
+        selectors.append((kind, selector))
+    return all(
+        selector in project_paths if kind == "project" else (kind, selector) in active
+        for kind, selector in selectors
+    )
+
+
+def strong_query_match(
+    hit: dict[str, Any],
+    query: str,
+    best_score: float,
+) -> bool:
+    normalized_query = one_line(query).casefold()
+    label = one_line(hit.get("label")).casefold()
+    if len(label) >= 5 and label in normalized_query:
+        return True
+    score = float(hit.get("score", 0.0))
+    if best_score <= 0.0 or score < best_score * 0.9:
+        return False
+    tokens = frozenset(
+        token.casefold()
+        for token in DISTINCTIVE_QUERY_TOKEN.findall(normalized_query)
+        if token.casefold() not in STRONG_QUERY_STOP_TOKENS
+    )
+    haystack = " ".join(
+        (label, one_line(hit.get("summary")).casefold())
+    )
+    return any(token in haystack for token in tokens)
+
+
+def merge_hits(
+    *groups: Sequence[dict[str, Any]],
+) -> tuple[dict[str, Any], ...]:
+    merged: dict[str, dict[str, Any]] = {}
+    for group in groups:
+        for hit in group:
+            identity = one_line(hit.get("id")) or "\x1f".join(
+                (
+                    one_line(hit.get("source_path")),
+                    one_line(hit.get("kind")),
+                    one_line(hit.get("label")).casefold(),
+                )
+            )
+            existing = merged.get(identity)
+            if existing is None or float(hit.get("score", 0.0)) > float(
+                existing.get("score", 0.0)
+            ):
+                merged[identity] = hit
+    return tuple(merged.values())
+
+
+def retrieval_project_quota(
+    project: RetrievalProject | None,
+    limit: int,
+    has_cross_project_candidates: bool,
+) -> int:
+    if project is None:
+        return max(1, (limit + 3) // 4)
+    if project.reason == "explicit":
+        return limit
+    if project.reason == "current":
+        return max(1, (limit + 1) // 2) if has_cross_project_candidates else limit
+    if project.reason == "related" and project.distance == 1:
+        return max(1, (limit + 2) // 3)
+    if project.reason == "related":
+        return max(1, (limit + 3) // 4)
+    if project.reason == "global":
+        return max(1, (limit + 3) // 4)
+    return 1
 
 
 def rerank_hits(
     hits: Sequence[dict[str, Any]],
     query: str,
-    projects: Sequence[str],
-    related_projects: Sequence[str],
+    projects: Sequence[RetrievalProject],
     limit: int,
 ) -> tuple[dict[str, Any], ...]:
-    mentioned = mentioned_projects(query, projects)
-    relationship_targets = (
-        frozenset(related_projects) if CROSS_PROJECT_HINT.search(query) else frozenset()
-    )
-    normalized_query = query.casefold()
+    projects_by_path = {project.project_path: project for project in projects}
+    normalized_query = one_line(query).casefold()
 
     def score(hit: dict[str, Any]) -> tuple[float, str, str]:
         value = float(hit.get("score", 0.0))
-        project = one_line(hit.get("project"))
-        label = one_line(hit.get("label"))
-        if project in mentioned:
+        project_path = hit_project_path(hit)
+        project = projects_by_path.get(project_path)
+        if project is not None and project.reason == "explicit":
             value += 1.0
-        if project in relationship_targets:
-            value += 0.5
+        elif project is not None and project.reason == "current":
+            value += 0.4
+        elif project is not None and project.reason == "related":
+            value += (0.35 / project.distance) * project.confidence
+        label = one_line(hit.get("label"))
         if label and label.casefold() in normalized_query:
-            value += 0.25
-        return (-value, project.casefold(), label.casefold())
+            value += 0.5
+        return (
+            -value,
+            one_line(hit.get("project")).casefold(),
+            label.casefold(),
+        )
 
-    return tuple(sorted(hits, key=score)[:limit])
+    ranked = tuple(sorted(hits, key=score))
+    has_cross_project_candidates = any(
+        project.reason != "current" for project in projects
+    )
+    selected: list[dict[str, Any]] = []
+    deferred: list[dict[str, Any]] = []
+    counts: dict[str, int] = {}
+    for hit in ranked:
+        project_path = hit_project_path(hit)
+        bucket = project_path or one_line(hit.get("source_path"))
+        project = projects_by_path.get(project_path)
+        quota = retrieval_project_quota(
+            project,
+            limit,
+            has_cross_project_candidates,
+        )
+        if counts.get(bucket, 0) >= quota:
+            deferred.append(hit)
+            continue
+        selected.append(hit)
+        counts[bucket] = counts.get(bucket, 0) + 1
+        if len(selected) == limit:
+            return tuple(selected)
+    return tuple((*selected, *deferred)[:limit])
 
 
 def parse_active_applicability(values: Sequence[str]) -> frozenset[tuple[str, str]]:
@@ -1130,29 +1815,61 @@ def search_index(
     catalog = read_catalog(catalog_path)
     if not catalog_is_compatible(catalog):
         raise GlobalContextError("global index is not initialized")
+    projects = retrieval_projects(query, current_repo, catalog)
+    project_paths = frozenset(project.project_path for project in projects)
+    filtered_paths = tuple(sorted((*project_paths, ""), key=str.casefold))
+    candidate_limit = max(limit, SEARCH_CANDIDATES)
     with exclusive_lock(index_dir.parent / "index.lock"):
         index = QdrantIndex(index_dir, model_cache)
         try:
-            hits = index.search(query, max(limit, SEARCH_CANDIDATES))
+            candidate_hits = index.search(query, candidate_limit, filtered_paths)
+            global_hits = (
+                ()
+                if query_requests_all_projects(query)
+                else index.search(query, candidate_limit)
+            )
         finally:
             index.close()
-    relationships = catalog.get("relationships", {})
-    current_project_path = str(current_repo.expanduser().resolve())
-    related = (
-        relationships.get(current_project_path, [])
-        if isinstance(relationships, dict)
-        else []
+    hits = merge_hits(candidate_hits, global_hits)
+    best_score = max((float(hit.get("score", 0.0)) for hit in hits), default=0.0)
+    active = active_applicability or frozenset(
+        {("project", str(current_repo.expanduser().resolve()))}
     )
-    applicable_hits = (
-        tuple(hit for hit in hits if hit_is_applicable(hit, active_applicability))
-        if active_applicability
-        else hits
-    )
+    eligible: list[dict[str, Any]] = []
+    strong_projects: dict[str, RetrievalProject] = {}
+    nodes_by_path = {
+        node.project_path: node for node in catalog_project_nodes(catalog)
+    }
+    for hit in hits:
+        if hit_is_retrievable(hit, active, project_paths):
+            eligible.append(hit)
+            continue
+        project_path = hit_project_path(hit)
+        if (
+            not project_path
+            or not strong_query_match(hit, query, best_score)
+            or not hit_is_retrievable(hit, active, project_paths | {project_path})
+        ):
+            continue
+        eligible.append(hit)
+        node = nodes_by_path.get(
+            project_path,
+            ProjectNode(
+                one_line(hit.get("project")) or Path(project_path).name,
+                project_path,
+            ),
+        )
+        strong_projects[project_path] = RetrievalProject(
+            node.project,
+            node.project_path,
+            "strong",
+            RELATIONSHIP_GRAPH_MAX_DEPTH + 1,
+            0.0,
+        )
     return rerank_hits(
-        applicable_hits,
+        eligible,
         query,
-        catalog.get("projects", []),
-        related,
+        (*projects, *strong_projects.values()),
         limit,
     )
 

@@ -1,7 +1,7 @@
 {
   "name": "project-context-curator",
-  "version": "2.0.1",
-  "description": "Maintains canonical project and XDG-scoped context with filtered hybrid retrieval.",
+  "version": "2.1.0",
+  "description": "Maintains canonical project and XDG-scoped context with graph-assisted hybrid retrieval.",
   "author": {
     "name": "Local developer"
   },
@@ -19,7 +19,7 @@
   "interface": {
     "displayName": "Project Context Curator",
     "shortDescription": "Capture durable project context.",
-    "longDescription": "Project Context Curator stores project facts in repositories, broader facts in canonical XDG stores, and retrieves only facts applicable to the active repository.",
+    "longDescription": "Project Context Curator stores project facts in repositories, broader facts in canonical XDG stores, and retrieves relevant context across named and related projects.",
     "developerName": "Local developer",
     "category": "Productivity",
     "capabilities": [

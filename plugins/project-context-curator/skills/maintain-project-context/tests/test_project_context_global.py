@@ -62,9 +62,11 @@ elif command == "sync":
                 "sparse_model": "Qdrant/bm25",
                 "sparse_model_revision": "22b8d2af71a76161e18dd432d2cee0eefa66e412",
                 "enrollment_policy": "snapshot",
+                "project_nodes": [],
                 "projects": [],
                 "project_count": 0,
                 "relationships": {{}},
+                "relationship_graph": {{"schema_version": 1, "edges": []}},
                 "sources": [],
                 "records": [],
             }}
@@ -370,6 +372,39 @@ def test_search_refreshes_a_schema_v2_catalog_without_new_approval(
         sum("sync" in call for call in calls),
         refreshed["index_schema_version"],
     ) == (0, "", True, 2, 3)
+
+
+def test_search_refreshes_catalog_missing_relationship_graph(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    workspace = tmp_path / "workspace"
+    repo.mkdir()
+    workspace.mkdir()
+    env = isolated_environment(tmp_path)
+    env["PROJECT_CONTEXT_CURATOR_UV"] = str(write_fake_uv(tmp_path))
+    env["FAKE_UV_LOG"] = str(tmp_path / "uv.log")
+    init_local_context(repo, env)
+    assert init_global_context(repo, workspace, env).returncode == 0
+    catalog_path = tmp_path / "cache/catalog.json"
+    catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+    del catalog["relationship_graph"]
+    catalog_path.write_text(json.dumps(catalog), encoding="utf-8")
+
+    proc = run_context("search", "--query", "gateway", repo=repo, env=env)
+
+    calls = [
+        json.loads(line)
+        for line in (tmp_path / "uv.log").read_text(encoding="utf-8").splitlines()
+    ]
+    refreshed = json.loads(catalog_path.read_text(encoding="utf-8"))
+    assert (
+        proc.returncode,
+        proc.stderr,
+        proc.stdout.startswith("UNTRUSTED_CONTEXT_DATA"),
+        sum("sync" in call for call in calls),
+        refreshed["relationship_graph"],
+    ) == (0, "", True, 2, {"schema_version": 1, "edges": []})
 
 
 def test_search_falls_back_locally_when_runtime_fingerprint_is_stale(

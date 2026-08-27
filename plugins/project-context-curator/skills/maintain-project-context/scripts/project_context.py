@@ -45,6 +45,7 @@ GLOBAL_INDEX_DIR = "qdrant"
 GLOBAL_MODEL_DIR = "models"
 GLOBAL_CONTEXTS_DIR = "contexts"
 GLOBAL_INDEX_SCHEMA_VERSION = 3
+GLOBAL_RELATIONSHIP_GRAPH_SCHEMA_VERSION = 1
 GLOBAL_LEGACY_RECORD_CATALOG_SCHEMA_VERSION = 1
 GLOBAL_SOURCE_CATALOG_SCHEMA_VERSIONS = frozenset({2, GLOBAL_INDEX_SCHEMA_VERSION})
 GLOBAL_RESULT_PREFIX = "UNTRUSTED_CONTEXT_DATA"
@@ -901,7 +902,13 @@ def global_catalog_has_enrollment_state(catalog: dict[str, Any]) -> bool:
 
 
 def global_catalog_requires_refresh(catalog: dict[str, Any]) -> bool:
-    return catalog.get("index_schema_version") != GLOBAL_INDEX_SCHEMA_VERSION
+    graph = catalog.get("relationship_graph")
+    return (
+        catalog.get("index_schema_version") != GLOBAL_INDEX_SCHEMA_VERSION
+        or not isinstance(graph, dict)
+        or graph.get("schema_version")
+        != GLOBAL_RELATIONSHIP_GRAPH_SCHEMA_VERSION
+    )
 
 
 def global_status(args: argparse.Namespace) -> None:
