@@ -288,8 +288,18 @@ def test_search_uses_global_backend_when_runtime_is_current(tmp_path: Path) -> N
     env["FAKE_UV_LOG"] = str(tmp_path / "uv.log")
     init_local_context(repo, env)
     assert init_global_context(repo, workspace, env).returncode == 0
+    assert run_context(
+        "domain-set",
+        "--domain",
+        "voice",
+        "--project",
+        str(repo),
+        repo=repo,
+        env=env,
+    ).returncode == 0
 
     proc = run_context("search", "--query", "gateway owner", repo=repo, env=env)
+    status = run_context("global-status", "--format", "hook", repo=repo, env=env)
 
     assert (proc.returncode, proc.stderr) == (0, "")
     assert proc.stdout.startswith(
@@ -299,7 +309,13 @@ def test_search_uses_global_backend_when_runtime_is_current(tmp_path: Path) -> N
         json.loads(line)
         for line in (tmp_path / "uv.log").read_text(encoding="utf-8").splitlines()
     ]
-    assert any("search" in call and str(repo.resolve()) in call for call in calls)
+    search_call = next(call for call in calls if "search" in call)
+    assert (
+        str(repo.resolve()) in search_call,
+        "--scope-root" in search_call,
+        "domain:voice" in search_call,
+        "Active context domains: voice" in status.stdout,
+    ) == (True, True, True, True)
 
 
 def test_search_falls_back_locally_when_runtime_fingerprint_is_stale(

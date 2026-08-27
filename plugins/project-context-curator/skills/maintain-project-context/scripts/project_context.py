@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import getpass
 import hashlib
 import hmac
 import json
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -26,14 +28,22 @@ CONTEXT_FILE = CONTEXT_DIR / "context.json"
 GIT_EXCLUDE_ENTRY = "docs/context/"
 IGNORE_MARKER = ".no-project-context"
 CONTEXT_VISIBILITIES = {"local", "versioned"}
-APPLICABILITY_KINDS = {"project", "workspace", "user", "machine", "universal"}
+APPLICABILITY_KINDS = {
+    "domain",
+    "machine",
+    "project",
+    "universal",
+    "user",
+    "workspace",
+}
 DEFAULT_APPLICABILITY = [{"kind": "project", "selector": "self"}]
-GLOBAL_CONFIG_SCHEMA_VERSION = 2
+GLOBAL_CONFIG_SCHEMA_VERSION = 3
 GLOBAL_CONFIG_FILE = "config.json"
 GLOBAL_RUNTIME_FILE = "runtime.json"
 GLOBAL_CATALOG_FILE = "catalog.json"
 GLOBAL_INDEX_DIR = "qdrant"
 GLOBAL_MODEL_DIR = "models"
+GLOBAL_CONTEXTS_DIR = "contexts"
 GLOBAL_RESULT_PREFIX = "UNTRUSTED_CONTEXT_DATA"
 UNTRUSTED_SNAPSHOT_TYPE = "UNTRUSTED_SNAPSHOT_DATA"
 UNTRUSTED_DIAGNOSTIC_TYPE = "UNTRUSTED_CONTEXT_DIAGNOSTIC"
@@ -283,6 +293,194 @@ def global_data_dir() -> Path:
     )
 
 
+def scope_context_root() -> Path:
+    return global_data_dir() / GLOBAL_CONTEXTS_DIR
+
+
+def validate_domain_id(value: str) -> str:
+    domain_id = value.strip().casefold()
+    if not DOMAIN_ID_PATTERN.fullmatch(domain_id):
+        raise SystemExit(
+            "Domain id must contain 1-64 lowercase letters, digits, dots, "
+            "underscores, or hyphens."
+        )
+    return domain_id
+
+
+def configured_domains(config: dict[str, Any]) -> dict[str, tuple[Path, ...]]:
+    raw_domains = config.get("domains", {})
+    if not isinstance(raw_domains, dict):
+        return {}
+    domains: dict[str, tuple[Path, ...]] = {}
+    for raw_name, raw_projects in raw_domains.items():
+        if not isinstance(raw_name, str) or not isinstance(raw_projects, list):
+            continue
+        try:
+            name = validate_domain_id(raw_name)
+        except SystemExit:
+            continue
+        domains[name] = tuple(
+            Path(str(project)).expanduser().resolve()
+            for project in raw_projects
+            if isinstance(project, str) and project
+        )
+    return domains
+
+
+def containing_workspace(repo: Path, roots: tuple[Path, ...]) -> Path | None:
+    matches = tuple(
+        root for root in roots if repo == root or root in repo.parents
+    )
+    return max(matches, key=lambda path: len(path.parts), default=None)
+
+
+def resolve_applicability(
+    values: list[dict[str, str]],
+    repo: Path,
+    *,
+    require_domain_membership: bool,
+) -> list[dict[str, str]]:
+    config = global_config()
+    domains = configured_domains(config)
+    roots = workspace_roots(config)
+    resolved: list[dict[str, str]] = []
+    for item in values:
+        kind = item["kind"]
+        selector = item.get("selector", "")
+        if kind == "universal":
+            resolved.append({"kind": kind})
+            continue
+        if kind == "domain":
+            if selector == "self":
+                raise SystemExit("Domain applicability requires an explicit domain id.")
+            domain_id = validate_domain_id(selector)
+            if domain_id not in domains:
+                raise SystemExit(
+                    f"Unknown domain {domain_id!r}. Register its projects with domain-set first."
+                )
+            if require_domain_membership and repo not in domains[domain_id]:
+                raise SystemExit(
+                    f"Repository {repo} is not registered in domain {domain_id!r}."
+                )
+            resolved.append({"kind": kind, "selector": domain_id})
+            continue
+        if kind == "workspace":
+            workspace = (
+                containing_workspace(repo, roots)
+                if selector == "self"
+                else Path(selector).expanduser().resolve()
+            )
+            if workspace is None:
+                raise SystemExit(
+                    "workspace:self requires the repository to be inside a configured "
+                    "workspace root."
+                )
+            if workspace not in roots:
+                raise SystemExit(
+                    f"Unknown workspace {workspace}. Configure it with global-init first."
+                )
+            if require_domain_membership and repo != workspace and workspace not in repo.parents:
+                raise SystemExit(f"Repository {repo} is outside workspace {workspace}.")
+            resolved.append({"kind": kind, "selector": str(workspace)})
+            continue
+        if kind == "project":
+            project = repo if selector == "self" else Path(selector).expanduser().resolve()
+            if project != repo:
+                raise SystemExit(
+                    "Project applicability must target --repo; use that repository as --repo."
+                )
+            resolved.append({"kind": kind, "selector": str(project)})
+            continue
+        if selector == "self":
+            selector = getpass.getuser() if kind == "user" else platform.node()
+        resolved.append({"kind": kind, "selector": selector})
+    return normalize_applicability(resolved, "resolved applicability")
+
+
+def active_applicability(repo: Path) -> frozenset[tuple[str, str]]:
+    config = global_config()
+    active = {
+        ("project", str(repo)),
+        ("project", "self"),
+        ("user", getpass.getuser()),
+        ("user", "self"),
+        ("machine", platform.node()),
+        ("machine", "self"),
+        ("universal", "*"),
+    }
+    matching_workspaces = tuple(
+        root
+        for root in workspace_roots(config)
+        if repo == root or root in repo.parents
+    )
+    active.update(("workspace", str(root)) for root in matching_workspaces)
+    if matching_workspaces:
+        active.add(("workspace", "self"))
+    active.update(
+        ("domain", domain_id)
+        for domain_id, projects in configured_domains(config).items()
+        if repo in projects
+    )
+    return frozenset(active)
+
+
+def applicability_pairs(value: Any) -> tuple[tuple[str, str], ...]:
+    normalized = normalize_applicability(value, "applicability")
+    return tuple(
+        (item["kind"], item.get("selector", "*")) for item in normalized
+    )
+
+
+def applicability_matches(
+    value: Any,
+    active: frozenset[tuple[str, str]],
+) -> bool:
+    return all(pair in active for pair in applicability_pairs(value))
+
+
+def scope_selector_key(kind: str, selector: str) -> str:
+    if kind == "domain":
+        return validate_domain_id(selector)
+    label = Path(selector).name if kind == "workspace" else selector
+    slug = re.sub(r"[^a-z0-9._-]+", "-", label.casefold()).strip("-") or kind
+    digest = hashlib.sha256(selector.encode()).hexdigest()[:12]
+    return f"{slug[:48]}-{digest}"
+
+
+def scope_context_path(applicability: list[dict[str, str]]) -> Path:
+    pairs = applicability_pairs(applicability)
+    root = scope_context_root()
+    if len(pairs) > 1:
+        digest = hashlib.sha256(
+            json.dumps(pairs, separators=(",", ":")).encode()
+        ).hexdigest()[:20]
+        return root / "composite" / digest / "context.json"
+    kind, selector = pairs[0]
+    if kind == "universal":
+        return root / "universal" / "context.json"
+    directory = SCOPE_DIRECTORY_NAMES[kind]
+    return root / directory / scope_selector_key(kind, selector) / "context.json"
+
+
+def scope_context_files() -> tuple[Path, ...]:
+    root = scope_context_root()
+    if not root.is_dir():
+        return ()
+    resolved_root = root.resolve()
+    return tuple(
+        sorted(
+            (
+                path.resolve()
+                for path in root.rglob("context.json")
+                if path.is_file()
+                and not path.is_symlink()
+                and resolved_root in path.resolve().parents
+            ),
+            key=str,
+        )
+    )
+
+
 def global_backend_script() -> Path:
     return Path(__file__).resolve().with_name("global_context.py")
 
@@ -331,6 +529,60 @@ def global_config() -> dict[str, Any]:
     return read_json_object(global_config_dir() / GLOBAL_CONFIG_FILE)
 
 
+def write_global_config(config: dict[str, Any]) -> None:
+    stamp = now_iso()
+    config["schema_version"] = GLOBAL_CONFIG_SCHEMA_VERSION
+    config.setdefault("created_at", stamp)
+    config["updated_at"] = stamp
+    write_json_object(global_config_dir() / GLOBAL_CONFIG_FILE, config)
+
+
+def domain_set(args: argparse.Namespace) -> None:
+    domain_id = validate_domain_id(args.domain)
+    projects = tuple(
+        dict.fromkeys(context_repo(path) for path in args.project)
+    )
+    missing = tuple(project for project in projects if not project.is_dir())
+    if missing:
+        raise SystemExit(
+            "Domain project is not a directory: "
+            + ", ".join(str(project) for project in missing)
+        )
+    config = global_config()
+    domains = {
+        name: [str(project) for project in members]
+        for name, members in configured_domains(config).items()
+    }
+    domains[domain_id] = [str(project) for project in projects]
+    config["domains"] = domains
+    write_global_config(config)
+    print(f"Configured domain {domain_id}: {len(projects)} projects")
+
+
+def domain_remove(args: argparse.Namespace) -> None:
+    domain_id = validate_domain_id(args.domain)
+    config = global_config()
+    domains = {
+        name: [str(project) for project in members]
+        for name, members in configured_domains(config).items()
+    }
+    if domain_id not in domains:
+        raise SystemExit(f"Unknown domain {domain_id!r}.")
+    del domains[domain_id]
+    config["domains"] = domains
+    write_global_config(config)
+    print(f"Removed domain membership: {domain_id}")
+
+
+def domain_list(args: argparse.Namespace) -> None:
+    domains = configured_domains(global_config())
+    if not domains:
+        print("No project domains configured.")
+        return
+    for domain_id, projects in sorted(domains.items()):
+        print(f"{domain_id}: " + ", ".join(str(project) for project in projects))
+
+
 def global_runtime_state() -> dict[str, Any]:
     return read_json_object(global_data_dir() / GLOBAL_RUNTIME_FILE)
 
@@ -359,6 +611,8 @@ def backend_base_arguments(roots: tuple[Path, ...]) -> list[str]:
             str(cache / GLOBAL_CATALOG_FILE),
             "--model-cache",
             str(cache / GLOBAL_MODEL_DIR),
+            "--scope-root",
+            str(scope_context_root()),
         )
     )
     return arguments
@@ -568,11 +822,12 @@ def global_init(args: argparse.Namespace) -> None:
         "enabled": True,
         "enrollment_policy": "snapshot",
         "workspace_roots": [str(root) for root in roots],
+        "domains": previous.get("domains", {}),
         "runtime_upgrade_policy": "prompt",
         "created_at": previous.get("created_at", stamp),
         "updated_at": stamp,
     }
-    write_json_object(global_config_dir() / GLOBAL_CONFIG_FILE, config)
+    write_global_config(config)
     print(detail or "Qdrant runtime ready")
     print(proc.stdout.strip())
     print(f"Global context configured: {global_config_dir() / GLOBAL_CONFIG_FILE}")
@@ -649,6 +904,13 @@ def global_status(args: argparse.Namespace) -> None:
     )
     print("Workspace roots: " + ", ".join(str(root) for root in roots))
     current_repo = context_repo(args.repo)
+    active_domains = tuple(
+        domain_id
+        for domain_id, projects_in_domain in sorted(configured_domains(config).items())
+        if current_repo in projects_in_domain
+    )
+    if active_domains:
+        print("Active context domains: " + ", ".join(active_domains))
     relationships = catalog.get("relationships", {})
     related = (
         relationships.get(str(current_repo), [])
@@ -679,6 +941,8 @@ def try_global_search(
         return None
     arguments = backend_base_arguments(roots)
     arguments.extend(("--current-repo", str(repo)))
+    for kind, selector in sorted(active_applicability(repo)):
+        arguments.extend(("--active-applicability", f"{kind}:{selector}"))
     for query in queries:
         arguments.extend(("--query", query))
     arguments.extend(("--limit", str(limit)))
@@ -1356,6 +1620,16 @@ def init_context(args: argparse.Namespace) -> None:
     data = load_context(repo)
     default_applicability = parse_applicability(args.default_applicability)
     if default_applicability is not None:
+        resolved_default = resolve_applicability(
+            default_applicability,
+            repo,
+            require_domain_membership=True,
+        )
+        if applicability_pairs(resolved_default) != (("project", str(repo)),):
+            raise SystemExit(
+                "Repository context defaults to project:self. Store broader facts "
+                "with an explicit --applicability so they use the XDG scope store."
+            )
         data["default_applicability"] = default_applicability
     existing_policy = data.get("storage_policy")
     data["storage_policy"] = storage_policy(
@@ -1891,7 +2165,7 @@ def build_parser() -> argparse.ArgumentParser:
             action="append",
             help=(
                 "Override collection applicability with kind[:selector]; repeat for "
-                "project, workspace, user, machine, or universal selectors. "
+                "project, domain, workspace, user, machine, or universal selectors. "
                 "A missing selector means self."
             ),
         )
@@ -1913,8 +2187,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--default-applicability",
         action="append",
         help=(
-            "Collection default as kind[:selector]; repeat for project, workspace, "
-            "user, machine, or universal selectors. Defaults to project:self."
+            "Repository collection default. Only project:self is accepted; broader "
+            "facts require explicit applicability on add-* and use an XDG store."
         ),
     )
     init_parser.set_defaults(func=init_context)
@@ -1985,6 +2259,36 @@ def build_parser() -> argparse.ArgumentParser:
         "--format", choices=("text", "hook"), default="text"
     )
     global_status_parser.set_defaults(func=global_status)
+
+    domain_set_parser = subparsers.add_parser(
+        "domain-set",
+        help="Create or replace a domain's exact project membership",
+    )
+    add_repo(domain_set_parser)
+    domain_set_parser.add_argument("--domain", required=True)
+    domain_set_parser.add_argument(
+        "--project",
+        action="append",
+        type=Path,
+        required=True,
+        help="Domain project path; repeat for every member",
+    )
+    domain_set_parser.set_defaults(func=domain_set)
+
+    domain_remove_parser = subparsers.add_parser(
+        "domain-remove",
+        help="Remove domain membership without deleting its canonical context",
+    )
+    add_repo(domain_remove_parser)
+    domain_remove_parser.add_argument("--domain", required=True)
+    domain_remove_parser.set_defaults(func=domain_remove)
+
+    domain_list_parser = subparsers.add_parser(
+        "domain-list",
+        help="List configured domains and their project members",
+    )
+    add_repo(domain_list_parser)
+    domain_list_parser.set_defaults(func=domain_list)
 
     term_parser = subparsers.add_parser("add-term", help="Add or update a glossary term")
     add_repo(term_parser)
