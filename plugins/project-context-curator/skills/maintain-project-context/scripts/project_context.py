@@ -13,13 +13,14 @@ import shutil
 import subprocess
 import sys
 import unicodedata
+import uuid
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 CONTEXT_DIR = Path("docs/context")
 CONTEXT_FILE = CONTEXT_DIR / "context.json"
 GIT_EXCLUDE_ENTRY = "docs/context/"
@@ -60,6 +61,20 @@ TERM_KINDS = {
     "api",
     "data-store",
     "other",
+}
+
+DOMAIN_ID_PATTERN = re.compile(r"[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?")
+SCOPE_DIRECTORY_NAMES = {
+    "domain": "domains",
+    "machine": "machines",
+    "user": "users",
+    "workspace": "workspaces",
+}
+RECORD_KEYS = {
+    "terms": "term",
+    "components": "name",
+    "patterns": "name",
+    "open_questions": "question",
 }
 
 REMOVE_TARGETS = {
@@ -831,15 +846,54 @@ def remove_git_exclude_entry(repo: Path) -> bool:
     return True
 
 
+def ensure_record_identities(data: dict[str, Any]) -> None:
+    raw_store_id = str(data.get("store_id", ""))
+    try:
+        namespace = uuid.UUID(raw_store_id)
+    except ValueError:
+        if raw_store_id:
+            raise SystemExit(f"Invalid context store_id {raw_store_id!r}") from None
+        namespace = uuid.uuid4()
+        data["store_id"] = str(namespace)
+    for collection, key in RECORD_KEYS.items():
+        records = data.get(collection, [])
+        if not isinstance(records, list):
+            continue
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            label = str(record.get(key, "")).strip()
+            if not label:
+                continue
+            raw_id = str(record.get("id", ""))
+            try:
+                uuid.UUID(raw_id)
+            except ValueError:
+                if raw_id:
+                    raise SystemExit(
+                        f"Invalid {collection} record id {raw_id!r} for {label!r}"
+                    ) from None
+                record["id"] = str(
+                    uuid.uuid5(namespace, f"{collection}:{label.casefold()}")
+                )
+            provenance = record.setdefault("provenance", [])
+            if not isinstance(provenance, list):
+                raise SystemExit(
+                    f"Invalid {collection} provenance for {label!r}: expected list"
+                )
+
+
 def default_context() -> dict[str, Any]:
-    return {
+    data = {
         "schema_version": SCHEMA_VERSION,
+        "store_id": str(uuid.uuid4()),
         "default_applicability": deepcopy(DEFAULT_APPLICABILITY),
         "terms": [],
         "components": [],
         "patterns": [],
         "open_questions": [],
     }
+    return data
 
 
 Migration = Callable[[dict[str, Any]], dict[str, Any]]
@@ -872,9 +926,17 @@ def migrate_v1_to_v2(data: dict[str, Any]) -> dict[str, Any]:
     return migrated
 
 
+def migrate_v2_to_v3(data: dict[str, Any]) -> dict[str, Any]:
+    migrated = deepcopy(data)
+    migrated["schema_version"] = 3
+    ensure_record_identities(migrated)
+    return migrated
+
+
 MIGRATIONS: dict[int, Migration] = {
     0: migrate_v0_to_v1,
     1: migrate_v1_to_v2,
+    2: migrate_v2_to_v3,
 }
 
 
@@ -1006,10 +1068,7 @@ def storage_policy(
     }
 
 
-def load_context_with_migrations(
-    repo: Path,
-) -> tuple[dict[str, Any], tuple[str, ...]]:
-    path = context_path(repo)
+def load_context_file(path: Path) -> tuple[dict[str, Any], tuple[str, ...]]:
     if not path.exists():
         return default_context(), ()
     try:
@@ -1041,7 +1100,14 @@ def load_context_with_migrations(
                     record["applicability"],
                     f"{collection}[{index}].applicability",
                 )
+    ensure_record_identities(merged)
     return merged, applied
+
+
+def load_context_with_migrations(
+    repo: Path,
+) -> tuple[dict[str, Any], tuple[str, ...]]:
+    return load_context_file(context_path(repo))
 
 
 def load_context(repo: Path) -> dict[str, Any]:
@@ -1127,6 +1193,7 @@ def normalize(data: dict[str, Any]) -> None:
     policy = data.get("storage_policy")
     if isinstance(policy, dict) and "gitignore_docs_context" in policy:
         policy["git_exclude_docs_context"] = policy.pop("gitignore_docs_context")
+    ensure_record_identities(data)
     data["terms"] = sorted(data.get("terms", []), key=lambda item: item["term"].lower())
     data["components"] = sorted(data.get("components", []), key=lambda item: item["name"].lower())
     data["patterns"] = sorted(data.get("patterns", []), key=lambda item: item["name"].lower())

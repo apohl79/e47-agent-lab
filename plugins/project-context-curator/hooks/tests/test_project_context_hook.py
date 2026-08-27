@@ -219,7 +219,7 @@ def test_session_start_migrates_context_and_refreshes_views(tmp_path: Path) -> N
     index = (tmp_path / "docs/context/index.md").read_text(encoding="utf-8")
 
     assert (data["schema_version"], "## Topical Index" in index, "ACS" in index) == (
-        2,
+        3,
         True,
         True,
     )

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -12,8 +13,17 @@ SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "project_context.py"
 
 
 def run_context(*args: str, repo: Path) -> subprocess.CompletedProcess[str]:
+    process_env = os.environ.copy()
+    process_env.update(
+        {
+            "PROJECT_CONTEXT_CURATOR_CONFIG_DIR": str(repo / ".pcc-test/config"),
+            "PROJECT_CONTEXT_CURATOR_CACHE_DIR": str(repo / ".pcc-test/cache"),
+            "PROJECT_CONTEXT_CURATOR_DATA_DIR": str(repo / ".pcc-test/data"),
+        }
+    )
     return subprocess.run(
         [sys.executable, str(SCRIPT), *args, "--repo", str(repo)],
+        env=process_env,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -32,13 +42,16 @@ def write_context(repo: Path, data: dict[str, object], index: str = "stale\n") -
 
 def current_context() -> dict[str, object]:
     return {
-        "schema_version": 2,
+        "schema_version": 3,
+        "store_id": "f0b9cb7c-2cc4-4eb2-907f-b69ec16d3702",
         "default_applicability": [{"kind": "project", "selector": "self"}],
         "terms": [
             {
                 "term": "ACS",
                 "kind": "abbreviation",
                 "definition": "Agent Conversation Service",
+                "id": "48e7278a-8b98-4ee5-a119-e1ae40c794ee",
+                "provenance": [],
                 "scope": "project",
                 "source": "repo-docs",
             }
@@ -59,7 +72,7 @@ def test_update_current_context_preserves_data_and_refreshes_views(tmp_path: Pat
     assert (proc.returncode, proc.stdout, proc.stderr, updated, "## Topical Index" in index) == (
         0,
         f"Updated project context: {tmp_path / 'docs/context'}\n"
-        "Schema version: 2\n"
+        "Schema version: 3\n"
         "Migrations applied: none\n"
         "Generated views: refreshed\n",
         "",
@@ -71,6 +84,9 @@ def test_update_current_context_preserves_data_and_refreshes_views(tmp_path: Pat
 def test_update_migrates_legacy_context_without_schema_version(tmp_path: Path) -> None:
     legacy = current_context()
     del legacy["schema_version"]
+    del legacy["store_id"]
+    del legacy["terms"][0]["id"]
+    del legacy["terms"][0]["provenance"]
     legacy["storage_policy"] = {
         "context_visibility": "local",
         "git_initialized": False,
@@ -85,12 +101,14 @@ def test_update_migrates_legacy_context_without_schema_version(tmp_path: Path) -
 
     assert (
         proc.returncode,
-        "Migrations applied: 0 -> 1, 1 -> 2\n" in proc.stdout,
+        "Migrations applied: 0 -> 1, 1 -> 2, 2 -> 3\n" in proc.stdout,
         data["schema_version"],
         data["storage_policy"].get("git_exclude_docs_context"),
         "gitignore_docs_context" in data["storage_policy"],
-        data["terms"],
-    ) == (0, True, 2, False, False, current_context()["terms"])
+        data["terms"][0]["term"],
+        bool(data["terms"][0]["id"]),
+        data["terms"][0]["provenance"],
+    ) == (0, True, 3, False, False, "ACS", True, [])
 
 
 def test_update_migrates_v1_context_with_project_default_applicability(
@@ -98,6 +116,9 @@ def test_update_migrates_v1_context_with_project_default_applicability(
 ) -> None:
     version_one = current_context()
     version_one["schema_version"] = 1
+    del version_one["store_id"]
+    del version_one["terms"][0]["id"]
+    del version_one["terms"][0]["provenance"]
     del version_one["default_applicability"]
     write_context(tmp_path, version_one)
 
@@ -108,20 +129,22 @@ def test_update_migrates_v1_context_with_project_default_applicability(
 
     assert (
         proc.returncode,
-        "Migrations applied: 1 -> 2\n" in proc.stdout,
+        "Migrations applied: 1 -> 2, 2 -> 3\n" in proc.stdout,
         data["schema_version"],
         data["default_applicability"],
         "applicability" in data["terms"][0],
+        bool(data["terms"][0]["id"]),
     ) == (
         0,
         True,
-        2,
+        3,
         [{"kind": "project", "selector": "self"}],
         False,
+        True,
     )
 
 
-@pytest.mark.parametrize("schema_version", [-1, "1", 3])
+@pytest.mark.parametrize("schema_version", [-1, "1", 4])
 def test_update_rejects_unsupported_schema_without_writes(
     tmp_path: Path,
     schema_version: int | str,
