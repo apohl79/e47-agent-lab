@@ -136,7 +136,9 @@ def test_session_start_emits_context(tmp_path: Path):
     assert "Project Context Curator is active" in text
     assert "context admission gate" in text
     assert "Facts default to project applicability" in text
-    assert "workspace, user, machine, or universal applicability" in text
+    assert "every non-project fact uses the XDG scope store" in text
+    assert "Classify as domain only" in text
+    assert "Use move for promotion or reclassification" in text
     assert "do not write it; ask one concise question" in text
     assert "user-confirmed enablement decision" in text
     assert ".no-project-context" in text
@@ -177,6 +179,10 @@ def test_context_admission_policy_is_aligned_across_agent_surfaces(tmp_path: Pat
         "complete and verified on a long-lived branch",
         "user-confirmed durable invariant or architectural decision",
         "decision or invariant, not as present behavior",
+        "project facts stay in the repository store; every non-project fact uses the xdg scope store",
+        "classify as domain only from user confirmation, authoritative domain documentation, or corroborating evidence in multiple registered domain projects",
+        "use workspace only for facts verified across a configured workspace; use user or machine only for the current identity or environment; use universal only for context-independent facts",
+        "use move for promotion or reclassification so the canonical record keeps its identity and provenance instead of being duplicated",
     )
 
     normalized_surfaces = {

@@ -265,8 +265,14 @@ def session_start(payload: dict[str, Any]) -> None:
             "complete and verified on a long-lived branch. An explicitly user-confirmed durable "
             "invariant or architectural decision may be captured earlier; phrase it as a decision or "
             "invariant, not as present behavior. Store admitted knowledge in the same turn. Facts "
-            "default to project applicability; use explicit workspace, user, machine, or universal "
-            "applicability only when verified. If a candidate's durability or applicability is "
+            "default to project applicability. Project facts stay in the repository store; every "
+            "non-project fact uses the XDG scope store. Classify as domain only from user "
+            "confirmation, authoritative domain documentation, or corroborating evidence in "
+            "multiple registered domain projects. Use workspace only for facts verified across a "
+            "configured workspace; use user or machine only for the current identity or "
+            "environment; use universal only for context-independent facts. Use move for promotion "
+            "or reclassification so the canonical record keeps its identity and provenance instead "
+            "of being duplicated. If a candidate's durability or applicability is "
             "uncertain, do not write it; ask one concise question first."
         ),
         (
