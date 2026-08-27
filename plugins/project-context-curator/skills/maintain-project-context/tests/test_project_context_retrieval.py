@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -11,8 +12,17 @@ SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "project_context.py"
 
 
 def run_context(*args: str, repo: Path) -> subprocess.CompletedProcess[str]:
+    process_env = os.environ.copy()
+    process_env.update(
+        {
+            "PROJECT_CONTEXT_CURATOR_CONFIG_DIR": str(repo / ".pcc-test/config"),
+            "PROJECT_CONTEXT_CURATOR_CACHE_DIR": str(repo / ".pcc-test/cache"),
+            "PROJECT_CONTEXT_CURATOR_DATA_DIR": str(repo / ".pcc-test/data"),
+        }
+    )
     return subprocess.run(
         [sys.executable, str(SCRIPT), *args, "--repo", str(repo)],
+        env=process_env,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

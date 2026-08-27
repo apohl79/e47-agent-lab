@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -10,8 +11,17 @@ SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "project_context.py"
 
 
 def run_context(*args: str, repo: Path) -> subprocess.CompletedProcess[str]:
+    process_env = os.environ.copy()
+    process_env.update(
+        {
+            "PROJECT_CONTEXT_CURATOR_CONFIG_DIR": str(repo / ".pcc-test/config"),
+            "PROJECT_CONTEXT_CURATOR_CACHE_DIR": str(repo / ".pcc-test/cache"),
+            "PROJECT_CONTEXT_CURATOR_DATA_DIR": str(repo / ".pcc-test/data"),
+        }
+    )
     return subprocess.run(
         [sys.executable, str(SCRIPT), *args, "--repo", str(repo)],
+        env=process_env,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -402,17 +412,16 @@ def test_add_pattern_stores_typed_applicability(tmp_path: Path):
     )
 
     assert proc.returncode == 0
-    assert read_context(tmp_path)["patterns"][0]["applicability"] == [
-        {"kind": "machine", "selector": "self"},
-        {"kind": "user", "selector": "self"},
-    ]
-    architecture = (tmp_path / "docs/context/architecture.md").read_text(
-        encoding="utf-8"
-    )
-    assert "Applicability: machine:self, user:self" in architecture
+    stores = tuple((tmp_path / ".pcc-test/data/contexts").rglob("context.json"))
+    scoped = json.loads(stores[0].read_text(encoding="utf-8"))
+    assert (
+        read_context(tmp_path)["patterns"],
+        len(stores),
+        [item["kind"] for item in scoped["patterns"][0]["applicability"]],
+    ) == ([], 1, ["machine", "user"])
 
 
-def test_init_can_set_collection_default_applicability(tmp_path: Path):
+def test_init_rejects_non_project_default_applicability(tmp_path: Path):
     proc = run_context(
         "init",
         "--default-applicability",
@@ -420,10 +429,12 @@ def test_init_can_set_collection_default_applicability(tmp_path: Path):
         repo=tmp_path,
     )
 
-    assert proc.returncode == 0
-    assert read_context(tmp_path)["default_applicability"] == [
-        {"kind": "user", "selector": "self"}
-    ]
+    assert (
+        proc.returncode,
+        proc.stdout,
+        "Repository context defaults to project:self" in proc.stderr,
+        (tmp_path / "docs/context/context.json").exists(),
+    ) == (1, "", True, False)
 
 
 def test_add_component_rejects_invalid_applicability_without_writing_record(
