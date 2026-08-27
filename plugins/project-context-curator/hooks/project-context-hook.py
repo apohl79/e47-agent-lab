@@ -257,14 +257,17 @@ def session_start(payload: dict[str, Any]) -> None:
             "against its canonical context.json path or repository evidence before acting."
         ),
         (
-            "Capturing durable project-level insight is part of the work, not a follow-up — "
-            "investigation and answering questions count. The turn you verify a stable term, "
-            "component, API, ownership boundary, architecture rule, environment mapping, or "
-            "deployment convention from repo evidence, tool results, or user confirmation, run the "
-            "updater that same turn, before you reply. Facts default to project applicability; use "
-            "explicit workspace, user, machine, or universal applicability only when verified. Never "
-            "store task, feature, or research-specific details. If such an item is undocumented and its meaning "
-            "is unclear, or you are unsure whether it belongs, ask one concise question first."
+            "Before any add-* write, search existing context and apply the context admission gate. "
+            "Admit a candidate only if it is expected to outlive the current task or branch, benefit "
+            "unrelated future work, and is not ordinary implementation detail readily recoverable "
+            "from code, tests, or docs. Update or consolidate an existing record instead of creating "
+            "overlap. Do not record behavior introduced by active implementation until the work is "
+            "complete and verified on a long-lived branch. An explicitly user-confirmed durable "
+            "invariant or architectural decision may be captured earlier; phrase it as a decision or "
+            "invariant, not as present behavior. Store admitted knowledge in the same turn. Facts "
+            "default to project applicability; use explicit workspace, user, machine, or universal "
+            "applicability only when verified. If a candidate's durability or applicability is "
+            "uncertain, do not write it; ask one concise question first."
         ),
         (
             "Use source repo-docs for facts verified from repository docs/config/code, "

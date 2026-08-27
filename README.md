@@ -9,7 +9,7 @@ Dual-host plugin marketplace for Codex and Claude Code.
 | `reviewers` | `0.7.1` | PR finalization, reviewer-team, and Slack review-request workflows. | `plugins/reviewers` | Codex, Claude Code |
 | `auto-compaction` | `0.1.0` | Claude Code auto-compaction gate with setup skill and checkpoint hooks. | `plugins/auto-compaction` | Claude Code |
 | `inline-discussion` | `1.7.7` | Browser UI for markdown docs with threaded AI conversations. Requires the `inline-discussion` CLI on PATH (installed by `./install.sh`). | `plugins/inline-discussion` | Codex, Claude Code |
-| `project-context-curator` | `1.1.0` | Durable scoped context with optional cross-project hybrid retrieval. | `plugins/project-context-curator` | Codex, Claude Code |
+| `project-context-curator` | `1.1.1` | Durable scoped context with optional cross-project hybrid retrieval. | `plugins/project-context-curator` | Codex, Claude Code |
 
 ## Install
 

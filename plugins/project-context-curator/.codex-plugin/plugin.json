@@ -1,6 +1,6 @@
 {
   "name": "project-context-curator",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Maintains durable scoped context with optional cross-project hybrid retrieval.",
   "author": {
     "name": "Local developer"
@@ -11,7 +11,7 @@
         "slot": "contextual_user",
         "position": "supplement",
         "condition_shell": "test \"${PROJECT_CONTEXT_CURATOR_DISABLED:-0}\" != \"1\" && root=\"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" && common=\"$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)\" && case \"$common\" in */.git) root=\"${common%/.git}\" ;; esac && test ! -e \"$root/.no-project-context\"",
-        "text": "Capture durable new learnings in docs/context. Capturing durable insight is part of the work, not a follow-up \u2014 the turn you verify a stable term, component, API, ownership boundary, architecture rule, environment mapping, or deployment convention from repo evidence or user confirmation, run the updater that same turn before you reply. Facts default to project applicability; use workspace, user, machine, or universal applicability only when verified."
+        "text": "Capture only durable project knowledge in docs/context. Before any add-* write, search existing context and admit a candidate only if it is expected to outlive the current task or branch, benefit unrelated future work, and is not ordinary implementation detail readily recoverable from code, tests, or docs. Update or consolidate an existing record instead of creating overlap. Do not record behavior introduced by active implementation until the work is complete and verified on a long-lived branch. An explicitly user-confirmed durable invariant or architectural decision may be captured earlier; phrase it as a decision or invariant, not as present behavior. Store admitted knowledge in the same turn. Facts default to project applicability; use workspace, user, machine, or universal applicability only when verified."
       }
     ]
   },

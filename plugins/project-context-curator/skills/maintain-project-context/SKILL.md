@@ -7,7 +7,7 @@ description: Maintain durable project domain context while working in a reposito
 
 ## Purpose
 
-Keep durable project knowledge in local repository files instead of conversation history. Detect missing or ambiguous domain context during normal work, ask concise clarification questions when relevant project-specific meaning or ownership is unclear, and proactively update `docs/context/` as soon as stable project insights are confirmed or verified so future fresh sessions can load them.
+Keep durable project knowledge in local repository files instead of conversation history. Detect missing or ambiguous domain context during normal work, ask concise clarification questions when relevant project-specific meaning or ownership is unclear, and proactively update `docs/context/` after stable project insights pass the context admission gate so future fresh sessions can load them.
 
 ## Storage Model
 
@@ -123,6 +123,24 @@ Do not substitute improvised pip/venv commands. `install.sh
 --with-context-runtime` invokes the same deterministic bootstrap; it is a
 convenience, not a separate installation path.
 
+## Context Admission Gate
+
+Before any `add-*` write, search existing context and admit a candidate only
+when all of these conditions hold:
+
+- It is expected to outlive the current task or branch and benefit unrelated
+  future work.
+- It is not ordinary implementation detail readily recoverable from code,
+  tests, or docs.
+- Its meaning, evidence, and applicability are verified.
+
+Update or consolidate an existing record instead of creating overlap. Behavior
+introduced by active implementation is not durable context until the work is
+complete and verified on a long-lived branch. An explicitly user-confirmed
+durable invariant or architectural decision may be captured earlier; phrase it
+as a decision or invariant, not as present behavior. Keep current task or branch
+progress in the task or plan, not in `docs/context/`.
+
 ## Workflow
 
 1. At the start of feature work, research, planning, or review, check whether `docs/context/index.md` exists.
@@ -162,7 +180,7 @@ convenience, not a separate installation path.
    - Terms used differently from their common industry meaning
    - Conflicting names, aliases, or overloaded words
 6. If a relevant project-specific term, abbreviation, component, API, event, ownership boundary, or architecture rule is unclear and not documented in context or repo evidence, ask a concise clarification question before proceeding or storing anything. Prefer one to three concise questions.
-7. Store durable insights immediately with the updater script once they are clear from repository evidence, tool results, or user confirmation. Do not wait for a separate "remember this" request.
+7. Apply the context admission gate before every updater write. Store admitted knowledge in the same turn once it is clear from repository evidence, tool results, or user confirmation; otherwise keep it in the task or plan. Do not wait for a separate "remember this" request.
 8. If the user cannot answer yet, add an open question instead of guessing.
 9. Use the collection default for ordinary project facts. Add `--applicability` only when evidence or user confirmation establishes a broader or different boundary; workspace scope is not shorthand for user, machine, or universal scope.
 
@@ -244,7 +262,7 @@ python3 <skill-dir>/scripts/project_context.py add-pattern --repo . \
 
 ## Rules
 
-- Store only durable knowledge with a verified applicability boundary, and keep it local unless the user explicitly asks to commit/share it.
+- Apply the context admission gate before every `add-*` write. Store only durable knowledge with a verified applicability boundary, and keep it local unless the user explicitly asks to commit/share it.
 - Mark user-confirmed answers with `--source "user-confirmed"` and repository-verified facts with `--source "repo-docs"`.
 - Prefer exact definitions over vague descriptions.
 - Include code paths for components whenever known.
