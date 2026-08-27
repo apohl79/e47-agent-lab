@@ -54,14 +54,18 @@ Read `references/context-schema.md` before changing the schema or adding new rec
 
 ### Optional global retrieval
 
-When the session hook reports `Global context onboarding required`, begin the
-workflow proactively before ordinary project work. Do not wait for the user to
-know or request curator commands.
+When the session hook or search reports `Global context onboarding required` or
+`Global context enrollment repair required`, begin the matching workflow
+proactively before ordinary project work. Do not wait for the user to know or
+request curator commands.
 
-1. Select a read-only preview root from an explicit user-provided path. If none
-   was provided and the current repository is beneath `~/workspace`, use
-   `~/workspace`; otherwise use the directory that contains the current
-   repository. Run `global-init` without an approval token.
+1. Select the preview command without changing state:
+   - For onboarding, select a root from an explicit user-provided path. If none
+     was provided and the current repository is beneath `~/workspace`, use
+     `~/workspace`; otherwise use the directory containing the repository. Run
+     `global-init` without an approval token.
+   - For enrollment repair, retain the configured workspace roots and run
+     `global-enroll` without an approval token.
 2. The preview recursively includes existing canonical contexts plus prospective
    `docs/context/context.json` paths for primary Git checkouts that still need
    initialization. Show the exact workspace roots, `initialize` candidates,
@@ -79,10 +83,14 @@ know or request curator commands.
    in bounded batches; when the host supports agent delegation, assign one
    repository per worker while the main agent retains snapshot approval and
    final count verification.
-5. Rerun `global-init` with the original roots and approved token. Prospective
-   source paths keep the token stable after successful bootstrapping; the backend
-   rejects approval if any context remains missing or the repository snapshot
-   changed.
+5. Rerun the previewed `global-init` or `global-enroll` command with the approved
+   token. Prospective source paths keep the token stable after successful
+   bootstrapping; the backend rejects approval if any context remains missing or
+   the repository snapshot changed.
+
+A known prior catalog schema is not an enrollment repair. The first standard
+search rebuilds it automatically from its already-approved sources without new
+approval.
 
 `global-init` uses snapshot enrollment. Run it first without an approval token;
 it prints every project that would be enrolled and a deterministic snapshot

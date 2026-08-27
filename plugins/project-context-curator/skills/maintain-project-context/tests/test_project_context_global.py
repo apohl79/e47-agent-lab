@@ -51,6 +51,27 @@ command = next((value for value in sys.argv if value in {{"doctor", "sync", "sea
 if command == "doctor":
     print("Qdrant runtime ready")
 elif command == "sync":
+    catalog = pathlib.Path(sys.argv[sys.argv.index("--catalog") + 1])
+    catalog.parent.mkdir(parents=True, exist_ok=True)
+    catalog.write_text(
+        json.dumps(
+            {{
+                "index_schema_version": 3,
+                "dense_model": "sentence-transformers/all-MiniLM-L6-v2",
+                "dense_model_revision": "5f1b8cd78bc4fb444dd171e59b18f3a3af89a079",
+                "sparse_model": "Qdrant/bm25",
+                "sparse_model_revision": "22b8d2af71a76161e18dd432d2cee0eefa66e412",
+                "enrollment_policy": "snapshot",
+                "projects": [],
+                "project_count": 0,
+                "relationships": {{}},
+                "sources": [],
+                "records": [],
+            }}
+        )
+        + "\\n",
+        encoding="utf-8",
+    )
     print("Indexed 2 projects and 3 records (3 changed, 0 removed).")
 elif command == "search":
     if os.environ.get("FAKE_GLOBAL_EMPTY") == "1":
@@ -316,6 +337,39 @@ def test_search_uses_global_backend_when_runtime_is_current(tmp_path: Path) -> N
         "domain:voice" in search_call,
         "Active context domains: voice" in status.stdout,
     ) == (True, True, True, True)
+
+
+def test_search_refreshes_a_schema_v2_catalog_without_new_approval(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    workspace = tmp_path / "workspace"
+    repo.mkdir()
+    workspace.mkdir()
+    env = isolated_environment(tmp_path)
+    env["PROJECT_CONTEXT_CURATOR_UV"] = str(write_fake_uv(tmp_path))
+    env["FAKE_UV_LOG"] = str(tmp_path / "uv.log")
+    init_local_context(repo, env)
+    assert init_global_context(repo, workspace, env).returncode == 0
+    catalog_path = tmp_path / "cache/catalog.json"
+    catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+    catalog["index_schema_version"] = 2
+    catalog_path.write_text(json.dumps(catalog), encoding="utf-8")
+
+    proc = run_context("search", "--query", "gateway", repo=repo, env=env)
+
+    calls = [
+        json.loads(line)
+        for line in (tmp_path / "uv.log").read_text(encoding="utf-8").splitlines()
+    ]
+    refreshed = json.loads(catalog_path.read_text(encoding="utf-8"))
+    assert (
+        proc.returncode,
+        proc.stderr,
+        proc.stdout.startswith("UNTRUSTED_CONTEXT_DATA"),
+        sum("sync" in call for call in calls),
+        refreshed["index_schema_version"],
+    ) == (0, "", True, 2, 3)
 
 
 def test_search_falls_back_locally_when_runtime_fingerprint_is_stale(

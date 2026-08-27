@@ -44,6 +44,9 @@ GLOBAL_CATALOG_FILE = "catalog.json"
 GLOBAL_INDEX_DIR = "qdrant"
 GLOBAL_MODEL_DIR = "models"
 GLOBAL_CONTEXTS_DIR = "contexts"
+GLOBAL_INDEX_SCHEMA_VERSION = 3
+GLOBAL_LEGACY_RECORD_CATALOG_SCHEMA_VERSION = 1
+GLOBAL_SOURCE_CATALOG_SCHEMA_VERSIONS = frozenset({2, GLOBAL_INDEX_SCHEMA_VERSION})
 GLOBAL_RESULT_PREFIX = "UNTRUSTED_CONTEXT_DATA"
 UNTRUSTED_SNAPSHOT_TYPE = "UNTRUSTED_SNAPSHOT_DATA"
 UNTRUSTED_DIAGNOSTIC_TYPE = "UNTRUSTED_CONTEXT_DIAGNOSTIC"
@@ -62,6 +65,12 @@ GLOBAL_ONBOARDING_GUIDANCE = (
     "local-or-versioned policy, preview global-init, request approval for the exact "
     "snapshot, bootstrap every listed missing context with verified non-empty records, "
     "and rerun global-init with the approved token."
+)
+GLOBAL_ENROLLMENT_REPAIR_GUIDANCE = (
+    "Before normal project work, proactively use the Project Context Curator "
+    "skill to preview global-enroll for the configured workspace roots, show "
+    "the exact snapshot, ask the user to approve that snapshot, and rerun "
+    "global-enroll with the approved token."
 )
 
 TERM_KINDS = {
@@ -879,6 +888,22 @@ def global_enroll(args: argparse.Namespace) -> None:
     print(proc.stdout.strip())
 
 
+def global_catalog_has_enrollment_state(catalog: dict[str, Any]) -> bool:
+    schema_version = catalog.get("index_schema_version")
+    if type(schema_version) is not int:
+        return False
+    if schema_version in GLOBAL_SOURCE_CATALOG_SCHEMA_VERSIONS:
+        return isinstance(catalog.get("sources"), list)
+    return (
+        schema_version == GLOBAL_LEGACY_RECORD_CATALOG_SCHEMA_VERSION
+        and isinstance(catalog.get("records"), list)
+    )
+
+
+def global_catalog_requires_refresh(catalog: dict[str, Any]) -> bool:
+    return catalog.get("index_schema_version") != GLOBAL_INDEX_SCHEMA_VERSION
+
+
 def global_status(args: argparse.Namespace) -> None:
     config = global_config()
     roots = workspace_roots(config)
@@ -895,6 +920,14 @@ def global_status(args: argparse.Namespace) -> None:
         return
 
     catalog = read_json_object(global_cache_dir() / GLOBAL_CATALOG_FILE)
+    if not global_catalog_has_enrollment_state(catalog):
+        print(
+            "Global context enrollment repair required: catalog is missing or invalid."
+        )
+        print("Workspace roots: " + ", ".join(str(root) for root in roots))
+        if args.format == "hook":
+            print(GLOBAL_ENROLLMENT_REPAIR_GUIDANCE)
+        return
     projects = catalog.get("projects", [])
     project_count = catalog.get("project_count", len(projects))
     records = catalog.get("records", [])
@@ -939,6 +972,29 @@ def try_global_search(
             file=sys.stderr,
         )
         return None
+    catalog = read_json_object(global_cache_dir() / GLOBAL_CATALOG_FILE)
+    if not global_catalog_has_enrollment_state(catalog):
+        print(
+            "Global context enrollment repair required: catalog is missing or invalid.",
+            file=sys.stderr,
+        )
+        print(GLOBAL_ENROLLMENT_REPAIR_GUIDANCE, file=sys.stderr)
+        print("Using repository-local context search.", file=sys.stderr)
+        return None
+    if global_catalog_requires_refresh(catalog):
+        try:
+            invoke_global_backend(
+                "sync",
+                backend_base_arguments(roots),
+                timeout=1800,
+            )
+        except SystemExit as exc:
+            print(
+                untrusted_diagnostic_line("global index refresh failed", exc),
+                file=sys.stderr,
+            )
+            print("Using repository-local context search.", file=sys.stderr)
+            return None
     arguments = backend_base_arguments(roots)
     arguments.extend(("--current-repo", str(repo)))
     for kind, selector in sorted(active_applicability(repo)):

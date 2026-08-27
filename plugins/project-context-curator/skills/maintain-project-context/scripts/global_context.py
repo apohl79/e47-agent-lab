@@ -36,6 +36,8 @@ DENSE_DIMENSION = 384
 SPARSE_AVERAGE_LENGTH = 128.0
 COLLECTION = "project_context"
 INDEX_SCHEMA_VERSION = 3
+LEGACY_RECORD_CATALOG_SCHEMA_VERSION = 1
+SOURCE_CATALOG_SCHEMA_VERSIONS = frozenset({2, INDEX_SCHEMA_VERSION})
 SEARCH_CANDIDATES = 50
 IGNORE_MARKER = ".no-project-context"
 UNTRUSTED_RESULT_PREFIX = "UNTRUSTED_CONTEXT_DATA"
@@ -961,10 +963,13 @@ def catalog_is_compatible(catalog: dict[str, Any]) -> bool:
 
 
 def catalog_has_enrollment_state(catalog: dict[str, Any]) -> bool:
-    if catalog_is_compatible(catalog):
+    schema_version = catalog.get("index_schema_version")
+    if type(schema_version) is not int:
+        return False
+    if schema_version in SOURCE_CATALOG_SCHEMA_VERSIONS:
         return isinstance(catalog.get("sources"), list)
     return (
-        catalog.get("index_schema_version") == 1
+        schema_version == LEGACY_RECORD_CATALOG_SCHEMA_VERSION
         and isinstance(catalog.get("records"), list)
     )
 

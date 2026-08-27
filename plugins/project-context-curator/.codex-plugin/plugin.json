@@ -1,6 +1,6 @@
 {
   "name": "project-context-curator",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Maintains canonical project and XDG-scoped context with filtered hybrid retrieval.",
   "author": {
     "name": "Local developer"

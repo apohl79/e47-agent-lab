@@ -192,6 +192,45 @@ def test_scope_record_is_indexed_without_becoming_an_enrolled_project(
     )
 
 
+def test_schema_v2_catalog_rebuilds_approved_sources_without_new_enrollment(
+    tmp_path: Path,
+) -> None:
+    module = load_backend_module()
+    workspace = tmp_path / "workspace"
+    project = workspace / "repo"
+    scope_root = tmp_path / "contexts"
+    write_project_context(project)
+    write_scope_context(scope_root, [{"kind": "domain", "selector": "billing"}])
+    install_fake_index(module, ())
+    module.collection_is_available = lambda _path: True
+    sources = module.discovered_sources((workspace,))
+    legacy = module.catalog_from_records((), sources)
+    legacy["index_schema_version"] = 2
+    catalog_path = tmp_path / "catalog.json"
+    module.write_json(catalog_path, legacy)
+
+    result = module.sync_index(
+        (workspace,),
+        tmp_path / "index",
+        catalog_path,
+        tmp_path / "models",
+        scope_root,
+    )
+    catalog = module.read_catalog(catalog_path)
+
+    assert (
+        result[:3],
+        catalog["index_schema_version"],
+        catalog["sources"],
+        [(record["project"], record["id"]) for record in catalog["records"]],
+    ) == (
+        (1, 1, 1),
+        module.INDEX_SCHEMA_VERSION,
+        [module.source_payload(sources[0])],
+        [("domain:billing", RECORD_ID)],
+    )
+
+
 def test_applicability_filter_requires_every_selector() -> None:
     module = load_backend_module()
     hit = {

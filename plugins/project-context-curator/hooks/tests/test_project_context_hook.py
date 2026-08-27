@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import runpy
 import subprocess
 import sys
 from pathlib import Path
@@ -127,6 +128,25 @@ def write_context(repo: Path) -> None:
         ),
         encoding="utf-8",
     )
+
+
+def enabled_global_environment(tmp_path: Path, workspace: Path) -> dict[str, str]:
+    config_dir = tmp_path / "config"
+    data_dir = tmp_path / "data"
+    config_dir.mkdir()
+    data_dir.mkdir()
+    config = {"enabled": True, "workspace_roots": [str(workspace.resolve())]}
+    (config_dir / "config.json").write_text(json.dumps(config), encoding="utf-8")
+    updater = PLUGIN_ROOT / "skills/maintain-project-context/scripts/project_context.py"
+    fingerprint = runpy.run_path(str(updater))["runtime_fingerprint"]()
+    (data_dir / "runtime.json").write_text(
+        json.dumps({"fingerprint": fingerprint}), encoding="utf-8"
+    )
+    return {
+        "PROJECT_CONTEXT_CURATOR_CONFIG_DIR": str(config_dir),
+        "PROJECT_CONTEXT_CURATOR_CACHE_DIR": str(tmp_path / "cache"),
+        "PROJECT_CONTEXT_CURATOR_DATA_DIR": str(data_dir),
+    }
 
 
 def test_session_start_emits_context(tmp_path: Path):
@@ -307,6 +327,29 @@ def test_session_start_requests_global_onboarding_when_index_is_disabled(
         "Global context index: disabled." in text,
         "Global context onboarding required." in text,
     ) == (True, True)
+
+
+def test_session_start_requests_approved_repair_when_catalog_is_missing(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    workspace = tmp_path / "workspace"
+    repo.mkdir()
+    workspace.mkdir()
+    write_context(repo)
+
+    proc = run_hook_process(
+        "session-start",
+        {"cwd": str(repo)},
+        env=enabled_global_environment(tmp_path, workspace),
+    )
+    text = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
+
+    assert (
+        "Global context enrollment repair required" in text,
+        "preview global-enroll" in text,
+        "ask the user to approve that snapshot" in text,
+    ) == (True, True, True)
 
 
 def test_hooks_are_silent_when_context_is_ignored(tmp_path: Path):
