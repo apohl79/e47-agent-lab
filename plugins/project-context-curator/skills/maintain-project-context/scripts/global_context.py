@@ -5,7 +5,7 @@
 #   "qdrant-client==1.19.0",
 # ]
 # ///
-"""Derived cross-project context index. Canonical data remains in context.json."""
+"""Derived context index. Canonical data remains in project or XDG context.json."""
 
 from __future__ import annotations
 
@@ -35,7 +35,7 @@ SPARSE_MODEL_REVISION = "22b8d2af71a76161e18dd432d2cee0eefa66e412"
 DENSE_DIMENSION = 384
 SPARSE_AVERAGE_LENGTH = 128.0
 COLLECTION = "project_context"
-INDEX_SCHEMA_VERSION = 2
+INDEX_SCHEMA_VERSION = 3
 SEARCH_CANDIDATES = 50
 IGNORE_MARKER = ".no-project-context"
 UNTRUSTED_RESULT_PREFIX = "UNTRUSTED_CONTEXT_DATA"
@@ -338,6 +338,10 @@ def resolved_applicability(
             resolved.add(
                 (kind, str(project_path) if raw_value == "self" else raw_value)
             )
+        elif kind == "domain":
+            if not raw_value or raw_value == "self":
+                raise GlobalContextError("domain applicability requires an explicit selector")
+            resolved.add((kind, raw_value))
         elif kind == "workspace":
             if not raw_value:
                 raise GlobalContextError("workspace applicability requires a selector")
@@ -381,10 +385,16 @@ def record_text(
     return "\n".join(values)
 
 
-def records_from_context(path: Path, workspace_root: Path) -> tuple[ContextRecord, ...]:
+def records_from_context(
+    path: Path,
+    workspace_root: Path,
+    *,
+    project_path: str | None = None,
+    project_name: str | None = None,
+) -> tuple[ContextRecord, ...]:
     data = mapping(json.loads(path.read_text(encoding="utf-8")), str(path))
-    repo = path.parents[2].resolve()
-    project = repo.name
+    repo = path.parents[2].resolve() if project_path is None else Path(project_path)
+    project = project_name or repo.name
     default = data.get(
         "default_applicability", [{"kind": "project", "selector": "self"}]
     )
@@ -403,7 +413,12 @@ def records_from_context(path: Path, workspace_root: Path) -> tuple[ContextRecor
                 workspace_root=workspace_root,
             )
             text = record_text(project, kind, record, fields, applicability)
-            key = "\x1f".join((str(repo), kind, label.casefold()))
+            key = "\x1f".join((str(path), kind, label.casefold()))
+            raw_id = one_line(record.get("id"))
+            try:
+                record_id = str(uuid.UUID(raw_id)) if raw_id else ""
+            except ValueError:
+                record_id = ""
             content_hash = hashlib.sha256(
                 json.dumps(
                     {"text": text, "applicability": applicability},
@@ -412,10 +427,10 @@ def records_from_context(path: Path, workspace_root: Path) -> tuple[ContextRecor
             ).hexdigest()
             records.append(
                 ContextRecord(
-                    id=str(uuid.uuid5(uuid.NAMESPACE_URL, key)),
+                    id=record_id or str(uuid.uuid5(uuid.NAMESPACE_URL, key)),
                     key=key,
                     project=project,
-                    project_path=str(repo),
+                    project_path=project_path if project_path is not None else str(repo),
                     workspace_root=str(workspace_root),
                     kind=kind,
                     label=label,
@@ -430,6 +445,63 @@ def records_from_context(path: Path, workspace_root: Path) -> tuple[ContextRecor
     if len(keys) != len(set(keys)):
         raise GlobalContextError(f"{path} contains duplicate record labels")
     return tuple(records)
+
+
+def discover_scope_context_files(root: Path) -> tuple[Path, ...]:
+    if not root.is_dir():
+        return ()
+    resolved_root = root.resolve()
+    paths: list[Path] = []
+    for candidate in root.rglob("context.json"):
+        if not candidate.is_file() or candidate.is_symlink():
+            continue
+        resolved = candidate.resolve()
+        if resolved_root not in resolved.parents:
+            continue
+        paths.append(resolved)
+    return tuple(sorted(paths, key=str))
+
+
+def load_scope_records(
+    root: Path,
+) -> tuple[tuple[ContextRecord, ...], tuple[str, ...], frozenset[str]]:
+    records: list[ContextRecord] = []
+    failures: list[str] = []
+    failed: set[str] = set()
+    for path in discover_scope_context_files(root):
+        try:
+            data = mapping(json.loads(path.read_text(encoding="utf-8")), str(path))
+            metadata = mapping(data.get("scope_store"), f"{path}:scope_store")
+            applicability = resolved_applicability(
+                metadata.get("applicability"),
+                project_path=Path("."),
+                workspace_root=Path("."),
+            )
+            default_applicability = resolved_applicability(
+                data.get("default_applicability"),
+                project_path=Path("."),
+                workspace_root=Path("."),
+            )
+            if default_applicability != applicability:
+                raise GlobalContextError(
+                    "scope default applicability does not match its canonical store"
+                )
+            label = ",".join(f"{kind}:{selector}" for kind, selector in applicability)
+            scope_records = records_from_context(
+                path,
+                Path("."),
+                project_path="",
+                project_name=label,
+            )
+            if any(record.applicability != applicability for record in scope_records):
+                raise GlobalContextError(
+                    "scope record applicability does not match its canonical store"
+                )
+            records.extend(scope_records)
+        except (GlobalContextError, OSError, json.JSONDecodeError) as exc:
+            failures.append(f"{path}: {exc}")
+            failed.add(str(path))
+    return sorted_records(records), tuple(failures), frozenset(failed)
 
 
 def catalog_sources(
@@ -591,6 +663,8 @@ def derive_relationships(
     projects = sorted({record.project for record in records}, key=len, reverse=True)
     relationships: dict[str, set[str]] = {}
     for record in records:
+        if not record.project_path:
+            continue
         haystack = record.text.casefold()
         for project in projects:
             if project == record.project:
@@ -627,11 +701,11 @@ def catalog_from_records(
                     workspace_root=record.workspace_root,
                 )
                 for record in records
+                if record.project_path
             }.values()
         )
     )
     projects = {Path(source.project_path).name for source in enrolled}
-    projects.update(record.project for record in records)
     return {
         "index_schema_version": INDEX_SCHEMA_VERSION,
         "dense_model": DENSE_MODEL,
@@ -900,6 +974,7 @@ def sync_index(
     index_dir: Path,
     catalog_path: Path,
     model_cache: Path,
+    scope_root: Path | None = None,
     *,
     enroll_new: bool = False,
     approved_snapshot: str | None = None,
@@ -927,7 +1002,20 @@ def sync_index(
                 )
             enrolled = catalog_sources(old_catalog, roots)
         records, active_sources, failures, failed = load_source_records(enrolled)
-        records = sorted_records((*records, *preserved_records(old_catalog, failed)))
+        scope_records, scope_failures, scope_failed = (
+            load_scope_records(scope_root)
+            if scope_root is not None
+            else ((), (), frozenset())
+        )
+        failed_sources = frozenset((*failed, *scope_failed))
+        records = sorted_records(
+            (
+                *records,
+                *scope_records,
+                *preserved_records(old_catalog, failed_sources),
+            )
+        )
+        failures = (*failures, *scope_failures)
         reset = not catalog_is_compatible(old_catalog) or not collection_is_available(
             index_dir
         )
@@ -997,6 +1085,34 @@ def rerank_hits(
     return tuple(sorted(hits, key=score)[:limit])
 
 
+def parse_active_applicability(values: Sequence[str]) -> frozenset[tuple[str, str]]:
+    active: set[tuple[str, str]] = set()
+    for value in values:
+        kind, separator, selector = value.partition(":")
+        if not separator or not kind or not selector:
+            raise GlobalContextError(f"invalid active applicability {value!r}")
+        active.add((kind.casefold(), selector))
+    return frozenset(active)
+
+
+def hit_is_applicable(
+    hit: dict[str, Any],
+    active: frozenset[tuple[str, str]],
+) -> bool:
+    raw = hit.get("applicability")
+    if not isinstance(raw, list) or not raw:
+        return False
+    selectors = {
+        (
+            one_line(item.get("kind")).casefold(),
+            one_line(item.get("selector", "*")),
+        )
+        for item in raw
+        if isinstance(item, dict)
+    }
+    return len(selectors) == len(raw) and selectors.issubset(active)
+
+
 def search_index(
     query: str,
     limit: int,
@@ -1004,6 +1120,7 @@ def search_index(
     index_dir: Path,
     catalog_path: Path,
     model_cache: Path,
+    active_applicability: frozenset[tuple[str, str]] = frozenset(),
 ) -> tuple[dict[str, Any], ...]:
     catalog = read_catalog(catalog_path)
     if not catalog_is_compatible(catalog):
@@ -1011,7 +1128,7 @@ def search_index(
     with exclusive_lock(index_dir.parent / "index.lock"):
         index = QdrantIndex(index_dir, model_cache)
         try:
-            hits = index.search(query, limit)
+            hits = index.search(query, max(limit, SEARCH_CANDIDATES))
         finally:
             index.close()
     relationships = catalog.get("relationships", {})
@@ -1021,7 +1138,18 @@ def search_index(
         if isinstance(relationships, dict)
         else []
     )
-    return rerank_hits(hits, query, catalog.get("projects", []), related, limit)
+    applicable_hits = (
+        tuple(hit for hit in hits if hit_is_applicable(hit, active_applicability))
+        if active_applicability
+        else hits
+    )
+    return rerank_hits(
+        applicable_hits,
+        query,
+        catalog.get("projects", []),
+        related,
+        limit,
+    )
 
 
 def format_hit(hit: dict[str, Any]) -> str:
@@ -1064,6 +1192,7 @@ def build_parser() -> argparse.ArgumentParser:
         subparser.add_argument("--index-dir", type=Path, required=True)
         subparser.add_argument("--catalog", type=Path, required=True)
         subparser.add_argument("--model-cache", type=Path, required=True)
+        subparser.add_argument("--scope-root", type=Path)
 
     sync = subparsers.add_parser("sync")
     add_index_arguments(sync)
@@ -1072,6 +1201,7 @@ def build_parser() -> argparse.ArgumentParser:
     search = subparsers.add_parser("search")
     add_index_arguments(search)
     search.add_argument("--current-repo", type=Path, required=True)
+    search.add_argument("--active-applicability", action="append", default=[])
     search.add_argument("--query", action="append", required=True)
     search.add_argument("--limit", type=int, default=20)
     return parser
@@ -1117,6 +1247,7 @@ def main(argv: list[str] | None = None) -> int:
         args.index_dir,
         args.catalog,
         args.model_cache,
+        args.scope_root,
         enroll_new=args.command == "sync" and args.enroll_new,
         approved_snapshot=(args.approved_snapshot if args.command == "sync" else None),
     )
@@ -1142,6 +1273,7 @@ def main(argv: list[str] | None = None) -> int:
         args.index_dir,
         args.catalog,
         args.model_cache,
+        parse_active_applicability(args.active_applicability),
     )
     if not hits:
         print(f"No global context matches for: {query.casefold()}")
