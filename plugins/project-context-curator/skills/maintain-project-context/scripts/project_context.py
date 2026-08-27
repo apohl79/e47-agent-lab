@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Maintain repository-local project context files."""
+"""Maintain canonical repository and XDG context stores."""
 
 from __future__ import annotations
 
@@ -101,7 +101,7 @@ REMOVE_TARGETS = {
 }
 
 SearchSpec = tuple[str, str, str, str, tuple[str, ...]]
-SearchResult = tuple[int, str, str, str, str, tuple[str, ...]]
+SearchResult = tuple[int, str, str, str, str, str, tuple[str, ...]]
 
 SEARCH_SPECS: tuple[SearchSpec, ...] = (
     (
@@ -1391,6 +1391,96 @@ def require_initialized_context(repo: Path) -> None:
     )
 
 
+def load_scope_context(
+    path: Path,
+    applicability: list[dict[str, str]],
+) -> dict[str, Any]:
+    data, _ = load_context_file(path)
+    expected_pairs = applicability_pairs(applicability)
+    if path.exists():
+        if applicability_pairs(validate_scope_context(data, path)) != expected_pairs:
+            raise SystemExit(f"Scope context applicability mismatch in {path}")
+        return data
+    stamp = now_iso()
+    data["default_applicability"] = deepcopy(applicability)
+    data["scope_store"] = {
+        "applicability": deepcopy(applicability),
+        "created_at": stamp,
+        "updated_at": stamp,
+    }
+    return data
+
+
+def validate_scope_context(
+    data: dict[str, Any],
+    path: Path,
+) -> list[dict[str, str]]:
+    metadata = data.get("scope_store")
+    if not isinstance(metadata, dict):
+        raise SystemExit(f"Invalid scope context metadata in {path}")
+    boundary = normalize_applicability(
+        metadata.get("applicability"),
+        f"{path}:scope_store.applicability",
+    )
+    expected = applicability_pairs(boundary)
+    if applicability_pairs(data.get("default_applicability")) != expected:
+        raise SystemExit(f"Scope context default applicability mismatch in {path}")
+    for collection in RECORD_KEYS:
+        for record in data[collection]:
+            effective = record.get("applicability", data["default_applicability"])
+            if applicability_pairs(effective) != expected:
+                raise SystemExit(
+                    f"Scope context record applicability mismatch in {path}"
+                )
+    return boundary
+
+
+def load_discovered_scope_context(path: Path) -> dict[str, Any]:
+    data, _ = load_context_file(path)
+    validate_scope_context(data, path)
+    return data
+
+
+def save_scope_context(path: Path, data: dict[str, Any]) -> None:
+    normalize(data)
+    metadata = data.get("scope_store")
+    if not isinstance(metadata, dict):
+        raise SystemExit(f"Invalid scope context metadata in {path}")
+    metadata["updated_at"] = now_iso()
+    write_json_object(path, data)
+
+
+def context_write_target(
+    repo: Path,
+    values: list[str] | None,
+) -> tuple[Path, dict[str, Any], list[dict[str, str]] | None, bool]:
+    require_initialized_context(repo)
+    parsed = parse_applicability(values)
+    if parsed is None:
+        return context_path(repo), load_context(repo), None, True
+    resolved = resolve_applicability(
+        parsed,
+        repo,
+        require_domain_membership=True,
+    )
+    if applicability_pairs(resolved) == (("project", str(repo)),):
+        return context_path(repo), load_context(repo), parsed, True
+    path = scope_context_path(resolved)
+    return path, load_scope_context(path, resolved), resolved, False
+
+
+def save_context_target(
+    repo: Path,
+    path: Path,
+    data: dict[str, Any],
+    project_target: bool,
+) -> None:
+    if project_target:
+        save_context(repo, data)
+        return
+    save_scope_context(path, data)
+
+
 def policy_git_initialized(repo: Path, policy: dict[str, Any]) -> bool:
     raw = policy.get("git_initialized")
     if isinstance(raw, bool):
@@ -1497,28 +1587,66 @@ def set_if_present(record: dict[str, Any], key: str, value: Any) -> None:
     record[key] = value
 
 
-def upsert_common(record: dict[str, Any], source: str | None) -> None:
+def add_provenance(
+    record: dict[str, Any],
+    repo: Path,
+    source: str,
+    action: str,
+) -> None:
+    stamp = now_iso()
+    entry = {
+        "action": action,
+        "recorded_at": stamp,
+        "repo": str(repo),
+        "source": source,
+    }
+    commit = git_output(repo, "rev-parse", "HEAD")
+    if commit:
+        entry["commit"] = commit
+    provenance = record.setdefault("provenance", [])
+    identity = tuple(
+        entry.get(field) for field in ("action", "repo", "source", "commit")
+    )
+    if any(
+        tuple(item.get(field) for field in ("action", "repo", "source", "commit"))
+        == identity
+        for item in provenance
+        if isinstance(item, dict)
+    ):
+        return
+    provenance.append(entry)
+
+
+def upsert_common(
+    record: dict[str, Any],
+    source: str | None,
+    repo: Path,
+) -> None:
     stamp = now_iso()
     record.setdefault("created_at", stamp)
     record["updated_at"] = stamp
     if source:
         record["source"] = source
+    add_provenance(record, repo, source or str(record.get("source", "unknown")), "recorded")
 
 
-def set_applicability(record: dict[str, Any], values: list[str] | None) -> None:
-    applicability = parse_applicability(values)
+def set_applicability(
+    record: dict[str, Any],
+    applicability: list[dict[str, str]] | None,
+) -> None:
     if applicability is not None:
-        record["applicability"] = applicability
+        record["applicability"] = deepcopy(applicability)
 
 
 def add_term(args: argparse.Namespace) -> None:
     repo = context_repo(args.repo)
-    require_initialized_context(repo)
     if args.kind not in TERM_KINDS:
         allowed = ", ".join(sorted(TERM_KINDS))
         raise SystemExit(f"Invalid term kind {args.kind!r}. Allowed: {allowed}")
 
-    data = load_context(repo)
+    path, data, applicability, project_target = context_write_target(
+        repo, args.applicability
+    )
     record = find_record(data["terms"], "term", args.term)
     if record is None:
         record = {"term": args.term}
@@ -1529,16 +1657,18 @@ def add_term(args: argparse.Namespace) -> None:
     record["scope"] = args.scope
     set_if_present(record, "aliases", split_values(args.aliases))
     set_if_present(record, "notes", args.notes)
-    set_applicability(record, args.applicability)
-    upsert_common(record, args.source)
-    save_context(repo, data)
+    set_applicability(record, applicability)
+    upsert_common(record, args.source, repo)
+    save_context_target(repo, path, data, project_target)
     print(f"Updated term: {args.term}")
+    print(f"Canonical context: {path}")
 
 
 def add_component(args: argparse.Namespace) -> None:
     repo = context_repo(args.repo)
-    require_initialized_context(repo)
-    data = load_context(repo)
+    path, data, applicability, project_target = context_write_target(
+        repo, args.applicability
+    )
     record = find_record(data["components"], "name", args.name)
     if record is None:
         record = {"name": args.name}
@@ -1548,16 +1678,18 @@ def add_component(args: argparse.Namespace) -> None:
     set_if_present(record, "paths", split_values(args.paths))
     set_if_present(record, "interfaces", split_values(args.interfaces))
     set_if_present(record, "notes", args.notes)
-    set_applicability(record, args.applicability)
-    upsert_common(record, args.source)
-    save_context(repo, data)
+    set_applicability(record, applicability)
+    upsert_common(record, args.source, repo)
+    save_context_target(repo, path, data, project_target)
     print(f"Updated component: {args.name}")
+    print(f"Canonical context: {path}")
 
 
 def add_pattern(args: argparse.Namespace) -> None:
     repo = context_repo(args.repo)
-    require_initialized_context(repo)
-    data = load_context(repo)
+    path, data, applicability, project_target = context_write_target(
+        repo, args.applicability
+    )
     record = find_record(data["patterns"], "name", args.name)
     if record is None:
         record = {"name": args.name}
@@ -1566,42 +1698,112 @@ def add_pattern(args: argparse.Namespace) -> None:
     record["summary"] = args.summary
     set_if_present(record, "applies_to", split_values(args.applies_to))
     set_if_present(record, "notes", args.notes)
-    set_applicability(record, args.applicability)
-    upsert_common(record, args.source)
-    save_context(repo, data)
+    set_applicability(record, applicability)
+    upsert_common(record, args.source, repo)
+    save_context_target(repo, path, data, project_target)
     print(f"Updated pattern: {args.name}")
+    print(f"Canonical context: {path}")
 
 
 def add_question(args: argparse.Namespace) -> None:
     repo = context_repo(args.repo)
-    require_initialized_context(repo)
-    data = load_context(repo)
+    path, data, applicability, project_target = context_write_target(
+        repo, args.applicability
+    )
     record = find_record(data["open_questions"], "question", args.question)
     if record is None:
         record = {"question": args.question, "status": "open"}
         data["open_questions"].append(record)
 
     set_if_present(record, "context", args.context)
-    set_applicability(record, args.applicability)
+    set_applicability(record, applicability)
     stamp = now_iso()
     record.setdefault("created_at", stamp)
     record["updated_at"] = stamp
-    save_context(repo, data)
+    add_provenance(record, repo, "user-confirmed", "recorded")
+    save_context_target(repo, path, data, project_target)
     print(f"Recorded question: {args.question}")
+    print(f"Canonical context: {path}")
 
 
 def remove_entry(args: argparse.Namespace) -> None:
     repo = context_repo(args.repo)
-    data = load_context(repo)
     collection_name, key, label = REMOVE_TARGETS[args.type]
+    if args.applicability is None and not context_path(repo).exists():
+        raise SystemExit(f"No {label} found for {args.value!r}")
+    path, data, _, project_target = context_write_target(
+        repo, args.applicability
+    )
     records = data[collection_name]
     record = find_record(records, key, args.value)
     if record is None:
         raise SystemExit(f"No {label} found for {args.value!r}")
 
     records.remove(record)
-    save_context(repo, data)
+    save_context_target(repo, path, data, project_target)
     print(f"Removed {label}: {record.get(key, args.value)}")
+
+
+def context_record_locations(
+    repo: Path,
+    collection: str,
+    key: str,
+    value: str,
+) -> list[tuple[Path, dict[str, Any], bool, dict[str, Any]]]:
+    locations: list[tuple[Path, dict[str, Any], bool, dict[str, Any]]] = []
+    project_data = load_context(repo)
+    project_record = find_record(project_data[collection], key, value)
+    if project_record is not None:
+        locations.append((context_path(repo), project_data, True, project_record))
+    for path in scope_context_files():
+        data = load_discovered_scope_context(path)
+        record = find_record(data[collection], key, value)
+        if record is not None:
+            locations.append((path, data, False, record))
+    return locations
+
+
+def move_entry(args: argparse.Namespace) -> None:
+    repo = context_repo(args.repo)
+    target_path, target_data, applicability, project_target = context_write_target(
+        repo, args.applicability
+    )
+    if applicability is None:
+        raise SystemExit("move requires an explicit --applicability target.")
+    collection, key, label = REMOVE_TARGETS[args.type]
+    locations = context_record_locations(repo, collection, key, args.value)
+    target_record = find_record(target_data[collection], key, args.value)
+    sources = tuple(location for location in locations if location[0] != target_path)
+    if not sources:
+        if target_record is not None:
+            print(f"{label.title()} already stored at: {target_path}")
+            return
+        raise SystemExit(f"No {label} found for {args.value!r}")
+
+    source_record = deepcopy(sources[0][3])
+    source_ids = {str(location[3].get("id", "")) for location in sources}
+    if len(source_ids) != 1:
+        raise SystemExit(
+            f"Conflicting copies of {label} {args.value!r}; consolidate them before moving."
+        )
+    if target_record is not None and target_record.get("id") != source_record.get("id"):
+        raise SystemExit(
+            f"Target already contains a different {label} named {args.value!r}."
+        )
+
+    set_applicability(source_record, applicability)
+    add_provenance(source_record, repo, args.source, "moved")
+    if target_record is None:
+        target_data[collection].append(source_record)
+    else:
+        target_data[collection][target_data[collection].index(target_record)] = source_record
+    save_context_target(repo, target_path, target_data, project_target)
+
+    for source_path, source_data, source_is_project, record in sources:
+        source_data[collection].remove(record)
+        save_context_target(repo, source_path, source_data, source_is_project)
+    print(f"Moved {label}: {args.value}")
+    print(f"Canonical context: {target_path}")
 
 
 def init_context(args: argparse.Namespace) -> None:
@@ -1760,11 +1962,21 @@ def normalized_queries(values: list[str]) -> tuple[str, ...]:
 
 
 def context_search_results(
-    data: dict[str, Any], queries: tuple[str, ...]
+    data: dict[str, Any],
+    queries: tuple[str, ...],
+    *,
+    canonical_source: Path,
+    active: frozenset[tuple[str, str]],
+    scoped_store: bool = False,
 ) -> list[SearchResult]:
     results: list[SearchResult] = []
     for kind, collection, label_key, summary_key, fields in SEARCH_SPECS:
         for record in data[collection]:
+            applicability = record.get(
+                "applicability", data["default_applicability"]
+            )
+            if not applicability_matches(applicability, active):
+                continue
             haystack = "\n".join(one_line(record.get(field)) for field in fields).casefold()
             matched = tuple(query for query in queries if query in haystack)
             if not matched:
@@ -1774,7 +1986,8 @@ def context_search_results(
                     len(matched),
                     kind,
                     one_line(record.get(label_key)),
-                    SEARCH_FILES[kind],
+                    str(canonical_source) if scoped_store else SEARCH_FILES[kind],
+                    str(canonical_source),
                     one_line(record.get(summary_key)),
                     matched,
                 )
@@ -1792,14 +2005,38 @@ def search_context(args: argparse.Namespace) -> None:
 
     require_initialized_context(repo)
     global_lines = try_global_search(repo, queries, args.limit)
+    active = active_applicability(repo)
     try:
-        local_results = context_search_results(load_context(repo), queries)
+        local_results = context_search_results(
+            load_context(repo),
+            queries,
+            canonical_source=context_path(repo),
+            active=active,
+        )
     except (OSError, SystemExit) as exc:
         print(
             untrusted_diagnostic_line("invalid local context", exc),
             file=sys.stderr,
         )
         local_results = []
+    for path in scope_context_files():
+        try:
+            data = load_discovered_scope_context(path)
+            local_results.extend(
+                context_search_results(
+                    data,
+                    queries,
+                    canonical_source=path,
+                    active=active,
+                    scoped_store=True,
+                )
+            )
+        except (OSError, SystemExit) as exc:
+            print(
+                untrusted_diagnostic_line(f"invalid scope context {path}", exc),
+                file=sys.stderr,
+            )
+    local_results.sort(key=lambda result: (-result[0], result[1], result[2].casefold()))
     local_lines = [
         " | ".join(
             (
@@ -1811,17 +2048,17 @@ def search_context(args: argparse.Namespace) -> None:
                 + safe_display_field(", ".join(matched), LOCAL_SUMMARY_OUTPUT_LIMIT),
             )
         )
-        for _, kind, label, path, summary, matched in local_results
+        for _, kind, label, path, _, summary, matched in local_results
     ]
     local_identities = {
         (
-            safe_display_field(str(context_path(repo)), GLOBAL_PATH_OUTPUT_LIMIT)
+            safe_display_field(source, GLOBAL_PATH_OUTPUT_LIMIT)
             .replace("|", "\\|")
             .casefold(),
             safe_display_field(kind, GLOBAL_KIND_OUTPUT_LIMIT).casefold(),
             safe_display_field(label, GLOBAL_LABEL_OUTPUT_LIMIT).casefold(),
         )
-        for _, kind, label, _, _, _ in local_results
+        for _, kind, label, _, source, _, _ in local_results
     }
     remaining_global: list[str] = []
     for line in global_lines or ():
@@ -2346,7 +2583,23 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="Entry key value: term, component name, pattern name, or question text",
     )
+    add_applicability(remove_parser)
     remove_parser.set_defaults(func=remove_entry)
+
+    move_parser = subparsers.add_parser(
+        "move",
+        help="Move one canonical record to a verified applicability scope",
+    )
+    add_repo(move_parser)
+    move_parser.add_argument(
+        "--type",
+        choices=sorted(REMOVE_TARGETS),
+        required=True,
+    )
+    move_parser.add_argument("--value", required=True)
+    move_parser.add_argument("--source", default="user-confirmed")
+    add_applicability(move_parser)
+    move_parser.set_defaults(func=move_entry)
 
     scan_text_parser = subparsers.add_parser("scan-text", help="Print possible context-gap hints from text")
     add_repo(scan_text_parser)
