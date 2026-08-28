@@ -28,6 +28,7 @@ import { isArchivedThreadDuplicate } from './thread-dedup.ts';
 import { findThreadDetails } from './thread-details.ts';
 import { installImageViewer } from './image-viewer.ts';
 import { blockPlusHost } from './block-plus-host.ts';
+import { bindTaskCheckboxes, type TaskCheckboxChange } from './task-checkboxes.ts';
 import {
   awaitsMermaidRender,
   captureDiagramSource,
@@ -527,6 +528,7 @@ async function init(): Promise<void> {
   if (backButton) backButton.hidden = !state.sourceView;
   if (!state.readOnly) {
     installBlockPluses();
+    installTaskCheckboxes();
     installThreadQuoteSelection();
   }
   for (const t of boot.threads) state.threads.set(t.id, t);
@@ -1218,6 +1220,29 @@ function installBlockPluses(): void {
     host.appendChild(copy);
   }
   installRangeSelection();
+}
+
+function installTaskCheckboxes(): void {
+  bindTaskCheckboxes(document.getElementById('doc')!, (change, input) => {
+    void persistTaskCheckbox(change, input);
+  });
+}
+
+async function persistTaskCheckbox(change: TaskCheckboxChange, input: HTMLInputElement): Promise<void> {
+  input.disabled = true;
+  try {
+    const response = await fetch('/api/task-checkboxes', {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ documentPath: state.documentPath, ...change }),
+    });
+    if (!response.ok) throw new Error('task checkbox update failed');
+  } catch {
+    input.checked = !change.checked;
+    showCenterToast('Could not update checkbox');
+  } finally {
+    if (input.isConnected) input.disabled = false;
+  }
 }
 
 let rangeSelectionInstalled = false;
@@ -2597,6 +2622,7 @@ function onDocUpdated(evt: { html: string; blockIds: string[]; title?: string; a
   removeComposerOverlays();
   renderDoc(evt.html);
   installBlockPluses();
+  installTaskCheckboxes();
   // When the server re-parsed archives (e.g. after deleting one), the remaining
   // threads get fresh `archived-N` ids — replace our mirror so future deletes
   // point at the right blocks.

@@ -98,6 +98,34 @@ export function parseDoc(markdown: string): RawParsedDoc {
   return { blocks, blockIds: blocks.map((b) => b.id), links };
 }
 
+const TASK_CHECKBOX_PATTERN = /^((?:\s*>\s*)*\s*(?:[-+*]|\d+[.)])\s+\[)([ xX])\]/gm;
+
+export function updateTaskCheckboxState(
+  markdown: string,
+  blockId: string,
+  checkboxIndex: number,
+  checked: boolean,
+): string | null {
+  const block = parseDoc(markdown).blocks.find((candidate) => candidate.id === blockId);
+  if (
+    !block
+    || (block.kind !== 'list' && block.kind !== 'blockquote')
+    || block.sourceStartLine === undefined
+    || block.sourceEndLine === undefined
+  ) return null;
+  const start = sourceLineOffset(markdown, block.sourceStartLine);
+  const end = sourceLineOffset(markdown, block.sourceEndLine + 1);
+  const source = markdown.slice(start, end);
+  const match = [...source.matchAll(TASK_CHECKBOX_PATTERN)][checkboxIndex];
+  if (!match || match.index === undefined) return null;
+  const stateOffset = start + match.index + match[1]!.length;
+  return markdown.slice(0, stateOffset) + (checked ? 'x' : ' ') + markdown.slice(stateOffset + 1);
+}
+
+function sourceLineOffset(markdown: string, line: number): number {
+  return markdown.split(/(?<=\n)/).slice(0, Math.max(0, line - 1)).join('').length;
+}
+
 function detailsSpacingInsertions(markdown: string): number[] {
   const offsets: number[] = [];
   const pattern = /<\/details>\n(?=[^\n])/g;
@@ -142,7 +170,7 @@ marked.use({ renderer, gfm: true, breaks: false });
 
 const SANITIZE_OPTS = {
   ADD_TAGS: ['details', 'summary', 'del', 's', 'strike'],
-  ADD_ATTR: ['data-block-id', 'data-thread-id', 'data-source-start-line', 'data-source-end-line', 'checked', 'disabled', 'type'],
+  ADD_ATTR: ['data-block-id', 'data-thread-id', 'data-source-start-line', 'data-source-end-line', 'data-task-checkbox-index', 'checked', 'disabled', 'type'],
 };
 
 export interface RenderedDoc extends RawParsedDoc {
@@ -274,6 +302,11 @@ function hasLineThrough(style: string): boolean {
 function injectBlockIdViaDom(fragmentHtml: string, block: Block, headingIds: Map<string, number>): string {
   const dom = new JSDOM(`<div id="root">${fragmentHtml}</div>`);
   const root = dom.window.document.getElementById('root')!;
+  if (block.kind === 'list' || block.kind === 'blockquote') {
+    for (const [index, input] of Array.from(root.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')).entries()) {
+      input.setAttribute('data-task-checkbox-index', String(index));
+    }
+  }
   for (const node of Array.from(root.childNodes)) {
     if (node.nodeType === 1 /* ELEMENT_NODE */) {
       const element = node as Element;

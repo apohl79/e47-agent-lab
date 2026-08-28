@@ -1,6 +1,6 @@
 import { readFileSync, writeFileSync, renameSync } from 'node:fs';
 import { marked } from 'marked';
-import { normalizeDetailsSpacing, parseDoc } from './markdown.ts';
+import { normalizeDetailsSpacing, parseDoc, updateTaskCheckboxState } from './markdown.ts';
 import { escapeHtml } from './html.ts';
 import { findArchivedBlocks } from './archive.ts';
 import type { ThreadKind, ThreadMessage } from './types.ts';
@@ -25,6 +25,16 @@ export function appendThreadDetails(docPath: string, input: AppendThreadInput): 
   const tmp = `${docPath}.tmp`;
   writeFileSync(tmp, updated);
   renameSync(tmp, docPath);
+}
+
+export function updateTaskCheckbox(docPath: string, blockId: string, checkboxIndex: number, checked: boolean): string {
+  const original = readFileSync(docPath, 'utf8');
+  const updated = updateTaskCheckboxState(original, blockId, checkboxIndex, checked);
+  if (updated === null) throw new Error('task checkbox not found');
+  const tmp = `${docPath}.tmp`;
+  writeFileSync(tmp, updated);
+  renameSync(tmp, docPath);
+  return updated;
 }
 
 /**

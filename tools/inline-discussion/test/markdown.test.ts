@@ -1,8 +1,7 @@
 // test/markdown.test.ts
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseDoc } from '../src/markdown.ts';
-import { renderDoc } from '../src/markdown.ts';
+import { parseDoc, renderDoc, updateTaskCheckboxState } from '../src/markdown.ts';
 
 test('parseDoc assigns stable block IDs per top-level block', () => {
   const md = `# Title\n\nPara one.\n\n\`\`\`js\nconsole.log(1);\n\`\`\`\n`;
@@ -138,7 +137,20 @@ test('renderDoc preserves checked task-list state and strikethrough markdown', (
   const { html } = renderDoc(md);
   assert.match(html, /<input[^>]*type="checkbox"[^>]*>/);
   assert.match(html, /<input[^>]*checked[^>]*>/);
+  assert.match(html, /data-task-checkbox-index="0"/);
+  assert.match(html, /data-task-checkbox-index="1"/);
   assert.match(html, /<del>Done item<\/del>/);
+});
+
+test('updateTaskCheckboxState changes only the selected Markdown task marker', () => {
+  const markdown = '- [ ] First\n  - [x] Nested\n- [ ] Last\n';
+  const blockId = parseDoc(markdown).blocks[0]!.id;
+
+  assert.equal(
+    updateTaskCheckboxState(markdown, blockId, 1, false),
+    '- [ ] First\n  - [ ] Nested\n- [ ] Last\n',
+  );
+  assert.equal(updateTaskCheckboxState(markdown, blockId, 3, true), null);
 });
 
 test('renderDoc converts inline line-through styles to semantic del tags', () => {

@@ -51,6 +51,31 @@ test('GET /api/bootstrap returns html + block ids + empty thread list', async ()
   await close();
 });
 
+test('PATCH /api/task-checkboxes persists the selected Markdown task marker', async () => {
+  const markdown = '# Tasks\n\n- [ ] First\n- [x] Done\n';
+  const { docPath, sessionDir, transcriptPath, prefsPath } = scratchSession(markdown);
+  const { port, close } = await createServer({
+    docPath,
+    sessionDir,
+    mainJsonlPath: transcriptPath,
+    prefsPath,
+    agentFactory: mockAgentFactory({ reply: 'r', conclusion: 'c' }),
+    shutdownOnFinish: false,
+  });
+  const boot = (await (await fetch(`http://127.0.0.1:${port}/api/bootstrap`)).json()) as { blockIds: string[]; html: string };
+  const response = await fetch(`http://127.0.0.1:${port}/api/task-checkboxes`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ blockId: boot.blockIds[1], checkboxIndex: 0, checked: true }),
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(readFileSync(docPath, 'utf8'), '# Tasks\n\n- [x] First\n- [x] Done\n');
+  const refreshed = (await (await fetch(`http://127.0.0.1:${port}/api/bootstrap`)).json()) as { html: string };
+  assert.match(refreshed.html, /<input[^>]*checked[^>]*>/);
+  await close();
+});
+
 test('rejects cross-origin mutations and non-JSON mutation bodies', async () => {
   const { docPath, sessionDir, prefsPath } = scratchSession('# Title\n\nPara.\n');
   const { port, close } = await createServer({

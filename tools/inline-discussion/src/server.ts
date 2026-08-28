@@ -8,7 +8,7 @@ import { isMarkdownFile, isSourceFile, renderDoc, renderedMarkdownText, renderSo
 import { parseSourceReference, selectedSourceText } from './source-reference.ts';
 import { parseArchivedThreads } from './archive.ts';
 import { readCodexSessionInferenceSettings, readJsonl, trimTranscript } from './transcript.ts';
-import { appendThreadDetails, removeAllArchivedBlocks, removeArchivedBlockByIndex, removeThreadDetailsById, replaceThreadDetails } from './doc-writer.ts';
+import { appendThreadDetails, removeAllArchivedBlocks, removeArchivedBlockByIndex, removeThreadDetailsById, replaceThreadDetails, updateTaskCheckbox } from './doc-writer.ts';
 import type { AgentFactory, ThreadAgent, ToolApprovalRequest } from './agent.ts';
 import {
   codexAgentFactory,
@@ -932,6 +932,50 @@ async function handle(state: ServerState, req: IncomingMessage, res: ServerRespo
     state.prefs = writePrefs(state.prefsPath, body, state.prefs);
     res.setHeader('content-type', 'application/json');
     res.end(JSON.stringify(state.prefs));
+    return;
+  }
+
+  if (req.method === 'PATCH' && url.pathname === '/api/task-checkboxes') {
+    if (guardApplying(state, res)) return;
+    if (!requireJsonContentType(req, res)) return;
+    const body = await readJson(req) as {
+      blockId?: unknown;
+      checkboxIndex?: unknown;
+      checked?: unknown;
+      documentPath?: unknown;
+    };
+    const documentPath = resolveAnnotationDocument(state, body.documentPath);
+    if (
+      !documentPath
+      || typeof body.blockId !== 'string'
+      || !body.blockId
+      || typeof body.checkboxIndex !== 'number'
+      || !Number.isSafeInteger(body.checkboxIndex)
+      || body.checkboxIndex < 0
+      || typeof body.checked !== 'boolean'
+    ) {
+      res.statusCode = 400;
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ ok: false, error: 'invalid task checkbox update' }));
+      return;
+    }
+    try {
+      const markdown = updateTaskCheckbox(documentPath, body.blockId, body.checkboxIndex, body.checked);
+      if (documentPath === state.docPath) {
+        state.docMd = markdown;
+        state.archivedThreads = parseArchivedThreads(markdown, documentPath);
+        pushDocumentEvent(state, 'doc.updated', documentPath, renderCurrentDoc(state));
+      } else {
+        const archivedThreads = documentArchivedThreads(state, documentPath);
+        pushDocumentEvent(state, 'doc.updated', documentPath, renderDocument(documentPath, markdown, archivedThreads, null));
+      }
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ ok: true, documentPath }));
+    } catch {
+      res.statusCode = 409;
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ ok: false, error: 'task checkbox is no longer available' }));
+    }
     return;
   }
 
