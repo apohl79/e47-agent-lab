@@ -51,8 +51,12 @@ def run_hook_process(
     )
 
 
-def run_hook(mode: str, payload: dict) -> dict:
-    proc = run_hook_process(mode, payload)
+def run_hook(
+    mode: str,
+    payload: dict,
+    env: dict[str, str] | None = None,
+) -> dict:
+    proc = run_hook_process(mode, payload, env)
     assert proc.stderr == ""
     assert proc.stdout.strip()
     return json.loads(proc.stdout)
@@ -182,7 +186,12 @@ def enabled_global_environment(tmp_path: Path, workspace: Path) -> dict[str, str
 
 
 def test_session_start_emits_context(tmp_path: Path):
-    output = run_hook("session-start", {"cwd": str(tmp_path)})
+    env = {
+        "PROJECT_CONTEXT_CURATOR_CONFIG_DIR": str(tmp_path / "config"),
+        "PROJECT_CONTEXT_CURATOR_CACHE_DIR": str(tmp_path / "cache"),
+        "PROJECT_CONTEXT_CURATOR_DATA_DIR": str(tmp_path / "data"),
+    }
+    output = run_hook("session-start", {"cwd": str(tmp_path)}, env)
     text = output["hookSpecificOutput"]["additionalContext"]
     assert output["hookSpecificOutput"]["hookEventName"] == "SessionStart"
     assert "Project Context Curator is active" in text
@@ -400,7 +409,7 @@ def test_session_start_migrates_context_and_refreshes_views(tmp_path: Path) -> N
     index = (tmp_path / "docs/context/index.md").read_text(encoding="utf-8")
 
     assert (data["schema_version"], "## Topical Index" in index, "ACS" in index) == (
-        3,
+        4,
         True,
         True,
     )

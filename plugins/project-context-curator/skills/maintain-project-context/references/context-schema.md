@@ -42,7 +42,7 @@ When changing the canonical schema:
 
 ```json
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "store_id": "f0b9cb7c-2cc4-4eb2-907f-b69ec16d3702",
   "default_applicability": [
     {"kind": "project", "selector": "self"}
@@ -75,9 +75,10 @@ indexing. Applicability is a retrieval filter, not an access-control system.
 
 Selectors are typed objects:
 
-- `project`, `domain`, `user`, and `machine` require a `selector`.
-- `self` resolves while indexing to the owning project, current user, or current
-  machine.
+- `project`, `domain`, and `user` require a `selector`; `machine` has none.
+- `self` resolves while indexing to the owning project or current user.
+- `machine` is local to the active XDG data directory, so it has no host or
+  other machine identifier.
 - `domain` requires an explicit validated domain ID and exact project membership
   in the user configuration; `domain:self` is invalid.
 - `universal` has no selector and denotes knowledge that is independent of
@@ -93,17 +94,20 @@ Examples:
 {
   "applicability": [
     {"kind": "user", "selector": "self"},
-    {"kind": "machine", "selector": "self"}
+    {"kind": "machine"}
   ]
 }
 ```
 
-CLI values use `kind[:selector]`, for example `--applicability user:self` or
-`--applicability universal`. Omitting a non-universal selector means `self`.
+CLI values use `kind[:selector]`, for example `--applicability user:self`,
+`--applicability machine`, or `--applicability universal`. Omitting a project
+or user selector means `self`; universal and machine have no selector.
 Existing schema-v1 collections migrate to `project:self`; individual records
 remain unchanged and inherit that default. Schema v2 migrates to v3 by assigning
-stable store and record UUIDs plus an empty provenance list where missing. It
-does not silently relocate existing non-project records; use `move` for explicit
+stable store and record UUIDs plus an empty provenance list where missing.
+Schema v3 migrates machine selectors to the selectorless machine boundary and
+relocates private machine and composite scope files when `update` runs. It does
+not silently relocate other non-project records; use `move` for explicit
 promotion or reclassification.
 
 ## Storage Runtime Configuration
@@ -136,7 +140,7 @@ reported as `unconfigured` while retaining local compatibility. An older valid
 | `project:self` | `<repo>/docs/context/context.json` | `<git-store>/projects/<store-id>/context.json` |
 | `domain:<id>` | `<xdg>/contexts/domains/<id>/context.json` | `<git-store>/scopes/domains/<id>/context.json` |
 | `user:<name>` | `<xdg>/contexts/users/<selector-key>/context.json` | Same private XDG path |
-| `machine:<name>` | `<xdg>/contexts/machines/<selector-key>/context.json` | Same private XDG path |
+| `machine` | `<xdg>/contexts/machines/context.json` | Same private XDG path |
 | `universal` | `<xdg>/contexts/universal/context.json` | `<git-store>/scopes/universal/context.json` |
 | Shareable intersection | `<xdg>/contexts/composite/<boundary-hash>/context.json` | `<git-store>/scopes/composite/<boundary-hash>/context.json` |
 | Intersection containing user/machine | `<xdg>/contexts/composite/<boundary-hash>/context.json` | Same private XDG path |
@@ -152,7 +156,7 @@ store. Its additional metadata is:
 
 ```json
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "store_id": "2dd54917-fb91-48bb-9664-0468bfcbc12d",
   "scope_store": {
     "applicability": [{"kind": "domain", "selector": "billing"}],

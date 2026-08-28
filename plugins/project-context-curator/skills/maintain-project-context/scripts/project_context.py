@@ -10,7 +10,6 @@ import hashlib
 import hmac
 import json
 import os
-import platform
 import re
 import shutil
 import subprocess
@@ -26,7 +25,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 CONTEXT_DIR = Path("docs/context")
 CONTEXT_FILE = CONTEXT_DIR / "context.json"
 GIT_EXCLUDE_ENTRY = "docs/context/"
@@ -446,8 +445,11 @@ def resolve_applicability(
                 )
             resolved.append({"kind": kind, "selector": str(project)})
             continue
+        if kind == "machine":
+            resolved.append({"kind": kind})
+            continue
         if selector == "self":
-            selector = getpass.getuser() if kind == "user" else platform.node()
+            selector = getpass.getuser()
         resolved.append({"kind": kind, "selector": selector})
     return normalize_applicability(resolved, "resolved applicability")
 
@@ -459,8 +461,7 @@ def active_applicability(repo: Path) -> frozenset[tuple[str, str]]:
         ("project", "self"),
         ("user", getpass.getuser()),
         ("user", "self"),
-        ("machine", platform.node()),
-        ("machine", "self"),
+        ("machine", "*"),
         ("universal", "*"),
     }
     active.update(
@@ -508,6 +509,8 @@ def scope_context_path(applicability: list[dict[str, str]]) -> Path:
     kind, selector = pairs[0]
     if kind == "universal":
         return root / "universal" / "context.json"
+    if kind == "machine":
+        return root / SCOPE_DIRECTORY_NAMES[kind] / "context.json"
     directory = SCOPE_DIRECTORY_NAMES[kind]
     return root / directory / scope_selector_key(kind, selector) / "context.json"
 
@@ -1800,10 +1803,36 @@ def migrate_v2_to_v3(data: dict[str, Any]) -> dict[str, Any]:
     return migrated
 
 
+def migrate_v3_to_v4(data: dict[str, Any]) -> dict[str, Any]:
+    migrated = deepcopy(data)
+
+    def migrate_applicability(value: Any) -> None:
+        if not isinstance(value, list):
+            return
+        for selector in value:
+            if isinstance(selector, dict) and selector.get("kind") == "machine":
+                selector.pop("selector", None)
+
+    migrate_applicability(migrated.get("default_applicability"))
+    scope_store = migrated.get("scope_store")
+    if isinstance(scope_store, dict):
+        migrate_applicability(scope_store.get("applicability"))
+    for collection in RECORD_KEYS:
+        records = migrated.get(collection)
+        if not isinstance(records, list):
+            continue
+        for record in records:
+            if isinstance(record, dict):
+                migrate_applicability(record.get("applicability"))
+    migrated["schema_version"] = 4
+    return migrated
+
+
 MIGRATIONS: dict[int, Migration] = {
     0: migrate_v0_to_v1,
     1: migrate_v1_to_v2,
     2: migrate_v2_to_v3,
+    3: migrate_v3_to_v4,
 }
 
 
@@ -1837,6 +1866,13 @@ def normalize_applicability(
                 )
             selector = "*"
             item = {"kind": kind}
+        elif kind == "machine":
+            if raw_value:
+                raise SystemExit(
+                    f"Invalid {label}: machine applicability has no selector"
+                )
+            selector = "*"
+            item = {"kind": kind}
         else:
             if not raw_value:
                 raise SystemExit(
@@ -1862,6 +1898,13 @@ def parse_applicability(values: list[str] | None) -> list[dict[str, str]] | None
         if kind == "universal":
             if separator:
                 raise SystemExit("Universal applicability does not accept a selector")
+            selectors.append({"kind": kind})
+            continue
+        if kind == "machine":
+            if separator and selector.strip() not in {"", "self"}:
+                raise SystemExit(
+                    "Machine applicability has no selector; XDG storage is the machine boundary."
+                )
             selectors.append({"kind": kind})
             continue
         resolved_selector = selector.strip() if separator else "self"
@@ -2079,6 +2122,86 @@ def save_scope_context(path: Path, data: dict[str, Any]) -> None:
         write_json_object(path, data)
 
 
+def merge_scope_context_data(
+    target: dict[str, Any],
+    source: dict[str, Any],
+    path: Path,
+) -> None:
+    target_boundary = applicability_pairs(validate_scope_context(target, path))
+    source_boundary = applicability_pairs(validate_scope_context(source, path))
+    if source_boundary != target_boundary:
+        raise SystemExit(f"Legacy scope migration boundary mismatch: {path}")
+    for collection in RECORD_KEYS:
+        records = {
+            str(record["id"]): record
+            for record in target[collection]
+            if isinstance(record, dict)
+        }
+        for record in source[collection]:
+            if not isinstance(record, dict):
+                continue
+            record_id = str(record["id"])
+            existing = records.get(record_id)
+            if existing is None:
+                target[collection].append(deepcopy(record))
+                records[record_id] = record
+            elif existing != record:
+                raise SystemExit(
+                    f"Legacy scope migration record conflict: {collection}:{record_id}"
+                )
+
+
+def migrate_private_scope_contexts() -> tuple[str, ...]:
+    root = scope_context_root()
+    if not root.is_dir():
+        return ()
+    migrations: list[tuple[Path, Path, dict[str, Any], tuple[str, ...]]] = []
+    for source in sorted(root.rglob("context.json"), key=str):
+        if not source.is_file() or source.is_symlink():
+            continue
+        data, applied = load_context_file(source)
+        if not applied:
+            continue
+        boundary = validate_scope_context(data, source)
+        migrations.append((source.resolve(), scope_context_path(boundary), data, applied))
+
+    sources_by_target: dict[Path, list[tuple[Path, dict[str, Any], tuple[str, ...]]]] = {}
+    for source, target, data, applied in migrations:
+        sources_by_target.setdefault(target, []).append((source, data, applied))
+
+    plans: list[tuple[Path, dict[str, Any], tuple[Path, ...], tuple[str, ...]]] = []
+    for target, sources in sources_by_target.items():
+        target_source = next(
+            (data for source, data, _steps in sources if source == target.resolve()),
+            None,
+        )
+        if target_source is not None:
+            merged = deepcopy(target_source)
+        elif target.exists():
+            merged, _ = load_context_file(target)
+        else:
+            merged = deepcopy(sources[0][1])
+        for source, data, _steps in sources:
+            if source != target.resolve() or data != target_source:
+                merge_scope_context_data(merged, data, target)
+        legacy_sources = tuple(source for source, _data, _steps in sources if source != target.resolve())
+        steps = tuple(step for _source, _data, source_steps in sources for step in source_steps)
+        plans.append((target, merged, legacy_sources, steps))
+
+    for target, data, _sources, _steps in plans:
+        save_scope_context(target, data)
+    applied_steps: list[str] = []
+    for _target, _data, sources, steps in plans:
+        for source in sources:
+            source.unlink()
+            parent = source.parent
+            while parent != root and not any(parent.iterdir()):
+                parent.rmdir()
+                parent = parent.parent
+        applied_steps.extend(steps)
+    return tuple(applied_steps)
+
+
 def context_write_target(
     repo: Path,
     values: list[str] | None,
@@ -2092,6 +2215,8 @@ def context_write_target(
         repo,
         require_domain_membership=True,
     )
+    if any(item["kind"] == "machine" for item in resolved):
+        migrate_private_scope_contexts()
     if applicability_pairs(resolved) == (("project", str(repo)),):
         return context_path(repo), load_context(repo), parsed, True
     path = scope_context_path(resolved)
@@ -3541,10 +3666,13 @@ def update_context(args: argparse.Namespace) -> None:
     require_initialized_context(repo)
     data, migrations = load_context_with_migrations(repo)
     save_context(repo, data)
+    scope_migrations = migrate_private_scope_contexts()
     applied = ", ".join(migrations) if migrations else "none"
     print(f"Updated project context: {repo / CONTEXT_DIR}")
     print(f"Schema version: {SCHEMA_VERSION}")
     print(f"Migrations applied: {applied}")
+    if scope_migrations:
+        print(f"Scoped migrations applied: {', '.join(scope_migrations)}")
     print("Generated views: refreshed")
 
 
@@ -4124,7 +4252,7 @@ def build_parser() -> argparse.ArgumentParser:
             help=(
                 "Override collection applicability with kind[:selector]; repeat for "
                 "project, domain, user, machine, or universal selectors. "
-                "A missing selector means self."
+                "A missing project or user selector means self; machine has no selector."
             ),
         )
 

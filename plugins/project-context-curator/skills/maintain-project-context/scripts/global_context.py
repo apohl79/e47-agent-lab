@@ -15,7 +15,6 @@ import hashlib
 import hmac
 import json
 import os
-import platform
 import re
 import sys
 import unicodedata
@@ -510,9 +509,7 @@ def resolved_applicability(
                 (kind, getpass.getuser() if raw_value == "self" else raw_value)
             )
         elif kind == "machine":
-            if not raw_value:
-                raise GlobalContextError("machine applicability requires a selector")
-            resolved.add((kind, platform.node() if raw_value == "self" else raw_value))
+            resolved.add((kind, "*"))
         else:
             raise GlobalContextError(f"unsupported applicability kind {kind!r}")
     if not resolved:

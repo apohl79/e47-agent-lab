@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from scope_test_support import (
     initialize,
     isolated_environment,
@@ -91,6 +93,56 @@ def test_universal_upsert_is_canonical_and_idempotent(tmp_path: Path) -> None:
         len(stored["terms"][0]["provenance"]),
         stored["default_applicability"],
     ) == (0, 0, [], 1, first_id, 1, [{"kind": "universal"}])
+
+
+@pytest.mark.parametrize("applicability", ("machine", "machine:self"))
+def test_machine_scope_is_selectorless_and_xdg_local(
+    tmp_path: Path,
+    applicability: str,
+) -> None:
+    env = isolated_environment(tmp_path / "xdg")
+    repo = tmp_path / "repo"
+    initialize(repo, env)
+
+    added = run_context(
+        "add-term",
+        "--term",
+        "Local socket",
+        "--definition",
+        "Socket available only on this machine",
+        "--applicability",
+        applicability,
+        repo=repo,
+        env=env,
+    )
+    path = tmp_path / "xdg/data/contexts/machines/context.json"
+    scoped = read_json(path)
+
+    assert (
+        added.returncode,
+        scoped["default_applicability"],
+        scoped["terms"][0]["applicability"],
+    ) == (0, [{"kind": "machine"}], [{"kind": "machine"}])
+
+
+def test_machine_scope_rejects_named_machine_selector(tmp_path: Path) -> None:
+    env = isolated_environment(tmp_path / "xdg")
+    repo = tmp_path / "repo"
+    initialize(repo, env)
+
+    added = run_context(
+        "add-term",
+        "--term",
+        "Local socket",
+        "--definition",
+        "Socket available only on this machine",
+        "--applicability",
+        "machine:renamed-host",
+        repo=repo,
+        env=env,
+    )
+
+    assert (added.returncode, "Machine applicability has no selector" in added.stderr) == (1, True)
 
 
 def test_multiple_applicability_dimensions_use_composite_store(

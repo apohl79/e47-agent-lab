@@ -42,7 +42,7 @@ def write_context(repo: Path, data: dict[str, object], index: str = "stale\n") -
 
 def current_context() -> dict[str, object]:
     return {
-        "schema_version": 3,
+        "schema_version": 4,
         "store_id": "f0b9cb7c-2cc4-4eb2-907f-b69ec16d3702",
         "default_applicability": [{"kind": "project", "selector": "self"}],
         "terms": [
@@ -72,7 +72,7 @@ def test_update_current_context_preserves_data_and_refreshes_views(tmp_path: Pat
     assert (proc.returncode, proc.stdout, proc.stderr, updated, "## Topical Index" in index) == (
         0,
         f"Updated project context: {tmp_path / 'docs/context'}\n"
-        "Schema version: 3\n"
+        "Schema version: 4\n"
         "Migrations applied: none\n"
         "Generated views: refreshed\n",
         "",
@@ -101,14 +101,14 @@ def test_update_migrates_legacy_context_without_schema_version(tmp_path: Path) -
 
     assert (
         proc.returncode,
-        "Migrations applied: 0 -> 1, 1 -> 2, 2 -> 3\n" in proc.stdout,
+        "Migrations applied: 0 -> 1, 1 -> 2, 2 -> 3, 3 -> 4\n" in proc.stdout,
         data["schema_version"],
         data["storage_policy"].get("git_exclude_docs_context"),
         "gitignore_docs_context" in data["storage_policy"],
         data["terms"][0]["term"],
         bool(data["terms"][0]["id"]),
         data["terms"][0]["provenance"],
-    ) == (0, True, 3, False, False, "ACS", True, [])
+    ) == (0, True, 4, False, False, "ACS", True, [])
 
 
 def test_update_migrates_v1_context_with_project_default_applicability(
@@ -129,7 +129,7 @@ def test_update_migrates_v1_context_with_project_default_applicability(
 
     assert (
         proc.returncode,
-        "Migrations applied: 1 -> 2, 2 -> 3\n" in proc.stdout,
+        "Migrations applied: 1 -> 2, 2 -> 3, 3 -> 4\n" in proc.stdout,
         data["schema_version"],
         data["default_applicability"],
         "applicability" in data["terms"][0],
@@ -137,14 +137,14 @@ def test_update_migrates_v1_context_with_project_default_applicability(
     ) == (
         0,
         True,
-        3,
+        4,
         [{"kind": "project", "selector": "self"}],
         False,
         True,
     )
 
 
-@pytest.mark.parametrize("schema_version", [-1, "1", 4])
+@pytest.mark.parametrize("schema_version", [-1, "1", 5])
 def test_update_rejects_unsupported_schema_without_writes(
     tmp_path: Path,
     schema_version: int | str,
@@ -170,4 +170,56 @@ def test_update_requires_initialized_context(tmp_path: Path) -> None:
         1,
         "",
         True,
+    )
+
+
+def test_update_merges_legacy_machine_scopes_without_hostnames(tmp_path: Path) -> None:
+    write_context(tmp_path, current_context())
+    legacy = current_context()
+    legacy["schema_version"] = 3
+    legacy["default_applicability"] = [{"kind": "machine", "selector": "old-host"}]
+    legacy["scope_store"] = {
+        "applicability": [{"kind": "machine", "selector": "old-host"}],
+        "created_at": "2026-08-01T00:00:00+00:00",
+        "updated_at": "2026-08-01T00:00:00+00:00",
+    }
+    legacy_path = tmp_path / ".pcc-test/data/contexts/machines/old-host/context.json"
+    legacy_path.parent.mkdir(parents=True)
+    legacy_path.write_text(json.dumps(legacy, indent=2) + "\n", encoding="utf-8")
+    second = current_context()
+    second["schema_version"] = 3
+    second["store_id"] = "1226ad07-21bf-4d95-ae5e-59ed33355599"
+    second["terms"][0]["term"] = "TLS"
+    second["terms"][0]["id"] = "039b4cee-f4ad-4e0f-8641-e66d39977384"
+    second["default_applicability"] = [{"kind": "machine", "selector": "new-host"}]
+    second["scope_store"] = {
+        "applicability": [{"kind": "machine", "selector": "new-host"}],
+        "created_at": "2026-08-02T00:00:00+00:00",
+        "updated_at": "2026-08-02T00:00:00+00:00",
+    }
+    second_path = tmp_path / ".pcc-test/data/contexts/machines/new-host/context.json"
+    second_path.parent.mkdir(parents=True)
+    second_path.write_text(json.dumps(second, indent=2) + "\n", encoding="utf-8")
+
+    proc = run_context("update", repo=tmp_path)
+    target = tmp_path / ".pcc-test/data/contexts/machines/context.json"
+    migrated = json.loads(target.read_text(encoding="utf-8"))
+
+    assert (
+        proc.returncode,
+        legacy_path.exists(),
+        second_path.exists(),
+        migrated["schema_version"],
+        migrated["scope_store"]["applicability"],
+        {(term["term"], term["id"]) for term in migrated["terms"]},
+    ) == (
+        0,
+        False,
+        False,
+        4,
+        [{"kind": "machine"}],
+        {
+            (legacy["terms"][0]["term"], legacy["terms"][0]["id"]),
+            (second["terms"][0]["term"], second["terms"][0]["id"]),
+        },
     )

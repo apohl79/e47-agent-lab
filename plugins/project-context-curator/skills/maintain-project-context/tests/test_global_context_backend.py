@@ -113,6 +113,24 @@ def test_records_inherit_collection_applicability_and_allow_fact_override(
     assert records[0].applicability == (("universal", "*"),)
 
 
+@pytest.mark.parametrize(
+    "applicability",
+    ([{"kind": "machine"}], [{"kind": "machine", "selector": "old-host"}]),
+)
+def test_machine_applicability_uses_the_xdg_local_boundary(
+    applicability: list[dict[str, str]],
+) -> None:
+    module = load_backend_module()
+
+    resolved = module.resolved_applicability(
+        applicability,
+        project_path=Path("/workspace/repo"),
+        workspace_root=Path("/workspace"),
+    )
+
+    assert resolved == (("machine", "*"),)
+
+
 def test_external_source_keeps_bound_project_identity(tmp_path: Path) -> None:
     module = load_backend_module()
     workspace = tmp_path / "workspace"

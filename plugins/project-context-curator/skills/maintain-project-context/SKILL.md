@@ -251,8 +251,9 @@ remain private in XDG.
 - Workspace applicability is legacy and read-only; reclassify existing records
   with `move`. Use user or machine only for the current identity or environment;
   use universal only for context-independent facts.
-- Repeated selectors form an intersection: every selector must apply. Use them
-  only when the fact truly depends on all listed dimensions.
+- Repeated selectors form an intersection: every selector must apply. Machine
+  scope has no selector because private XDG storage is already machine-local.
+  Use intersections only when the fact truly depends on all listed dimensions.
 
 Use move for promotion or reclassification so the canonical record keeps its
 identity and provenance instead of being duplicated. Do not re-add the record at
