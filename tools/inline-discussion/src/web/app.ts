@@ -1207,6 +1207,15 @@ function installBlockPluses(): void {
       openComposer(el.dataset.blockId!, undefined);
     });
     host.appendChild(btn);
+    const copy = document.createElement('button');
+    copy.className = 'block-copy';
+    copy.setAttribute('aria-label', 'Copy block to clipboard');
+    copy.innerHTML = '<svg viewBox="0 0 20 20" aria-hidden="true"><rect x="7" y="3" width="9" height="11" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M5 7H4.5A1.5 1.5 0 0 0 3 8.5v7A1.5 1.5 0 0 0 4.5 17h6A1.5 1.5 0 0 0 12 15.5V15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>';
+    copy.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      await navigator.clipboard.writeText(blockText(el));
+    });
+    host.appendChild(copy);
   }
   installRangeSelection();
 }

@@ -568,9 +568,18 @@ button.primary:hover {
 #doc table td:last-child,
 #doc table th:last-child { padding-right: 18px; }
 
-/* ---------- Block hover "+" ---------- */
+/* ---------- Block controls ---------- */
 
-[data-block-id] { position: relative; }
+[data-block-id] {
+  position: relative;
+  outline: 1px solid transparent;
+  outline-offset: 2px;
+  transition: outline-color 120ms ease;
+}
+
+[data-block-id]:hover {
+  outline-color: color-mix(in srgb, var(--accent) 28%, transparent);
+}
 
 .block-shell {
   position: relative;
@@ -584,7 +593,8 @@ button.primary:hover {
   margin: 0;
 }
 
-.block-plus {
+.block-plus,
+.block-copy {
   --block-plus-hide-delay: 2s;
   position: absolute;
   right: -44px;
@@ -626,21 +636,28 @@ button.primary:hover {
 
 [data-block-id]:hover > .block-plus,
 .block-shell:hover > .block-plus,
-.block-plus:hover {
+.block-plus:hover,
+[data-block-id]:hover > .block-copy,
+.block-shell:hover > .block-copy,
+.block-copy:hover {
   opacity: 1;
   visibility: visible;
   pointer-events: auto;
   transition-delay: 0s;
 }
 
-.block-plus:hover {
+.block-plus:hover,
+.block-copy:hover {
   background: var(--accent);
   border-color: var(--accent);
   color: var(--accent-fg);
   transform: scale(1.08);
 }
 
-.block-plus svg { width: 14px; height: 14px; }
+.block-plus svg,
+.block-copy svg { width: 14px; height: 14px; }
+
+.block-copy { top: 38px; }
 
 /* Persistent marker for live notes anchored to the whole block. Unlike the
    hover-only thread button, this remains visible so an unquoted note is
@@ -648,7 +665,7 @@ button.primary:hover {
 .block-note-indicator {
   position: absolute;
   right: -44px;
-  top: 38px;
+  top: 74px;
   width: 30px;
   height: 30px;
   border-radius: 999px;
