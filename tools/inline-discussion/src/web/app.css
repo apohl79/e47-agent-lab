@@ -580,6 +580,10 @@ button.primary:hover {
   background: var(--bg-chip);
 }
 
+:root[data-theme="dark"] [data-block-id]:hover {
+  background: color-mix(in srgb, var(--bg-chip) 45%, var(--bg));
+}
+
 .block-shell {
   position: relative;
 }

@@ -22,6 +22,7 @@ test('block action controls keep a two-second dismissal window and stack before 
 
   assert.match(stylesheet, /\[data-block-id\]\s*\{[^}]*border-radius: var\(--radius-sm\)/);
   assert.match(stylesheet, /\[data-block-id\]:hover\s*\{[^}]*background: var\(--bg-chip\)/);
+  assert.match(stylesheet, /:root\[data-theme="dark"\] \[data-block-id\]:hover\s*\{[^}]*background: color-mix\(in srgb, var\(--bg-chip\) 45%, var\(--bg\)\)/);
   assert.deepEqual(
     {
       highlightActionsMs: HOVER_ACTION_DISMISS_MS,
