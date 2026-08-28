@@ -67,13 +67,12 @@ test('renderDoc rewrites relative file links against the document path', () => {
   assert.match(html, /href="https:\/\/example\.com\/doc\.md:2"/);
 });
 
-test('renderDoc normalizes Slack message links to supported channel URIs while stripping unsafe protocols', () => {
+test('renderDoc preserves Slack message deep links while stripping unsafe protocols', () => {
   const { html } = renderDoc(
     '[Slack](slack://channel?team=T012TSW2ML3&id=C0AJ32EB8G3&message=1787836685.584729) [Unsafe](javascript:alert(1))',
   );
 
-  assert.match(html, /href="slack:\/\/channel\?team=T012TSW2ML3&amp;id=C0AJ32EB8G3"/);
-  assert.doesNotMatch(html, /message=1787836685\.584729/);
+  assert.match(html, /href="slack:\/\/channel\?team=T012TSW2ML3&amp;id=C0AJ32EB8G3&amp;message=1787836685\.584729"/);
   assert.doesNotMatch(html, /href="javascript:/i);
 });
 

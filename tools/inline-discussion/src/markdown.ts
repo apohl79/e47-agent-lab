@@ -253,28 +253,10 @@ function rewriteDocumentUrls(fragmentHtml: string, documentPath?: string): strin
   for (const anchor of Array.from(root.querySelectorAll<HTMLAnchorElement>('a[href]'))) {
     const target = anchor.getAttribute('href')?.trim();
     if (!target) continue;
-    const slackTarget = normalizeSlackChannelTarget(target);
-    if (slackTarget) {
-      anchor.setAttribute('href', slackTarget);
-      continue;
-    }
     if (!documentPath || !isRelativeUrl(target)) continue;
     anchor.setAttribute('href', resolveRelativeLinkTarget(target, documentPath));
   }
   return root.innerHTML;
-}
-
-function normalizeSlackChannelTarget(target: string): string | null {
-  try {
-    const url = new URL(target);
-    const team = url.searchParams.get('team');
-    const id = url.searchParams.get('id');
-    return url.protocol === 'slack:' && url.hostname === 'channel' && team && id
-      ? `slack://channel?${new URLSearchParams({ team, id }).toString()}`
-      : null;
-  } catch {
-    return null;
-  }
 }
 
 function resolveRelativeLinkTarget(target: string, documentPath: string): string {
