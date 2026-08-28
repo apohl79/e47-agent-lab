@@ -572,11 +572,12 @@ button.primary:hover {
 
 [data-block-id] {
   position: relative;
+  border-radius: var(--radius-sm);
   transition: background 120ms ease;
 }
 
 [data-block-id]:hover {
-  background: color-mix(in srgb, var(--accent-soft) 38%, transparent);
+  background: var(--bg-chip);
 }
 
 .block-shell {
