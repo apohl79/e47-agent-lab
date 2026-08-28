@@ -67,6 +67,15 @@ test('renderDoc rewrites relative file links against the document path', () => {
   assert.match(html, /href="https:\/\/example\.com\/doc\.md:2"/);
 });
 
+test('renderDoc preserves Slack deep links while stripping unsafe protocols', () => {
+  const { html } = renderDoc(
+    '[Slack](slack://channel?team=T012TSW2ML3&id=C0AJ32EB8G3&message=1787836685.584729) [Unsafe](javascript:alert(1))',
+  );
+
+  assert.match(html, /href="slack:\/\/channel\?team=T012TSW2ML3&amp;id=C0AJ32EB8G3&amp;message=1787836685\.584729"/);
+  assert.doesNotMatch(html, /href="javascript:/i);
+});
+
 test('renderDoc emits data-block-id on every top-level block', () => {
   const md = '# Title\n\nPara.\n';
   const { html, blocks } = renderDoc(md);

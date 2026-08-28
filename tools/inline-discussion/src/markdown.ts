@@ -168,9 +168,12 @@ renderer.code = function (code: string, infostring: string | undefined, _escaped
 // remain whitespace, while blank lines continue to separate blocks.
 marked.use({ renderer, gfm: true, breaks: false });
 
+const ALLOWED_URI_REGEXP = /^(?:(?:(?:f|ht)tps?|mailto|tel|callto|sms|cid|xmpp|matrix|slack):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i;
+
 const SANITIZE_OPTS = {
   ADD_TAGS: ['details', 'summary', 'del', 's', 'strike'],
   ADD_ATTR: ['data-block-id', 'data-thread-id', 'data-source-start-line', 'data-source-end-line', 'data-task-checkbox-index', 'checked', 'disabled', 'type'],
+  ALLOWED_URI_REGEXP,
 };
 
 export interface RenderedDoc extends RawParsedDoc {
