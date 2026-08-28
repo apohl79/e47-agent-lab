@@ -72,15 +72,13 @@ def test_domain_fact_uses_xdg_store_and_only_matches_members(tmp_path: Path) -> 
     )
 
 
-def test_workspace_fact_uses_configured_xdg_store_and_membership(
+def test_workspace_applicability_is_rejected_for_new_records(
     tmp_path: Path,
 ) -> None:
     env = isolated_environment(tmp_path / "xdg")
     workspace = tmp_path / "workspace"
     member = workspace / "member"
-    outsider = tmp_path / "outside"
     initialize(member, env)
-    initialize(outsider, env)
     configure_workspace(env, workspace)
     added = run_context(
         "add-component",
@@ -93,27 +91,20 @@ def test_workspace_fact_uses_configured_xdg_store_and_membership(
         repo=member,
         env=env,
     )
-    stores = tuple((tmp_path / "xdg/data/contexts/workspaces").rglob("context.json"))
-    scoped = read_json(stores[0])
-    member_search = run_context("search", "--query", "every", repo=member, env=env)
-    outsider_search = run_context(
-        "search", "--query", "every", repo=outsider, env=env
+    stores = tuple(
+        (tmp_path / "xdg/data/contexts/workspaces").rglob("context.json")
     )
 
     assert (
         added.returncode,
+        "Invalid applicability kind 'workspace'" in added.stderr,
         len(stores),
-        scoped["default_applicability"],
         project_context(member)["components"],
-        "Shared CI" in member_search.stdout,
-        outsider_search.stdout,
     ) == (
-        0,
         1,
-        [{"kind": "workspace", "selector": str(workspace.resolve())}],
-        [],
         True,
-        "No context matches for: every\n",
+        0,
+        [],
     )
 
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Maintain canonical repository and XDG context stores."""
+"""Maintain canonical repository, Git-backed, and private XDG context stores."""
 
 from __future__ import annotations
 
@@ -27,23 +27,28 @@ CONTEXT_DIR = Path("docs/context")
 CONTEXT_FILE = CONTEXT_DIR / "context.json"
 GIT_EXCLUDE_ENTRY = "docs/context/"
 IGNORE_MARKER = ".no-project-context"
-CONTEXT_VISIBILITIES = {"local", "versioned"}
+CONTEXT_VISIBILITIES = {"git-store", "local", "versioned"}
 APPLICABILITY_KINDS = {
     "domain",
     "machine",
     "project",
     "universal",
     "user",
-    "workspace",
 }
+LEGACY_APPLICABILITY_KINDS = {"workspace"}
+SHAREABLE_APPLICABILITY_KINDS = frozenset({"domain", "universal"})
 DEFAULT_APPLICABILITY = [{"kind": "project", "selector": "self"}]
-GLOBAL_CONFIG_SCHEMA_VERSION = 3
+GLOBAL_CONFIG_SCHEMA_VERSION = 4
 GLOBAL_CONFIG_FILE = "config.json"
 GLOBAL_RUNTIME_FILE = "runtime.json"
 GLOBAL_CATALOG_FILE = "catalog.json"
 GLOBAL_INDEX_DIR = "qdrant"
 GLOBAL_MODEL_DIR = "models"
 GLOBAL_CONTEXTS_DIR = "contexts"
+GIT_STORE_MANIFEST_FILE = "project-context-store.json"
+GIT_STORE_SCHEMA_VERSION = 1
+GIT_STORE_PROJECTS_DIR = "projects"
+GIT_STORE_SCOPES_DIR = "scopes"
 GLOBAL_INDEX_SCHEMA_VERSION = 3
 GLOBAL_RELATIONSHIP_GRAPH_SCHEMA_VERSION = 1
 GLOBAL_LEGACY_RECORD_CATALOG_SCHEMA_VERSION = 1
@@ -62,8 +67,8 @@ LOCAL_SUMMARY_OUTPUT_LIMIT = 500
 SNAPSHOT_TOKEN_PATTERN = re.compile(r"[0-9a-f]{64}")
 GLOBAL_ONBOARDING_GUIDANCE = (
     "Global context onboarding required. Before normal project work, proactively use "
-    "the Project Context Curator skill to confirm workspace roots and one "
-    "local-or-versioned policy, preview global-init, request approval for the exact "
+    "the Project Context Curator skill to confirm workspace roots and the configured "
+    "Git-store or one local-or-versioned policy, preview global-init, request approval for the exact "
     "snapshot, bootstrap every listed missing context with verified non-empty records, "
     "and rerun global-init with the approved token."
 )
@@ -90,6 +95,9 @@ SCOPE_DIRECTORY_NAMES = {
     "user": "users",
     "workspace": "workspaces",
 }
+DISCOVERY_SKIPPED_DIRECTORIES = frozenset(
+    {".git", ".my", ".venv", "build", "dist", "node_modules", "target"}
+)
 RECORD_KEYS = {
     "terms": "term",
     "components": "name",
@@ -191,7 +199,10 @@ def forward_global_diagnostics(raw: str) -> None:
             payload = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if not isinstance(payload, dict) or payload.get("type") != UNTRUSTED_DIAGNOSTIC_TYPE:
+        if (
+            not isinstance(payload, dict)
+            or payload.get("type") != UNTRUSTED_DIAGNOSTIC_TYPE
+        ):
             continue
         print(
             untrusted_diagnostic_line(payload.get("event"), payload.get("detail")),
@@ -307,6 +318,13 @@ def scope_context_root() -> Path:
     return global_data_dir() / GLOBAL_CONTEXTS_DIR
 
 
+def applicability_is_shareable(value: Any) -> bool:
+    pairs = applicability_pairs(value)
+    return bool(pairs) and all(
+        kind in SHAREABLE_APPLICABILITY_KINDS for kind, _selector in pairs
+    )
+
+
 def validate_domain_id(value: str) -> str:
     domain_id = value.strip().casefold()
     if not DOMAIN_ID_PATTERN.fullmatch(domain_id):
@@ -338,9 +356,7 @@ def configured_domains(config: dict[str, Any]) -> dict[str, tuple[Path, ...]]:
 
 
 def containing_workspace(repo: Path, roots: tuple[Path, ...]) -> Path | None:
-    matches = tuple(
-        root for root in roots if repo == root or root in repo.parents
-    )
+    matches = tuple(root for root in roots if repo == root or root in repo.parents)
     return max(matches, key=lambda path: len(path.parts), default=None)
 
 
@@ -352,7 +368,6 @@ def resolve_applicability(
 ) -> list[dict[str, str]]:
     config = global_config()
     domains = configured_domains(config)
-    roots = workspace_roots(config)
     resolved: list[dict[str, str]] = []
     for item in values:
         kind = item["kind"]
@@ -374,27 +389,10 @@ def resolve_applicability(
                 )
             resolved.append({"kind": kind, "selector": domain_id})
             continue
-        if kind == "workspace":
-            workspace = (
-                containing_workspace(repo, roots)
-                if selector == "self"
-                else Path(selector).expanduser().resolve()
-            )
-            if workspace is None:
-                raise SystemExit(
-                    "workspace:self requires the repository to be inside a configured "
-                    "workspace root."
-                )
-            if workspace not in roots:
-                raise SystemExit(
-                    f"Unknown workspace {workspace}. Configure it with global-init first."
-                )
-            if require_domain_membership and repo != workspace and workspace not in repo.parents:
-                raise SystemExit(f"Repository {repo} is outside workspace {workspace}.")
-            resolved.append({"kind": kind, "selector": str(workspace)})
-            continue
         if kind == "project":
-            project = repo if selector == "self" else Path(selector).expanduser().resolve()
+            project = (
+                repo if selector == "self" else Path(selector).expanduser().resolve()
+            )
             if project != repo:
                 raise SystemExit(
                     "Project applicability must target --repo; use that repository as --repo."
@@ -418,14 +416,6 @@ def active_applicability(repo: Path) -> frozenset[tuple[str, str]]:
         ("machine", "self"),
         ("universal", "*"),
     }
-    matching_workspaces = tuple(
-        root
-        for root in workspace_roots(config)
-        if repo == root or root in repo.parents
-    )
-    active.update(("workspace", str(root)) for root in matching_workspaces)
-    if matching_workspaces:
-        active.add(("workspace", "self"))
     active.update(
         ("domain", domain_id)
         for domain_id, projects in configured_domains(config).items()
@@ -436,9 +426,7 @@ def active_applicability(repo: Path) -> frozenset[tuple[str, str]]:
 
 def applicability_pairs(value: Any) -> tuple[tuple[str, str], ...]:
     normalized = normalize_applicability(value, "applicability")
-    return tuple(
-        (item["kind"], item.get("selector", "*")) for item in normalized
-    )
+    return tuple((item["kind"], item.get("selector", "*")) for item in normalized)
 
 
 def applicability_matches(
@@ -459,7 +447,12 @@ def scope_selector_key(kind: str, selector: str) -> str:
 
 def scope_context_path(applicability: list[dict[str, str]]) -> Path:
     pairs = applicability_pairs(applicability)
-    root = scope_context_root()
+    git_root = configured_git_store_root()
+    root = (
+        git_root / GIT_STORE_SCOPES_DIR
+        if git_root is not None and applicability_is_shareable(applicability)
+        else scope_context_root()
+    )
     if len(pairs) > 1:
         digest = hashlib.sha256(
             json.dumps(pairs, separators=(",", ":")).encode()
@@ -473,22 +466,19 @@ def scope_context_path(applicability: list[dict[str, str]]) -> Path:
 
 
 def scope_context_files() -> tuple[Path, ...]:
-    root = scope_context_root()
-    if not root.is_dir():
-        return ()
-    resolved_root = root.resolve()
-    return tuple(
-        sorted(
-            (
-                path.resolve()
-                for path in root.rglob("context.json")
-                if path.is_file()
-                and not path.is_symlink()
-                and resolved_root in path.resolve().parents
-            ),
-            key=str,
+    paths: set[Path] = set()
+    for root in scope_context_roots():
+        if not root.is_dir():
+            continue
+        resolved_root = root.resolve()
+        paths.update(
+            path.resolve()
+            for path in root.rglob("context.json")
+            if path.is_file()
+            and not path.is_symlink()
+            and resolved_root in path.resolve().parents
         )
-    )
+    return tuple(sorted(paths, key=str))
 
 
 def global_backend_script() -> Path:
@@ -547,11 +537,155 @@ def write_global_config(config: dict[str, Any]) -> None:
     write_json_object(global_config_dir() / GLOBAL_CONFIG_FILE, config)
 
 
+def configured_git_store(
+    config: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    source_config = config if config is not None else global_config()
+    raw = source_config.get("git_store")
+    if not isinstance(raw, dict) or not raw.get("enabled"):
+        return None
+    raw_path = raw.get("path")
+    raw_store_id = raw.get("store_id")
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        raise SystemExit("Invalid git_store.path in global context configuration.")
+    try:
+        store_id = str(uuid.UUID(str(raw_store_id)))
+    except ValueError:
+        raise SystemExit(
+            "Invalid git_store.store_id in global context configuration."
+        ) from None
+    raw_bindings = raw.get("project_bindings", {})
+    if not isinstance(raw_bindings, dict):
+        raise SystemExit(
+            "Invalid git_store.project_bindings in global context configuration."
+        )
+    bindings: dict[str, str] = {}
+    for raw_repo, raw_project_id in raw_bindings.items():
+        if not isinstance(raw_repo, str) or not raw_repo:
+            raise SystemExit("Invalid Git context store project binding path.")
+        try:
+            project_id = str(uuid.UUID(str(raw_project_id)))
+        except ValueError:
+            raise SystemExit(
+                f"Invalid Git context project store id {raw_project_id!r}."
+            ) from None
+        bindings[str(Path(raw_repo).expanduser().resolve())] = project_id
+    return {
+        **raw,
+        "path": str(Path(raw_path).expanduser().resolve()),
+        "store_id": store_id,
+        "project_bindings": bindings,
+    }
+
+
+def configured_git_store_root(
+    config: dict[str, Any] | None = None,
+) -> Path | None:
+    store = configured_git_store(config)
+    return Path(store["path"]) if store is not None else None
+
+
+def scope_context_roots() -> tuple[Path, ...]:
+    roots = [scope_context_root()]
+    git_root = configured_git_store_root()
+    if git_root is not None:
+        roots.append(git_root / GIT_STORE_SCOPES_DIR)
+    return tuple(dict.fromkeys(root.resolve() for root in roots))
+
+
+def git_store_project_binding(
+    repo: Path,
+    config: dict[str, Any] | None = None,
+) -> str | None:
+    store = configured_git_store(config)
+    if store is None:
+        return None
+    return store["project_bindings"].get(str(repo.expanduser().resolve()))
+
+
+def git_store_project_path(root: Path, project_store_id: str) -> Path:
+    try:
+        canonical_id = str(uuid.UUID(project_store_id))
+    except ValueError:
+        raise SystemExit(
+            f"Invalid project context store id {project_store_id!r}."
+        ) from None
+    return root / GIT_STORE_PROJECTS_DIR / canonical_id / "context.json"
+
+
+def validate_git_store_target(root: Path, path: Path) -> None:
+    canonical_root = root.resolve()
+    candidate = path.absolute()
+    try:
+        relative = candidate.relative_to(canonical_root)
+    except ValueError:
+        raise SystemExit(
+            f"Git context target is outside its store: {candidate}"
+        ) from None
+    current = canonical_root
+    for part in relative.parts[:-1]:
+        current /= part
+        if current.is_symlink():
+            raise SystemExit(f"Git context target traverses a symlink: {current}")
+        if current.exists() and not current.is_dir():
+            raise SystemExit(f"Git context target parent is not a directory: {current}")
+    if candidate.is_symlink():
+        raise SystemExit(f"Git context target is a symlink: {candidate}")
+    if candidate.exists() and not candidate.is_file():
+        raise SystemExit(f"Git context target is not a file: {candidate}")
+
+
+def write_git_json(root: Path, path: Path, value: dict[str, Any]) -> None:
+    validate_git_store_target(root, path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(
+        json.dumps(value, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+
+
+def persist_git_store_domain(
+    domain_id: str,
+    projects: tuple[Path, ...] | None,
+) -> None:
+    configured = configured_git_store()
+    if configured is None:
+        return
+    root = validate_git_store_root(Path(configured["path"]))
+    manifest = load_git_store_manifest(root)
+    if manifest["store_id"] != configured["store_id"]:
+        raise SystemExit(
+            "Configured Git context store identity does not match its manifest."
+        )
+    domains = manifest["domains"]
+    if projects is None:
+        domains.pop(domain_id, None)
+    else:
+        missing = tuple(
+            project
+            for project in projects
+            if str(project.resolve()) not in configured["project_bindings"]
+        )
+        if missing:
+            raise SystemExit(
+                "Git-backed domains require every member project to be initialized or "
+                "bound first: " + ", ".join(str(project) for project in missing)
+            )
+        domains[domain_id] = sorted(
+            {
+                configured["project_bindings"][str(project.resolve())]
+                for project in projects
+            }
+        )
+    manifest["updated_at"] = now_iso()
+    write_git_json(root, git_store_manifest_path(root), manifest)
+
+
 def domain_set(args: argparse.Namespace) -> None:
     domain_id = validate_domain_id(args.domain)
-    projects = tuple(
-        dict.fromkeys(context_repo(path) for path in args.project)
-    )
+    projects = tuple(dict.fromkeys(context_repo(path) for path in args.project))
     missing = tuple(project for project in projects if not project.is_dir())
     if missing:
         raise SystemExit(
@@ -564,6 +698,7 @@ def domain_set(args: argparse.Namespace) -> None:
         for name, members in configured_domains(config).items()
     }
     domains[domain_id] = [str(project) for project in projects]
+    persist_git_store_domain(domain_id, projects)
     config["domains"] = domains
     write_global_config(config)
     print(f"Configured domain {domain_id}: {len(projects)} projects")
@@ -579,6 +714,7 @@ def domain_remove(args: argparse.Namespace) -> None:
     if domain_id not in domains:
         raise SystemExit(f"Unknown domain {domain_id!r}.")
     del domains[domain_id]
+    persist_git_store_domain(domain_id, None)
     config["domains"] = domains
     write_global_config(config)
     print(f"Removed domain membership: {domain_id}")
@@ -608,6 +744,31 @@ def workspace_roots(config: dict[str, Any]) -> tuple[Path, ...]:
     return tuple(Path(str(value)).expanduser().resolve() for value in values)
 
 
+def append_external_source_arguments(
+    arguments: list[str],
+    roots: tuple[Path, ...],
+) -> None:
+    store = configured_git_store()
+    git_root = configured_git_store_root()
+    if store is not None and git_root is not None:
+        for raw_repo, project_id in sorted(store["project_bindings"].items()):
+            project = Path(raw_repo)
+            workspace = containing_workspace(project, roots)
+            source = git_store_project_path(git_root, project_id)
+            if (
+                workspace is None
+                or not source.is_file()
+                or (project / IGNORE_MARKER).exists()
+            ):
+                continue
+            payload = {
+                "source_path": str(source),
+                "project_path": str(project),
+                "workspace_root": str(workspace),
+            }
+            arguments.extend(("--external-source", json.dumps(payload, sort_keys=True)))
+
+
 def backend_base_arguments(roots: tuple[Path, ...]) -> list[str]:
     cache = global_cache_dir()
     arguments: list[str] = []
@@ -621,10 +782,11 @@ def backend_base_arguments(roots: tuple[Path, ...]) -> list[str]:
             str(cache / GLOBAL_CATALOG_FILE),
             "--model-cache",
             str(cache / GLOBAL_MODEL_DIR),
-            "--scope-root",
-            str(scope_context_root()),
         )
     )
+    for root in scope_context_roots():
+        arguments.extend(("--scope-root", str(root)))
+    append_external_source_arguments(arguments, roots)
     return arguments
 
 
@@ -660,9 +822,7 @@ def invoke_global_backend(
         detail = " ".join((proc.stderr or proc.stdout).split()) or (
             f"backend exited with status {proc.returncode}"
         )
-        raise SystemExit(
-            untrusted_diagnostic_line(f"global {command} failed", detail)
-        )
+        raise SystemExit(untrusted_diagnostic_line(f"global {command} failed", detail))
     return proc
 
 
@@ -670,6 +830,7 @@ def discover_global_snapshot(roots: tuple[Path, ...]) -> dict[str, Any]:
     arguments: list[str] = []
     for root in roots:
         arguments.extend(("--workspace-root", str(root)))
+    append_external_source_arguments(arguments, roots)
     backend = global_backend_script()
     try:
         proc = subprocess.run(
@@ -833,10 +994,13 @@ def global_init(args: argparse.Namespace) -> None:
         "enrollment_policy": "snapshot",
         "workspace_roots": [str(root) for root in roots],
         "domains": previous.get("domains", {}),
+        "git_store": previous.get("git_store"),
         "runtime_upgrade_policy": "prompt",
         "created_at": previous.get("created_at", stamp),
         "updated_at": stamp,
     }
+    if config["git_store"] is None:
+        del config["git_store"]
     write_global_config(config)
     print(detail or "Qdrant runtime ready")
     print(proc.stdout.strip())
@@ -895,9 +1059,8 @@ def global_catalog_has_enrollment_state(catalog: dict[str, Any]) -> bool:
         return False
     if schema_version in GLOBAL_SOURCE_CATALOG_SCHEMA_VERSIONS:
         return isinstance(catalog.get("sources"), list)
-    return (
-        schema_version == GLOBAL_LEGACY_RECORD_CATALOG_SCHEMA_VERSION
-        and isinstance(catalog.get("records"), list)
+    return schema_version == GLOBAL_LEGACY_RECORD_CATALOG_SCHEMA_VERSION and isinstance(
+        catalog.get("records"), list
     )
 
 
@@ -906,8 +1069,7 @@ def global_catalog_requires_refresh(catalog: dict[str, Any]) -> bool:
     return (
         catalog.get("index_schema_version") != GLOBAL_INDEX_SCHEMA_VERSION
         or not isinstance(graph, dict)
-        or graph.get("schema_version")
-        != GLOBAL_RELATIONSHIP_GRAPH_SCHEMA_VERSION
+        or graph.get("schema_version") != GLOBAL_RELATIONSHIP_GRAPH_SCHEMA_VERSION
     )
 
 
@@ -1027,8 +1189,16 @@ def try_global_search(
     )
 
 
-def context_path(repo: Path) -> Path:
+def local_context_path(repo: Path) -> Path:
     return repo / CONTEXT_FILE
+
+
+def context_path(repo: Path) -> Path:
+    project_store_id = git_store_project_binding(repo)
+    git_root = configured_git_store_root()
+    if project_store_id is not None and git_root is not None:
+        return git_store_project_path(git_root, project_store_id)
+    return local_context_path(repo)
 
 
 def ignore_marker_path(repo: Path) -> Path:
@@ -1270,6 +1440,8 @@ MIGRATIONS: dict[int, Migration] = {
 def normalize_applicability(
     value: Any,
     label: str,
+    *,
+    allow_legacy: bool = True,
 ) -> list[dict[str, str]]:
     if not isinstance(value, list) or not value:
         raise SystemExit(f"Invalid {label}: expected a non-empty list")
@@ -1279,7 +1451,10 @@ def normalize_applicability(
         if not isinstance(raw_selector, dict):
             raise SystemExit(f"Invalid {label}: each selector must be an object")
         kind = str(raw_selector.get("kind", "")).strip().casefold()
-        if kind not in APPLICABILITY_KINDS:
+        allowed_kinds = APPLICABILITY_KINDS | (
+            LEGACY_APPLICABILITY_KINDS if allow_legacy else set()
+        )
+        if kind not in allowed_kinds:
             allowed = ", ".join(sorted(APPLICABILITY_KINDS))
             raise SystemExit(
                 f"Invalid applicability kind {kind!r} in {label}. Allowed: {allowed}"
@@ -1323,7 +1498,11 @@ def parse_applicability(values: list[str] | None) -> list[dict[str, str]] | None
         if not resolved_selector:
             raise SystemExit(f"Applicability {kind!r} requires a non-blank selector")
         selectors.append({"kind": kind, "selector": resolved_selector})
-    return normalize_applicability(selectors, "applicability")
+    return normalize_applicability(
+        selectors,
+        "applicability",
+        allow_legacy=False,
+    )
 
 
 def context_schema_version(data: dict[str, Any]) -> int:
@@ -1371,23 +1550,33 @@ def storage_policy(
 ) -> dict[str, Any]:
     if visibility not in CONTEXT_VISIBILITIES:
         allowed = ", ".join(sorted(CONTEXT_VISIBILITIES))
-        raise SystemExit(f"Invalid context visibility {visibility!r}. Allowed: {allowed}")
+        raise SystemExit(
+            f"Invalid context visibility {visibility!r}. Allowed: {allowed}"
+        )
 
     stamp = now_iso()
     local = visibility == "local"
-    if local and git_initialized:
+    if visibility == "git-store":
+        decision = (
+            "Canonical project context is stored in the configured Git context "
+            "repository; docs/context contains generated views only."
+        )
+    elif local and git_initialized:
         decision = (
             "Context stays local to this checkout; docs/context/ is ignored through "
             ".git/info/exclude."
         )
     elif local:
-        decision = "Context is local because the target directory is not a Git repository."
+        decision = (
+            "Context is local because the target directory is not a Git repository."
+        )
     else:
         decision = "Context is intended to be versioned and shared through Git."
     return {
         "context_visibility": visibility,
         "git_initialized": git_initialized,
-        "git_exclude_docs_context": local and git_initialized,
+        "git_exclude_docs_context": visibility in {"git-store", "local"}
+        and git_initialized,
         "decision": decision,
         "source": source,
         "created_at": existing.get("created_at", stamp) if existing else stamp,
@@ -1510,7 +1699,12 @@ def save_scope_context(path: Path, data: dict[str, Any]) -> None:
     if not isinstance(metadata, dict):
         raise SystemExit(f"Invalid scope context metadata in {path}")
     metadata["updated_at"] = now_iso()
-    write_json_object(path, data)
+    git_root = configured_git_store_root()
+    if git_root is not None and git_root.resolve() in path.resolve().parents:
+        _configured, validated_root, _manifest = require_configured_git_store()
+        write_git_json(validated_root, path, data)
+    else:
+        write_json_object(path, data)
 
 
 def context_write_target(
@@ -1563,10 +1757,14 @@ def apply_storage_policy(repo: Path, data: dict[str, Any]) -> str:
         return "exclude-added" if ensure_git_exclude_entry(repo) else "exclude-present"
     if visibility == "versioned":
         return "exclude-removed" if remove_git_exclude_entry(repo) else "exclude-absent"
+    if visibility == "git-store":
+        if not policy_git_initialized(repo, policy):
+            return "not-git"
+        return "exclude-added" if ensure_git_exclude_entry(repo) else "exclude-present"
 
     raise SystemExit(
         "Invalid storage_policy.context_visibility in context.json: "
-        f"{visibility!r}. Expected local or versioned."
+        f"{visibility!r}. Expected git-store, local, or versioned."
     )
 
 
@@ -1578,9 +1776,18 @@ def save_context(repo: Path, data: dict[str, Any]) -> str:
     policy_result = apply_storage_policy(repo, data)
 
     path = context_path(repo)
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    tmp.replace(path)
+    git_root = configured_git_store_root()
+    if git_root is not None and git_root.resolve() in path.resolve().parents:
+        _configured, validated_root, _manifest = require_configured_git_store()
+        write_git_json(validated_root, path, data)
+    else:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(
+            json.dumps(data, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        tmp.replace(path)
     render_markdown(repo, data)
     return policy_result
 
@@ -1612,15 +1819,24 @@ def normalize(data: dict[str, Any]) -> None:
         policy["git_exclude_docs_context"] = policy.pop("gitignore_docs_context")
     ensure_record_identities(data)
     data["terms"] = sorted(data.get("terms", []), key=lambda item: item["term"].lower())
-    data["components"] = sorted(data.get("components", []), key=lambda item: item["name"].lower())
-    data["patterns"] = sorted(data.get("patterns", []), key=lambda item: item["name"].lower())
+    data["components"] = sorted(
+        data.get("components", []), key=lambda item: item["name"].lower()
+    )
+    data["patterns"] = sorted(
+        data.get("patterns", []), key=lambda item: item["name"].lower()
+    )
     data["open_questions"] = sorted(
         data.get("open_questions", []),
-        key=lambda item: (item.get("status", "open") != "open", item["question"].lower()),
+        key=lambda item: (
+            item.get("status", "open") != "open",
+            item["question"].lower(),
+        ),
     )
 
 
-def find_record(records: list[dict[str, Any]], key: str, value: str) -> dict[str, Any] | None:
+def find_record(
+    records: list[dict[str, Any]], key: str, value: str
+) -> dict[str, Any] | None:
     needle = value.casefold()
     for record in records:
         if str(record.get(key, "")).casefold() == needle:
@@ -1690,7 +1906,9 @@ def upsert_common(
     record["updated_at"] = stamp
     if source:
         record["source"] = source
-    add_provenance(record, repo, source or str(record.get("source", "unknown")), "recorded")
+    add_provenance(
+        record, repo, source or str(record.get("source", "unknown")), "recorded"
+    )
 
 
 def set_applicability(
@@ -1794,9 +2012,7 @@ def remove_entry(args: argparse.Namespace) -> None:
     collection_name, key, label = REMOVE_TARGETS[args.type]
     if args.applicability is None and not context_path(repo).exists():
         raise SystemExit(f"No {label} found for {args.value!r}")
-    path, data, _, project_target = context_write_target(
-        repo, args.applicability
-    )
+    path, data, _, project_target = context_write_target(repo, args.applicability)
     records = data[collection_name]
     record = find_record(records, key, args.value)
     if record is None:
@@ -1859,7 +2075,9 @@ def move_entry(args: argparse.Namespace) -> None:
     if target_record is None:
         target_data[collection].append(source_record)
     else:
-        target_data[collection][target_data[collection].index(target_record)] = source_record
+        target_data[collection][target_data[collection].index(target_record)] = (
+            source_record
+        )
     save_context_target(repo, target_path, target_data, project_target)
 
     for source_path, source_data, source_is_project, record in sources:
@@ -1869,10 +2087,560 @@ def move_entry(args: argparse.Namespace) -> None:
     print(f"Canonical context: {target_path}")
 
 
+def git_store_manifest_path(root: Path) -> Path:
+    return root / GIT_STORE_MANIFEST_FILE
+
+
+def validate_git_store_root(value: Path) -> Path:
+    root = value.expanduser().resolve()
+    if not root.is_dir() or not is_git_initialized(root):
+        raise SystemExit(f"Git context store must be a Git checkout root: {root}")
+    checkout = worktree_root(root)
+    if checkout != root:
+        raise SystemExit(f"Git context store must be a Git checkout root: {root}")
+    return root
+
+
+def load_git_store_manifest(root: Path) -> dict[str, Any]:
+    path = git_store_manifest_path(root)
+    validate_git_store_target(root, path)
+    if not path.exists():
+        return {
+            "schema_version": GIT_STORE_SCHEMA_VERSION,
+            "store_id": str(
+                uuid.uuid5(uuid.NAMESPACE_URL, f"project-context-store:{root}")
+            ),
+            "projects": {},
+            "domains": {},
+        }
+    manifest = read_json_object(path)
+    if manifest.get("schema_version") != GIT_STORE_SCHEMA_VERSION:
+        raise SystemExit(f"Unsupported Git context store manifest: {path}")
+    try:
+        manifest["store_id"] = str(uuid.UUID(str(manifest.get("store_id"))))
+    except ValueError:
+        raise SystemExit(f"Invalid Git context store id in {path}") from None
+    projects = manifest.get("projects")
+    if not isinstance(projects, dict):
+        raise SystemExit(f"Invalid Git context store project catalog in {path}")
+    for project_id, metadata in projects.items():
+        try:
+            uuid.UUID(str(project_id))
+        except ValueError:
+            raise SystemExit(
+                f"Invalid project store id {project_id!r} in {path}"
+            ) from None
+        if not isinstance(metadata, dict):
+            raise SystemExit(f"Invalid project metadata for {project_id!r} in {path}")
+    domains = manifest.setdefault("domains", {})
+    if not isinstance(domains, dict):
+        raise SystemExit(f"Invalid Git context store domain catalog in {path}")
+    for domain_id, members in domains.items():
+        validate_domain_id(str(domain_id))
+        if not isinstance(members, list) or any(
+            str(member) not in projects for member in members
+        ):
+            raise SystemExit(f"Invalid domain membership for {domain_id!r} in {path}")
+    return manifest
+
+
+def path_content_hash(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else ""
+
+
+def context_record_count(data: dict[str, Any]) -> int:
+    return sum(len(data.get(collection, [])) for collection in RECORD_KEYS)
+
+
+def record_applicability_values(data: dict[str, Any]) -> tuple[Any, ...]:
+    values: list[Any] = [data.get("default_applicability")]
+    for collection in RECORD_KEYS:
+        values.extend(
+            record.get("applicability", data.get("default_applicability"))
+            for record in data.get(collection, [])
+            if isinstance(record, dict)
+        )
+    return tuple(values)
+
+
+def legacy_workspace_records(data: dict[str, Any]) -> tuple[str, ...]:
+    labels: list[str] = []
+    for collection, key in RECORD_KEYS.items():
+        for record in data.get(collection, []):
+            if not isinstance(record, dict):
+                continue
+            applicability = record.get(
+                "applicability", data.get("default_applicability")
+            )
+            if any(
+                kind == "workspace" for kind, _ in applicability_pairs(applicability)
+            ):
+                labels.append(f"{collection}:{record.get(key, '')}")
+    return tuple(labels)
+
+
+def contexts_have_same_records(
+    source: dict[str, Any],
+    target: dict[str, Any],
+) -> bool:
+    return source.get("store_id") == target.get("store_id") and all(
+        source.get(collection, []) == target.get(collection, [])
+        for collection in RECORD_KEYS
+    )
+
+
+def discover_local_project_contexts(
+    roots: tuple[Path, ...],
+    current_repo: Path,
+    store_root: Path,
+) -> tuple[tuple[Path, Path], ...]:
+    discovered: dict[Path, Path] = {}
+    scan_roots = tuple(dict.fromkeys((*roots, current_repo)))
+    for raw_root in scan_roots:
+        root = raw_root.expanduser().resolve()
+        if not root.is_dir():
+            continue
+        if root == current_repo and local_context_path(current_repo).is_file():
+            discovered[local_context_path(current_repo).resolve()] = current_repo
+        for directory, names, files in os.walk(root, followlinks=False):
+            current = Path(directory)
+            try:
+                current.resolve().relative_to(store_root)
+            except ValueError:
+                pass
+            else:
+                names[:] = []
+                continue
+            names[:] = sorted(
+                name for name in names if name not in DISCOVERY_SKIPPED_DIRECTORIES
+            )
+            if (
+                current.name != "context"
+                or current.parent.name != "docs"
+                or "context.json" not in files
+            ):
+                continue
+            candidate = current / "context.json"
+            if candidate.is_symlink():
+                names[:] = []
+                continue
+            resolved = candidate.resolve()
+            project = resolved.parents[2]
+            if (project / IGNORE_MARKER).exists():
+                names[:] = []
+                continue
+            discovered.setdefault(resolved, project.resolve())
+            names[:] = []
+    return tuple(sorted(discovered.items(), key=lambda item: str(item[0]).casefold()))
+
+
+def git_store_migration_plan(
+    repo: Path,
+    store_root: Path,
+    roots: tuple[Path, ...],
+) -> dict[str, Any]:
+    config = global_config()
+    configured = configured_git_store(config)
+    if configured is not None and Path(configured["path"]) != store_root:
+        raise SystemExit(
+            f"A different Git context store is already configured: {configured['path']}"
+        )
+    manifest = load_git_store_manifest(store_root)
+    project_moves: list[dict[str, Any]] = []
+    blockers: list[str] = []
+    seen_project_ids: dict[str, Path] = {}
+    for source, project in discover_local_project_contexts(roots, repo, store_root):
+        data, _ = load_context_file(source)
+        workspace_labels = legacy_workspace_records(data)
+        if workspace_labels:
+            blockers.append(f"{source}: {', '.join(workspace_labels)}")
+            continue
+        invalid_values = tuple(
+            value
+            for value in record_applicability_values(data)
+            if applicability_pairs(value)
+            not in (
+                (("project", "self"),),
+                (("project", str(project)),),
+            )
+        )
+        if invalid_values:
+            blockers.append(
+                f"{source}: contains non-project records; move them to an explicit scope first"
+            )
+            continue
+        project_id = str(data["store_id"])
+        previous = seen_project_ids.get(project_id)
+        if previous is not None and previous != source:
+            raise SystemExit(
+                f"Project context store id {project_id} is duplicated in {previous} and {source}."
+            )
+        seen_project_ids[project_id] = source
+        target = git_store_project_path(store_root, project_id)
+        validate_git_store_target(store_root, target)
+        if target.exists():
+            target_data, _ = load_context_file(target)
+            if not contexts_have_same_records(data, target_data):
+                raise SystemExit(
+                    f"Git context target conflicts with {source}: {target}"
+                )
+        project_moves.append(
+            {
+                "source": source,
+                "target": target,
+                "project": project,
+                "project_id": project_id,
+                "data": data,
+            }
+        )
+
+    scope_moves: list[dict[str, Any]] = []
+    private_count = 0
+    xdg_root = scope_context_root().resolve()
+    if xdg_root.is_dir():
+        for source in sorted(xdg_root.rglob("context.json"), key=str):
+            if not source.is_file() or source.is_symlink():
+                continue
+            data = load_discovered_scope_context(source)
+            boundary = validate_scope_context(data, source)
+            if context_record_count(data) == 0:
+                continue
+            workspace_labels = legacy_workspace_records(data)
+            if workspace_labels:
+                blockers.append(f"{source}: {', '.join(workspace_labels)}")
+                continue
+            if not applicability_is_shareable(boundary):
+                private_count += 1
+                continue
+            target = (
+                store_root
+                / GIT_STORE_SCOPES_DIR
+                / source.resolve().relative_to(xdg_root)
+            )
+            validate_git_store_target(store_root, target)
+            if target.exists():
+                target_data = load_discovered_scope_context(target)
+                if not contexts_have_same_records(data, target_data):
+                    raise SystemExit(
+                        f"Git context target conflicts with {source}: {target}"
+                    )
+            scope_moves.append({"source": source, "target": target, "data": data})
+
+    if blockers:
+        raise SystemExit(
+            "Reclassify legacy workspace applicability with move before Git "
+            "store migration:\n" + "\n".join(blockers)
+        )
+    token_payload = {
+        "store": str(store_root),
+        "store_id": manifest["store_id"],
+        "manifest_hash": path_content_hash(git_store_manifest_path(store_root)),
+        "projects": [
+            {
+                "project": str(item["project"]),
+                "source": str(item["source"]),
+                "source_hash": path_content_hash(item["source"]),
+                "target": str(item["target"]),
+                "target_hash": path_content_hash(item["target"]),
+            }
+            for item in project_moves
+        ],
+        "scopes": [
+            {
+                "source": str(item["source"]),
+                "source_hash": path_content_hash(item["source"]),
+                "target": str(item["target"]),
+                "target_hash": path_content_hash(item["target"]),
+            }
+            for item in scope_moves
+        ],
+    }
+    token = hashlib.sha256(
+        json.dumps(token_payload, separators=(",", ":"), sort_keys=True).encode()
+    ).hexdigest()
+    return {
+        "manifest": manifest,
+        "project_moves": tuple(project_moves),
+        "scope_moves": tuple(scope_moves),
+        "private_count": private_count,
+        "token": token,
+    }
+
+
+def snapshot_path_value(path: Path) -> str:
+    value = str(path)
+    if not value or len(value) > SNAPSHOT_PATH_LIMIT:
+        raise SystemExit("Git context migration path is empty or too long.")
+    return value
+
+
+def print_git_store_preview(root: Path, plan: dict[str, Any]) -> None:
+    print(
+        json.dumps(
+            {
+                "type": UNTRUSTED_SNAPSHOT_TYPE,
+                "change": "git_store",
+                "store_path": snapshot_path_value(root),
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+        )
+    )
+    print(f"Project contexts to move: {len(plan['project_moves'])}")
+    for item in plan["project_moves"]:
+        print(
+            json.dumps(
+                {
+                    "type": UNTRUSTED_SNAPSHOT_TYPE,
+                    "change": "move",
+                    "kind": "project",
+                    "source_path": snapshot_path_value(item["source"]),
+                    "target_path": snapshot_path_value(item["target"]),
+                },
+                ensure_ascii=True,
+                sort_keys=True,
+            )
+        )
+    print(f"Shareable scope contexts to move: {len(plan['scope_moves'])}")
+    for item in plan["scope_moves"]:
+        print(
+            json.dumps(
+                {
+                    "type": UNTRUSTED_SNAPSHOT_TYPE,
+                    "change": "move",
+                    "kind": "scope",
+                    "source_path": snapshot_path_value(item["source"]),
+                    "target_path": snapshot_path_value(item["target"]),
+                },
+                ensure_ascii=True,
+                sort_keys=True,
+            )
+        )
+    print(f"Private XDG scope contexts retained: {plan['private_count']}")
+    print(f"Snapshot token: {plan['token']}")
+    print("No changes made. Ask the user to approve this exact snapshot token.")
+
+
+def git_project_metadata(
+    repo: Path, existing: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    stamp = now_iso()
+    return {
+        "name": repo.name,
+        "created_at": existing.get("created_at", stamp) if existing else stamp,
+        "updated_at": stamp,
+    }
+
+
+def configure_git_store(
+    root: Path,
+    manifest: dict[str, Any],
+    bindings: dict[str, str],
+) -> None:
+    stamp = now_iso()
+    config = global_config()
+    previous = configured_git_store(config)
+    config["git_store"] = {
+        "enabled": True,
+        "path": str(root),
+        "store_id": manifest["store_id"],
+        "project_bindings": dict(sorted(bindings.items())),
+        "created_at": previous.get("created_at", stamp) if previous else stamp,
+        "updated_at": stamp,
+    }
+    write_global_config(config)
+
+
+def apply_git_store_migration(root: Path, plan: dict[str, Any]) -> None:
+    manifest = deepcopy(plan["manifest"])
+    manifest.setdefault("created_at", now_iso())
+    manifest["updated_at"] = now_iso()
+    projects = manifest["projects"]
+    config = global_config()
+    current = configured_git_store(config)
+    bindings = dict(current["project_bindings"]) if current else {}
+    rendered: list[tuple[Path, dict[str, Any]]] = []
+    for item in plan["project_moves"]:
+        project = item["project"]
+        data = deepcopy(item["data"])
+        existing_policy = data.get("storage_policy")
+        data["storage_policy"] = storage_policy(
+            "git-store",
+            "user-confirmed",
+            is_git_initialized(project),
+            existing_policy if isinstance(existing_policy, dict) else None,
+        )
+        normalize(data)
+        write_git_json(root, item["target"], data)
+        project_id = item["project_id"]
+        existing_metadata = projects.get(project_id)
+        projects[project_id] = git_project_metadata(
+            project,
+            existing_metadata if isinstance(existing_metadata, dict) else None,
+        )
+        bindings[str(project.resolve())] = project_id
+        rendered.append((project, data))
+    for item in plan["scope_moves"]:
+        data = deepcopy(item["data"])
+        normalize(data)
+        metadata = data.get("scope_store")
+        if isinstance(metadata, dict):
+            metadata["updated_at"] = now_iso()
+        write_git_json(root, item["target"], data)
+    for domain_id, members in configured_domains(config).items():
+        member_ids = tuple(bindings.get(str(member.resolve())) for member in members)
+        if member_ids and all(member_ids):
+            manifest["domains"][domain_id] = sorted(set(member_ids))
+    write_git_json(root, git_store_manifest_path(root), manifest)
+    configure_git_store(root, manifest, bindings)
+    for item in (*plan["project_moves"], *plan["scope_moves"]):
+        source = item["source"]
+        if source != item["target"] and source.exists():
+            source.unlink()
+    for project, data in rendered:
+        ensure_context_gitignore(project / CONTEXT_DIR)
+        apply_storage_policy(project, data)
+        render_markdown(project, data)
+
+
+def git_store_init(args: argparse.Namespace) -> None:
+    repo = context_repo(args.repo)
+    root = validate_git_store_root(args.store)
+    configured_roots = workspace_roots(global_config())
+    roots = (
+        validate_workspace_roots(args.workspace_root)
+        if args.workspace_root
+        else configured_roots
+    )
+    plan = git_store_migration_plan(repo, root, roots)
+    if not args.approve_snapshot:
+        print_git_store_preview(root, plan)
+        return
+    validate_snapshot_approval(
+        {"snapshot": plan["token"]},
+        args.approve_snapshot,
+    )
+    apply_git_store_migration(root, plan)
+    print(f"Git context store configured: {root}")
+    print(f"Project contexts moved: {len(plan['project_moves'])}")
+    print(f"Shareable scope contexts moved: {len(plan['scope_moves'])}")
+    print("Git commit and push were not run.")
+
+
+def require_configured_git_store() -> tuple[dict[str, Any], Path, dict[str, Any]]:
+    configured = configured_git_store()
+    if configured is None:
+        raise SystemExit(
+            "No Git context store is configured. Run git-store-init preview and "
+            "approve its exact snapshot first."
+        )
+    root = validate_git_store_root(Path(configured["path"]))
+    manifest = load_git_store_manifest(root)
+    if manifest["store_id"] != configured["store_id"]:
+        raise SystemExit(
+            "Configured Git context store identity does not match its manifest."
+        )
+    return configured, root, manifest
+
+
+def git_store_bind(args: argparse.Namespace) -> None:
+    repo = context_repo(args.repo)
+    configured, root, manifest = require_configured_git_store()
+    try:
+        project_id = str(uuid.UUID(args.project_store_id))
+    except ValueError:
+        raise SystemExit(
+            f"Invalid project context store id {args.project_store_id!r}."
+        ) from None
+    if project_id not in manifest["projects"]:
+        raise SystemExit(f"Unknown project context store id {project_id}.")
+    target = git_store_project_path(root, project_id)
+    if not target.is_file():
+        raise SystemExit(f"Canonical project context is missing: {target}")
+    existing = git_store_project_binding(repo)
+    if existing is not None and existing != project_id:
+        raise SystemExit(
+            f"Repository is already bound to a different project context store: {existing}"
+        )
+    if local_context_path(repo).exists():
+        raise SystemExit(
+            "A repository-local context already exists. Use git-store-init preview and "
+            "approval to migrate it."
+        )
+    data, _ = load_context_file(target)
+    bindings = dict(configured["project_bindings"])
+    bindings[str(repo.resolve())] = project_id
+    configure_git_store(root, manifest, bindings)
+    config = global_config()
+    domains = {
+        name: [str(project) for project in members]
+        for name, members in configured_domains(config).items()
+    }
+    for domain_id, member_ids in manifest["domains"].items():
+        if project_id in member_ids:
+            domains.setdefault(domain_id, [])
+            domains[domain_id] = sorted({*domains[domain_id], str(repo.resolve())})
+    config["domains"] = domains
+    write_global_config(config)
+    context_dir = repo / CONTEXT_DIR
+    context_dir.mkdir(parents=True, exist_ok=True)
+    ensure_context_gitignore(context_dir)
+    apply_storage_policy(repo, data)
+    render_markdown(repo, data)
+    print(f"Bound project context: {repo} -> {project_id}")
+    print(f"Canonical context: {target}")
+
+
+def git_store_status(args: argparse.Namespace) -> None:
+    configured, root, manifest = require_configured_git_store()
+    print(f"Git context store: {root}")
+    print(f"Store id: {manifest['store_id']}")
+    print(f"Configured project bindings: {len(configured['project_bindings'])}")
+    for project_id, metadata in sorted(manifest["projects"].items()):
+        name = safe_display_field(metadata.get("name", ""), GLOBAL_LABEL_OUTPUT_LIMIT)
+        print(f"{project_id} | {name} | {git_store_project_path(root, project_id)}")
+    for domain_id, members in sorted(manifest["domains"].items()):
+        print(f"Domain {domain_id}: {', '.join(members)}")
+    dirty = git_output(root, "status", "--short")
+    print(f"Git working tree: {'dirty' if dirty else 'clean'}")
+
+
+def enroll_empty_git_store_project(repo: Path, data: dict[str, Any]) -> None:
+    configured, root, manifest = require_configured_git_store()
+    project_id = str(data["store_id"])
+    target = git_store_project_path(root, project_id)
+    if local_context_path(repo).exists():
+        raise SystemExit(
+            "A repository-local context already exists. Use git-store-init preview and "
+            "approval to migrate it."
+        )
+    if target.exists():
+        raise SystemExit(f"Git context target already exists: {target}")
+    existing_policy = data.get("storage_policy")
+    data["storage_policy"] = storage_policy(
+        "git-store",
+        "user-confirmed",
+        is_git_initialized(repo),
+        existing_policy if isinstance(existing_policy, dict) else None,
+    )
+    normalize(data)
+    write_git_json(root, target, data)
+    manifest.setdefault("created_at", now_iso())
+    manifest["updated_at"] = now_iso()
+    manifest["projects"][project_id] = git_project_metadata(repo)
+    write_git_json(root, git_store_manifest_path(root), manifest)
+    bindings = dict(configured["project_bindings"])
+    bindings[str(repo.resolve())] = project_id
+    configure_git_store(root, manifest, bindings)
+
+
 def init_context(args: argparse.Namespace) -> None:
     repo = context_repo(args.repo)
     git_initialized = is_git_initialized(repo)
     visibility = args.visibility
+    git_store = configured_git_store()
+    if visibility is None and git_store is not None:
+        visibility = "git-store"
     if visibility is None and git_initialized:
         raise SystemExit(
             "Context visibility decision required for Git repositories. Ask the user whether "
@@ -1881,6 +2649,11 @@ def init_context(args: argparse.Namespace) -> None:
         )
     if visibility is None:
         visibility = "local"
+    if visibility == "git-store" and git_store is None:
+        raise SystemExit(
+            "No Git context store is configured. Run git-store-init preview and "
+            "approve its exact snapshot first."
+        )
 
     data = load_context(repo)
     default_applicability = parse_applicability(args.default_applicability)
@@ -1893,7 +2666,7 @@ def init_context(args: argparse.Namespace) -> None:
         if applicability_pairs(resolved_default) != (("project", str(repo)),):
             raise SystemExit(
                 "Repository context defaults to project:self. Store broader facts "
-                "with an explicit --applicability so they use the XDG scope store."
+                "with an explicit --applicability so the updater selects its canonical store."
             )
         data["default_applicability"] = default_applicability
     existing_policy = data.get("storage_policy")
@@ -1903,23 +2676,35 @@ def init_context(args: argparse.Namespace) -> None:
         git_initialized,
         existing_policy if isinstance(existing_policy, dict) else None,
     )
+    if visibility == "git-store" and git_store_project_binding(repo) is None:
+        enroll_empty_git_store_project(repo, data)
     policy_result = save_context(repo, data)
-    print(f"Initialized local context: {repo / CONTEXT_DIR}")
+    location_label = "local context" if visibility != "git-store" else "project context"
+    print(f"Initialized {location_label}: {repo / CONTEXT_DIR}")
     print(f"Context visibility: {visibility}")
     print(f"Git initialized: {git_initialized}")
     if visibility == "local":
         if policy_result == "not-git":
             print("Git exclude: skipped (not a Git repository)")
         else:
-            action = "updated" if policy_result == "exclude-added" else "already configured"
+            action = (
+                "updated" if policy_result == "exclude-added" else "already configured"
+            )
             print(f"Git exclude: {action} ({git_exclude_display_path(repo)})")
-    else:
+    elif visibility == "versioned":
         action = (
             "removed docs/context/ entry"
             if policy_result == "exclude-removed"
             else "unchanged"
         )
         print(f"Git exclude: {action} ({git_exclude_display_path(repo)})")
+    else:
+        print(f"Canonical context: {context_path(repo)}")
+        if policy_result != "not-git":
+            action = (
+                "updated" if policy_result == "exclude-added" else "already configured"
+            )
+            print(f"Git exclude: {action} ({git_exclude_display_path(repo)})")
     if not (data["terms"] or data["components"] or data["patterns"]):
         print(
             "WARNING: context is empty (0 terms, 0 components, 0 patterns). "
@@ -1933,6 +2718,8 @@ def init_context(args: argparse.Namespace) -> None:
 
 def update_context(args: argparse.Namespace) -> None:
     repo = context_repo(args.repo)
+    if getattr(args, "if_initialized", False) and not context_path(repo).exists():
+        return
     require_initialized_context(repo)
     data, migrations = load_context_with_migrations(repo)
     save_context(repo, data)
@@ -1941,6 +2728,34 @@ def update_context(args: argparse.Namespace) -> None:
     print(f"Schema version: {SCHEMA_VERSION}")
     print(f"Migrations applied: {applied}")
     print("Generated views: refreshed")
+
+
+def status_context(args: argparse.Namespace) -> None:
+    repo = context_repo(args.repo)
+    path = context_path(repo)
+    if not path.exists():
+        print("No docs/context/context.json exists yet.")
+        git_root = configured_git_store_root()
+        if git_root is not None:
+            print(
+                f"Git context store configured: {git_root}. New project context "
+                "initialization uses it automatically."
+            )
+        return
+    data = load_context(repo)
+    open_questions = [
+        question
+        for question in data.get("open_questions", [])
+        if isinstance(question, dict) and question.get("status", "open") == "open"
+    ]
+    print(
+        f"Existing context counts: {len(data.get('terms', []))} terms, "
+        f"{len(data.get('components', []))} components, "
+        f"{len(data.get('patterns', []))} patterns, "
+        f"{len(open_questions)} open questions."
+    )
+    if path != local_context_path(repo):
+        print(f"Canonical context: {path}")
 
 
 def ignore_context(args: argparse.Namespace) -> None:
@@ -1974,7 +2789,17 @@ def extract_candidates(text: str) -> list[str]:
 
     for match in re.finditer(r"\b[A-Z][A-Z0-9]{1,}(?:-[A-Z0-9]+)?\b", text):
         token = match.group(0)
-        if token not in {"HTTP", "HTTPS", "JSON", "YAML", "XML", "API", "URL", "URI", "SQL"}:
+        if token not in {
+            "HTTP",
+            "HTTPS",
+            "JSON",
+            "YAML",
+            "XML",
+            "API",
+            "URL",
+            "URI",
+            "SQL",
+        }:
             candidates.add(token)
 
     for match in re.finditer(r"\b[A-Z][a-z0-9]+(?:[A-Z][a-z0-9]+){1,}\b", text):
@@ -2016,7 +2841,7 @@ def one_line(value: Any) -> str:
 
 def compact_summary(value: Any, limit: int = 180) -> str:
     text = one_line(value)
-    return text if len(text) <= limit else f"{text[:limit - 1].rstrip()}…"
+    return text if len(text) <= limit else f"{text[: limit - 1].rstrip()}…"
 
 
 def normalized_queries(values: list[str]) -> tuple[str, ...]:
@@ -2035,12 +2860,12 @@ def context_search_results(
     results: list[SearchResult] = []
     for kind, collection, label_key, summary_key, fields in SEARCH_SPECS:
         for record in data[collection]:
-            applicability = record.get(
-                "applicability", data["default_applicability"]
-            )
+            applicability = record.get("applicability", data["default_applicability"])
             if not applicability_matches(applicability, active):
                 continue
-            haystack = "\n".join(one_line(record.get(field)) for field in fields).casefold()
+            haystack = "\n".join(
+                one_line(record.get(field)) for field in fields
+            ).casefold()
             matched = tuple(query for query in queries if query in haystack)
             if not matched:
                 continue
@@ -2055,7 +2880,9 @@ def context_search_results(
                     matched,
                 )
             )
-    return sorted(results, key=lambda result: (-result[0], result[1], result[2].casefold()))
+    return sorted(
+        results, key=lambda result: (-result[0], result[1], result[2].casefold())
+    )
 
 
 def search_context(args: argparse.Namespace) -> None:
@@ -2146,7 +2973,7 @@ def search_context(args: argparse.Namespace) -> None:
 
 
 def generated_header() -> str:
-    return "<!-- Generated by project-context-curator. Edit docs/context/context.json via project_context.py. -->\n\n"
+    return "<!-- Generated by project-context-curator. Edit canonical context via project_context.py. -->\n\n"
 
 
 def md_escape(value: Any) -> str:
@@ -2184,12 +3011,12 @@ def render_topical_index(data: dict[str, Any]) -> list[str]:
         "",
         "1. Scan the topical index below for task-specific names and concepts.",
         (
-            "2. Run `project_context.py search --query \"<task term>\"` with the updater "
+            '2. Run `project_context.py search --query "<task term>"` with the updater '
             "path reported by the active session."
         ),
         (
-            "3. Read only the matching generated sections; if nothing matches, search "
-            "`context.json` with `rg -n -i`."
+            "3. Read only the matching generated sections; if nothing matches, run "
+            "`project_context.py status` to locate canonical JSON before using `rg -n -i`."
         ),
         "",
         "## Topical Index",
@@ -2203,7 +3030,9 @@ def render_topical_index(data: dict[str, Any]) -> list[str]:
                 value
                 for value in (
                     one_line(term.get("kind")),
-                    f"scope: {one_line(term.get('scope'))}" if term.get("scope") else "",
+                    f"scope: {one_line(term.get('scope'))}"
+                    if term.get("scope")
+                    else "",
                 )
                 if value
             )
@@ -2260,11 +3089,19 @@ def render_markdown(repo: Path, data: dict[str, Any]) -> None:
     (ctx_dir / "index.md").write_text(render_index(data), encoding="utf-8")
     (ctx_dir / "glossary.md").write_text(render_glossary(data), encoding="utf-8")
     (ctx_dir / "components.md").write_text(render_components(data), encoding="utf-8")
-    (ctx_dir / "architecture.md").write_text(render_architecture(data), encoding="utf-8")
+    (ctx_dir / "architecture.md").write_text(
+        render_architecture(data), encoding="utf-8"
+    )
     (ctx_dir / "inbox.md").write_text(render_inbox(data), encoding="utf-8")
 
 
 def render_index(data: dict[str, Any]) -> str:
+    policy = data.get("storage_policy")
+    canonical_file = (
+        "- Canonical JSON: configured Git context store (run `project_context.py status`)"
+        if isinstance(policy, dict) and policy.get("context_visibility") == "git-store"
+        else "- `context.json`: canonical structured text store"
+    )
     lines = [
         generated_header(),
         "# Project Context",
@@ -2273,14 +3110,13 @@ def render_index(data: dict[str, Any]) -> str:
         "",
         "## Files",
         "",
-        "- `context.json`: canonical structured text store",
+        canonical_file,
         "- `glossary.md`: terms, abbreviations, aliases, events, APIs, and data stores",
         "- `components.md`: components, responsibilities, paths, and interfaces",
         "- `architecture.md`: architecture patterns and implementation rules",
         "- `inbox.md`: unresolved project-context questions",
         "",
     ]
-    policy = data.get("storage_policy")
     if isinstance(policy, dict):
         lines.extend(
             [
@@ -2453,11 +3289,15 @@ def render_inbox(data: dict[str, Any]) -> str:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Maintain docs/context project knowledge.")
+    parser = argparse.ArgumentParser(
+        description="Maintain docs/context project knowledge."
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     def add_repo(subparser: argparse.ArgumentParser) -> None:
-        subparser.add_argument("--repo", type=Path, default=Path("."), help="Repository root")
+        subparser.add_argument(
+            "--repo", type=Path, default=Path("."), help="Repository root"
+        )
 
     def add_applicability(subparser: argparse.ArgumentParser) -> None:
         subparser.add_argument(
@@ -2465,7 +3305,7 @@ def build_parser() -> argparse.ArgumentParser:
             action="append",
             help=(
                 "Override collection applicability with kind[:selector]; repeat for "
-                "project, domain, workspace, user, machine, or universal selectors. "
+                "project, domain, user, machine, or universal selectors. "
                 "A missing selector means self."
             ),
         )
@@ -2478,7 +3318,8 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "User-confirmed storage policy for Git repositories: local updates .git/info/exclude "
             "to keep docs/context local; versioned removes that local exclude entry and "
-            "leaves repository .gitignore files unchanged. "
+            "leaves repository .gitignore files unchanged; git-store uses the configured "
+            "canonical Git context repository. "
             "Non-Git directories default to local."
         ),
     )
@@ -2488,7 +3329,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         help=(
             "Repository collection default. Only project:self is accepted; broader "
-            "facts require explicit applicability on add-* and use an XDG store."
+            "facts require explicit applicability on add-* and use their canonical store."
         ),
     )
     init_parser.set_defaults(func=init_context)
@@ -2505,7 +3346,61 @@ def build_parser() -> argparse.ArgumentParser:
         help="Apply schema migrations and regenerate all context views",
     )
     add_repo(update_parser)
+    update_parser.add_argument(
+        "--if-initialized", action="store_true", help=argparse.SUPPRESS
+    )
     update_parser.set_defaults(func=update_context)
+
+    status_parser = subparsers.add_parser(
+        "status",
+        help="Report project context counts and its canonical path",
+    )
+    add_repo(status_parser)
+    status_parser.set_defaults(func=status_context)
+
+    git_store_init_parser = subparsers.add_parser(
+        "git-store-init",
+        help=(
+            "Preview or approve migration of project, domain, and universal context "
+            "to one canonical Git repository"
+        ),
+    )
+    add_repo(git_store_init_parser)
+    git_store_init_parser.add_argument(
+        "--store",
+        type=Path,
+        required=True,
+        help="Existing Git checkout root that will hold canonical context",
+    )
+    git_store_init_parser.add_argument(
+        "--workspace-root",
+        type=Path,
+        action="append",
+        help=(
+            "Root to scan for repository-local contexts; repeat as needed. "
+            "Configured global roots are used when omitted."
+        ),
+    )
+    git_store_init_parser.add_argument(
+        "--approve-snapshot",
+        help="User-approved token from an unchanged git-store-init preview",
+    )
+    git_store_init_parser.set_defaults(func=git_store_init)
+
+    git_store_bind_parser = subparsers.add_parser(
+        "git-store-bind",
+        help="Bind a checkout to an existing canonical project context by stable store id",
+    )
+    add_repo(git_store_bind_parser)
+    git_store_bind_parser.add_argument("--project-store-id", required=True)
+    git_store_bind_parser.set_defaults(func=git_store_bind)
+
+    git_store_status_parser = subparsers.add_parser(
+        "git-store-status",
+        help="List the configured canonical Git store and its project ids",
+    )
+    add_repo(git_store_status_parser)
+    git_store_status_parser.set_defaults(func=git_store_status)
 
     global_init_parser = subparsers.add_parser(
         "global-init",
@@ -2590,7 +3485,9 @@ def build_parser() -> argparse.ArgumentParser:
     add_repo(domain_list_parser)
     domain_list_parser.set_defaults(func=domain_list)
 
-    term_parser = subparsers.add_parser("add-term", help="Add or update a glossary term")
+    term_parser = subparsers.add_parser(
+        "add-term", help="Add or update a glossary term"
+    )
     add_repo(term_parser)
     term_parser.add_argument("--term", required=True)
     term_parser.add_argument("--kind", default="domain-term")
@@ -2602,7 +3499,9 @@ def build_parser() -> argparse.ArgumentParser:
     add_applicability(term_parser)
     term_parser.set_defaults(func=add_term)
 
-    component_parser = subparsers.add_parser("add-component", help="Add or update a component")
+    component_parser = subparsers.add_parser(
+        "add-component", help="Add or update a component"
+    )
     add_repo(component_parser)
     component_parser.add_argument("--name", required=True)
     component_parser.add_argument("--responsibility", required=True)
@@ -2613,7 +3512,9 @@ def build_parser() -> argparse.ArgumentParser:
     add_applicability(component_parser)
     component_parser.set_defaults(func=add_component)
 
-    pattern_parser = subparsers.add_parser("add-pattern", help="Add or update an architecture pattern")
+    pattern_parser = subparsers.add_parser(
+        "add-pattern", help="Add or update an architecture pattern"
+    )
     add_repo(pattern_parser)
     pattern_parser.add_argument("--name", required=True)
     pattern_parser.add_argument("--summary", required=True)
@@ -2623,7 +3524,9 @@ def build_parser() -> argparse.ArgumentParser:
     add_applicability(pattern_parser)
     pattern_parser.set_defaults(func=add_pattern)
 
-    question_parser = subparsers.add_parser("add-question", help="Record an unresolved question")
+    question_parser = subparsers.add_parser(
+        "add-question", help="Record an unresolved question"
+    )
     add_repo(question_parser)
     question_parser.add_argument("--question", required=True)
     question_parser.add_argument("--context")
@@ -2664,12 +3567,16 @@ def build_parser() -> argparse.ArgumentParser:
     add_applicability(move_parser)
     move_parser.set_defaults(func=move_entry)
 
-    scan_text_parser = subparsers.add_parser("scan-text", help="Print possible context-gap hints from text")
+    scan_text_parser = subparsers.add_parser(
+        "scan-text", help="Print possible context-gap hints from text"
+    )
     add_repo(scan_text_parser)
     scan_text_parser.add_argument("--text", required=True)
     scan_text_parser.set_defaults(func=scan_text)
 
-    scan_file_parser = subparsers.add_parser("scan-file", help="Print possible context-gap hints from a file")
+    scan_file_parser = subparsers.add_parser(
+        "scan-file", help="Print possible context-gap hints from a file"
+    )
     add_repo(scan_file_parser)
     scan_file_parser.add_argument("--file", type=Path, required=True)
     scan_file_parser.set_defaults(func=scan_file)

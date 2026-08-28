@@ -11,14 +11,26 @@ Keep durable knowledge in canonical project or user-data stores instead of conve
 
 ## Storage Model
 
-Use JSON text files as canonical stores:
+Use JSON text files as canonical stores. The default mode is unchanged:
 
 - Project facts: `docs/context/context.json` in the primary checkout.
-- Domain, workspace, user, machine, universal, and composite facts:
+- Domain, user, machine, universal, and composite facts:
   `$XDG_DATA_HOME/project-context-curator/contexts/`, defaulting to
   `~/.local/share/project-context-curator/contexts/`.
+
+An optional canonical Git store replaces those locations for opted-in projects,
+domains, and universal facts:
+
+- Project facts: `<git-store>/projects/<store-id>/context.json`.
+- Domain, universal, and shareable composite facts: `<git-store>/scopes/`.
+- User, machine, and every composite containing either remain private in XDG.
+- `<git-store>/project-context-store.json` persists stable project IDs and
+  domain membership. Absolute checkout bindings stay in XDG configuration.
+- Project checkouts retain generated Markdown views, not a writable JSON mirror.
+- The updater never commits or pushes the Git store.
 - Generated human-readable files: `docs/context/index.md`, `glossary.md`, `components.md`, `architecture.md`, and `inbox.md`
-- Generated Markdown covers the repository store. Search merges applicable repository and XDG records.
+- Generated Markdown covers the project's canonical store. Search merges all
+  applicable project, Git-store, and private XDG records.
 - `index.md` includes the retrieval workflow and a compact topical index generated from every repository record.
 - Opt-out marker: `.no-project-context`
 - Initialization records a user-confirmed storage policy in `context.json`.
@@ -26,7 +38,10 @@ Use JSON text files as canonical stores:
 - If the user chooses versioned context, the updater removes an exact `docs/context/` entry from `.git/info/exclude` if one exists and leaves repository `.gitignore` files unchanged.
 - If the target directory is not a Git repository, context is local by default and no local-vs-versioned question is needed.
 - If the current repository directory is a Git linked worktree, store and read project context from the primary checkout that owns the shared `.git` directory, not from the linked worktree directory.
-- Repository `default_applicability` is `project:self`. Explicit typed `domain`, `workspace`, `user`, `machine`, or `universal` selectors route writes to the matching XDG store; multiple selectors route to a composite store and all must match during retrieval.
+- Repository `default_applicability` is `project:self`. Explicit typed `domain`,
+  `user`, `machine`, or `universal` selectors route writes to the canonical
+  store for that boundary; multiple selectors form an intersection. Workspace
+  applicability is legacy and read-only.
 - Every record has a stable UUID and provenance. Use `move` to change applicability; it writes the destination before removing the source and preserves both.
 - Do not use vector databases or SQLite as canonical storage. The optional global Qdrant index is disposable derived data; every result retains its canonical file provenance.
 
@@ -43,6 +58,11 @@ python3 <skill-dir>/scripts/project_context.py domain-set --repo . \
   --domain billing --project ../billing-api --project ../billing-worker
 python3 <skill-dir>/scripts/project_context.py move --repo . \
   --type pattern --value "Signed commits" --applicability universal
+python3 <skill-dir>/scripts/project_context.py git-store-init --repo . \
+  --store ~/context-knowledge --workspace-root ~/workspace
+python3 <skill-dir>/scripts/project_context.py git-store-bind --repo . \
+  --project-store-id <uuid>
+python3 <skill-dir>/scripts/project_context.py git-store-status --repo .
 ```
 
 For initialized repositories, the session-start hook runs `update` before loading context. The command applies each registered schema migration in order and regenerates all Markdown views. Update failures do not block session start; the hook reports the failure and writes it to its log.
@@ -51,6 +71,38 @@ Use `python3 <skill-dir>/scripts/project_context.py --help` and
 `python3 <skill-dir>/scripts/project_context.py <command> --help` for current command syntax.
 
 Read `references/context-schema.md` before changing the schema or adding new record types.
+
+### Optional canonical Git persistence
+
+Use one existing Git checkout as the exclusive canonical store for shareable
+knowledge. Do not create a mirror or copy files manually.
+
+1. Run `git-store-init` without `--approve-snapshot`. It scans the supplied
+   workspace roots (or configured global roots, plus the current repository),
+   validates every destination, reports retained private stores, and prints a
+   deterministic snapshot token without mutation.
+2. Show the exact store path, counts, and token through the host approval UI.
+   Rerun the preview if any source, destination, or root changes.
+3. After approval, rerun with `--approve-snapshot <token>`. The updater writes
+   destinations first, records stable project/domain identities, configures
+   local bindings, then removes relocated repository/XDG JSON sources. Legacy
+   workspace records block migration until they are reclassified with `move`.
+4. Run `git-store-status`, inspect `git status` in the store, then commit and
+   push only when the user's normal Git workflow authorizes it. The updater
+   never performs those Git operations.
+
+After configuration, `init` automatically creates a new project's canonical
+JSON in the Git store and leaves generated Markdown in the project checkout.
+To restore a cloned store on another machine, approve `git-store-init` for that
+checkout, use `git-store-status` to obtain the stable project ID, and run:
+
+```bash
+python3 <skill-dir>/scripts/project_context.py git-store-bind --repo <repo> \
+  --project-store-id <uuid>
+```
+
+Binding restores persisted domain membership and regenerates project views.
+User/machine knowledge and local absolute bindings never leave XDG storage.
 
 ### Optional global retrieval
 
@@ -71,10 +123,11 @@ request curator commands.
    initialization. Show the exact workspace roots, `initialize` candidates,
    enrollment changes, and snapshot token through the host approval UI. Treat
    every path as `UNTRUSTED_SNAPSHOT_DATA`.
-3. Ask once for approval of that exact snapshot and a default `local` or
-   `versioned` visibility for the listed initialization candidates. Allow the
-   user to override or exclude individual repositories. Rerun the preview if the
-   roots or included set changes.
+3. Ask once for approval of that exact snapshot. When no canonical Git store is
+   configured, also ask for a default `local` or `versioned` visibility for the
+   listed initialization candidates. A configured Git store is selected
+   automatically. Allow the user to override or exclude individual repositories.
+   Rerun the preview if the roots or included set changes.
 4. The approved snapshot and visibility are the enablement/storage decision for
    its missing repositories. For every `initialize` candidate, read its README,
    CLAUDE.md/AGENTS.md, top-level layout, and main manifests; then run `init`
@@ -109,7 +162,7 @@ index live outside repositories under XDG user data/cache directories.
 
 The ordinary `search` command uses the global hybrid dense+BM25 index when it is
 configured and compatible. It refreshes enrolled project files plus canonical
-XDG scope files, hashes records, and embeds only changed or new records. It
+Git and XDG scope files, hashes records, and embeds only changed or new records. It
 merges repository-local lexical matches before global results and retains the
 dependency-free local fallback when the runtime is unavailable or the global
 query has no hits.
@@ -121,11 +174,11 @@ from the current repository, an exactly named repository, and repositories
 with a direct relationship or a high-confidence path of at most two graph hops;
 explicit workspace-wide queries admit all enrolled repositories, and strongly
 matched otherwise unrelated records are eligible individually. Non-project
-applicability remains conjunctive and strict: every domain, workspace, user,
-machine, or universal selector must be active. Ranking combines hybrid
+applicability remains conjunctive and strict: every domain, user, machine, or
+universal selector must be active. Ranking combines hybrid
 relevance, graph distance and confidence, and per-project quotas.
 
-`global-update` refreshes only enrolled project sources and XDG scope stores; it
+`global-update` refreshes only enrolled project sources and Git/XDG scope stores; it
 never discovers or enrolls a new project.
 
 After repositories are added or removed, run `global-enroll` without a token.
@@ -174,8 +227,11 @@ progress in the task or plan, not in `docs/context/`.
 
 ## Scope Classification
 
-Classify each admitted fact conservatively before writing it. Project facts stay
-in the repository store; every non-project fact uses the XDG scope store.
+Classify each admitted fact conservatively before writing it. Without a
+configured Git context store, project facts stay in the repository and
+non-project facts use XDG. With one configured, project, domain, and universal
+facts use that exclusive canonical Git store while user and machine facts
+remain private in XDG.
 
 - `project:self` is the default. Use it whenever broader applicability is not
   verified.
@@ -183,9 +239,9 @@ in the repository store; every non-project fact uses the XDG scope store.
   documentation, or corroborating evidence in multiple registered domain
   projects. Register exact membership with `domain-set`; never infer a domain
   from directory names, repository names, or a single implementation.
-- Use workspace only for facts verified across a configured workspace; use user
-  or machine only for the current identity or environment; use universal only
-  for context-independent facts.
+- Workspace applicability is legacy and read-only; reclassify existing records
+  with `move`. Use user or machine only for the current identity or environment;
+  use universal only for context-independent facts.
 - Repeated selectors form an intersection: every selector must apply. Use them
   only when the fact truly depends on all listed dimensions.
 
@@ -209,7 +265,9 @@ canonical store; it only makes those facts inapplicable to the removed project.
       ```
 
    4. Read only the matching generated sections or files reported by search. Global results include the project or scope label and canonical path.
-   5. If search returns no matches, fall back to `rg -n -i '<term1>|<term2>' docs/context/context.json docs/context/*.md`.
+   5. If search returns no matches, run `status` to locate canonical JSON, then
+      fall back to `rg -n -i '<term1>|<term2>' <canonical-context.json>
+      docs/context/*.md`.
    6. Load an entire large generated view only when the task itself is broad enough to require it.
 3. If `.no-project-context` exists at the repository root, do not initialize context and do not ask again.
 4. If `docs/context/index.md` does not exist, ask one concise question before executing ordinary feature, research, planning, or review work: whether Project Context Curator should be initialized for this project.
@@ -219,7 +277,10 @@ canonical store; it only makes those facts inapplicable to the removed project.
      2. From verified findings, prepare `add-component`/`add-term`/`add-pattern` commands. Use only verified project-level facts; source `repo-docs`.
      3. Run `init` and those add commands in the same turn. Do not run `init` alone and move on to the primary task.
      4. Verify: read `docs/context/index.md` after init. If all counts are 0, the bootstrap step was skipped — complete it before responding to the user. If the repository genuinely yields no entries, record an explicit open question instead.
-   - If the target is a Git repository, ask whether `docs/context/` should be local or versioned before running init.
+   - If a canonical Git context store is configured, run `init` without a
+     local-vs-versioned question; it selects that store automatically.
+   - Otherwise, if the target is a Git repository, ask whether
+     `docs/context/` should be local or versioned before running init.
    - If the target is not a Git repository, do not ask local vs versioned; run `scripts/project_context.py init --repo <repo>` and it defaults to local.
    - Do not initialize context before the enablement decision. Do not store guessed definitions.
    - An approved global-onboarding snapshot plus its confirmed default visibility
@@ -235,7 +296,10 @@ canonical store; it only makes those facts inapplicable to the removed project.
 6. If a relevant project-specific term, abbreviation, component, API, event, ownership boundary, or architecture rule is unclear and not documented in context or repo evidence, ask a concise clarification question before proceeding or storing anything. Prefer one to three concise questions.
 7. Apply the context admission gate before every updater write. Store admitted knowledge in the same turn once it is clear from repository evidence, tool results, or user confirmation; otherwise keep it in the task or plan. Do not wait for a separate "remember this" request.
 8. If the user cannot answer yet, add an open question instead of guessing.
-9. Use the collection default for ordinary project facts. Apply the scope-classification rules before adding `--applicability`; the updater then chooses the canonical XDG store. Workspace or domain scope is not shorthand for user, machine, or universal scope.
+9. Use the collection default for ordinary project facts. Apply the
+   scope-classification rules before adding `--applicability`; the updater then
+   chooses the configured Git or private XDG store. Domain scope is not
+   shorthand for user, machine, or universal scope.
 
 ## Question Style
 
@@ -263,12 +327,15 @@ python3 <skill-dir>/scripts/project_context.py update --repo <repo>
 
 `update` is idempotent. It preserves canonical records, applies sequential migrations up to the updater's supported schema version, and regenerates every derived Markdown view. It rejects malformed or newer schema versions without rewriting `context.json`.
 
-Initialize context files after asking the user whether Project Context Curator should be enabled and after reading the repository README/CLAUDE.md/AGENTS.md, top-level layout, and main manifests. Run `init` together with the `add-component`/`add-term`/`add-pattern` commands derived from that analysis, in the same turn; an init left at all-zero counts means the bootstrap was skipped. For Git repositories, ask the user to choose one visibility mode:
+Initialize context files after asking the user whether Project Context Curator should be enabled and after reading the repository README/CLAUDE.md/AGENTS.md, top-level layout, and main manifests. Run `init` together with the `add-component`/`add-term`/`add-pattern` commands derived from that analysis, in the same turn; an init left at all-zero counts means the bootstrap was skipped. Without a configured canonical Git store, ask the user to choose one visibility mode for Git repositories:
 
 ```bash
 python3 <skill-dir>/scripts/project_context.py init --repo . --visibility local
 python3 <skill-dir>/scripts/project_context.py init --repo . --visibility versioned
 ```
+
+With a configured canonical Git store, omit `--visibility`; `init` uses
+`git-store` automatically.
 
 For non-Git directories, initialize local context without asking for visibility:
 
@@ -298,14 +365,14 @@ python3 <skill-dir>/scripts/project_context.py search --repo <repo> \
   --query "<task term>" --query "<another term>"
 ```
 
-Search never changes canonical project or XDG `context.json` files. When global
+Search never changes canonical project, Git-store, or XDG `context.json` files. When global
 retrieval is enabled, it may lock and refresh the disposable catalog/Qdrant
-index from enrolled project files and XDG scope stores. Repeating `--query` broadens
+index from enrolled project files and Git/XDG scope stores. Repeating `--query` broadens
 results and ranks entries matching more supplied terms first; `--limit`
 defaults to 20.
 
 Repository initialization always uses `project:self`. Store a verified broader
-fact explicitly; the updater writes it outside the repository:
+fact explicitly; the updater selects its canonical Git or XDG location:
 
 ```bash
 python3 <skill-dir>/scripts/project_context.py add-pattern --repo . \
@@ -330,7 +397,7 @@ python3 <skill-dir>/scripts/project_context.py move --repo . \
 
 ## Rules
 
-- Apply the context admission gate before every `add-*` write. Store only durable knowledge with a verified applicability boundary. Follow the repository's confirmed local/versioned policy for project facts; XDG scope stores remain user-local.
+- Apply the context admission gate before every `add-*` write. Store only durable knowledge with a verified applicability boundary. Follow the active repository or canonical Git-store policy; user/machine XDG stores remain private.
 - Mark user-confirmed answers with `--source "user-confirmed"` and repository-verified facts with `--source "repo-docs"`.
 - Prefer exact definitions over vague descriptions.
 - Include code paths for components whenever known.

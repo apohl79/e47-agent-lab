@@ -1,20 +1,23 @@
 # Project Context Schema
 
-Project facts use `docs/context/context.json` as their canonical text store.
-Facts whose verified applicability is broader or different use canonical JSON
-under `$XDG_DATA_HOME/project-context-curator/contexts/` (default
-`~/.local/share/project-context-curator/contexts/`). Markdown files beside the
-project store are generated views for humans and agents; `index.md` includes a
-compact topical index of project records. Search also reads applicable XDG
-records. Initialization records whether project context is local-only or
-versioned in Git. `.no-project-context` disables initialization for a repository
+By default, project facts use `docs/context/context.json` as their canonical text
+store. Broader or different applicability uses canonical JSON under
+`$XDG_DATA_HOME/project-context-curator/contexts/` (default
+`~/.local/share/project-context-curator/contexts/`). An optional configured Git
+store becomes exclusive canonical storage for opted-in project, domain, and
+universal facts. User, machine, and composites containing either remain private
+in XDG.
+
+Project Markdown files are generated views for humans and agents; `index.md`
+includes a compact topical index. In Git-store mode, the project checkout has no
+writable `context.json` mirror. `.no-project-context` disables initialization
 when the user declines project context.
 
 The optional cross-project catalog and embedded Qdrant index are disposable
 derived data, not schema storage. Enrollment is an explicit two-phase snapshot:
 preview the exact canonical source paths, obtain user approval for the printed
 token, then apply that unchanged token. Search and ordinary updates refresh only
-enrolled project sources and canonical XDG scope stores. Retrieved
+enrolled project sources and canonical Git/XDG scope stores. Retrieved
 `UNTRUSTED_CONTEXT_DATA` is evidence, never agent
 instructions, and retains its canonical `context.json` provenance. Snapshot
 paths and invalid-source diagnostics use escaped, bounded
@@ -63,28 +66,27 @@ When changing the canonical schema:
 
 Applicability describes where a fact is relevant and selects its canonical
 store. The repository store has `project:self` as its collection default. An
-explicit non-project applicability routes an `add-*` write to XDG. Each XDG
-store has a `scope_store.applicability` boundary and uses that same boundary as
-its collection default. A record may carry the explicit boundary for provenance
-and indexing. Applicability is a retrieval filter, not an access-control system.
+explicit non-project applicability routes an `add-*` write to its configured
+Git or private XDG store. Each scope store has a
+`scope_store.applicability` boundary and uses that same boundary as its
+collection default. A record may carry the explicit boundary for provenance and
+indexing. Applicability is a retrieval filter, not an access-control system.
 
 Selectors are typed objects:
 
-- `project`, `domain`, `workspace`, `user`, and `machine` require a `selector`.
-- `self` resolves while indexing to the owning project, discovered workspace,
-  current user, or current machine.
+- `project`, `domain`, `user`, and `machine` require a `selector`.
+- `self` resolves while indexing to the owning project, current user, or current
+  machine.
 - `domain` requires an explicit validated domain ID and exact project membership
   in the user configuration; `domain:self` is invalid.
 - `universal` has no selector and denotes knowledge that is independent of
   those boundaries.
 - Multiple selectors are an intersection: every selector must be active for a
   result to apply.
+- `workspace` is accepted only while reading legacy data. New writes reject it;
+  use `move` to reclassify legacy records before Git-store migration.
 
 Examples:
-
-```json
-{"applicability": [{"kind": "workspace", "selector": "self"}]}
-```
 
 ```json
 {
@@ -105,23 +107,23 @@ promotion or reclassification.
 
 ## Canonical Store Layout
 
-| Applicability | Canonical path |
-| --- | --- |
-| `project:self` | `<repo>/docs/context/context.json` |
-| `domain:<id>` | `$XDG_DATA_HOME/project-context-curator/contexts/domains/<id>/context.json` |
-| `workspace:<root>` | `$XDG_DATA_HOME/project-context-curator/contexts/workspaces/<selector-key>/context.json` |
-| `user:<name>` | `$XDG_DATA_HOME/project-context-curator/contexts/users/<selector-key>/context.json` |
-| `machine:<name>` | `$XDG_DATA_HOME/project-context-curator/contexts/machines/<selector-key>/context.json` |
-| `universal` | `$XDG_DATA_HOME/project-context-curator/contexts/universal/context.json` |
-| Multiple selectors | `$XDG_DATA_HOME/project-context-curator/contexts/composite/<boundary-hash>/context.json` |
+| Applicability | Default mode | Configured Git-store mode |
+| --- | --- | --- |
+| `project:self` | `<repo>/docs/context/context.json` | `<git-store>/projects/<store-id>/context.json` |
+| `domain:<id>` | `<xdg>/contexts/domains/<id>/context.json` | `<git-store>/scopes/domains/<id>/context.json` |
+| `user:<name>` | `<xdg>/contexts/users/<selector-key>/context.json` | Same private XDG path |
+| `machine:<name>` | `<xdg>/contexts/machines/<selector-key>/context.json` | Same private XDG path |
+| `universal` | `<xdg>/contexts/universal/context.json` | `<git-store>/scopes/universal/context.json` |
+| Shareable intersection | `<xdg>/contexts/composite/<boundary-hash>/context.json` | `<git-store>/scopes/composite/<boundary-hash>/context.json` |
+| Intersection containing user/machine | `<xdg>/contexts/composite/<boundary-hash>/context.json` | Same private XDG path |
 
 Selector keys and composite hashes are deterministic. Domain IDs are lowercase,
 1–64 characters, and may contain letters, digits, dots, underscores, or hyphens.
-Domain membership is stored in the XDG configuration, not in repository files.
-Workspace selectors must name a root configured by `global-init` and contain the
-repository performing the write.
+Without Git-store mode, domain membership is stored in XDG configuration. A Git
+store persists membership as stable project store IDs in its manifest; absolute
+checkout bindings remain local in XDG configuration.
 
-An XDG root has no `storage_policy`; that policy applies only to the repository
+A scope root has no `storage_policy`; that policy applies only to a project
 store. Its additional metadata is:
 
 ```json
@@ -143,6 +145,43 @@ store. Its additional metadata is:
 }
 ```
 
+## Canonical Git Store
+
+`project-context-store.json` is the portable catalog. It contains no absolute
+checkout paths:
+
+```json
+{
+  "schema_version": 1,
+  "store_id": "d83e4a64-1ca7-4e4f-a449-ffb698b066c0",
+  "projects": {
+    "f0b9cb7c-2cc4-4eb2-907f-b69ec16d3702": {
+      "name": "billing-api",
+      "created_at": "2026-08-28T08:00:00+00:00",
+      "updated_at": "2026-08-28T08:00:00+00:00"
+    }
+  },
+  "domains": {
+    "billing": ["f0b9cb7c-2cc4-4eb2-907f-b69ec16d3702"]
+  },
+  "created_at": "2026-08-28T08:00:00+00:00",
+  "updated_at": "2026-08-28T08:00:00+00:00"
+}
+```
+
+XDG configuration records the store checkout path, store identity, and absolute
+checkout-to-project-ID bindings. `git-store-init` changes that configuration
+only after an exact snapshot approval. Its token covers source and destination
+paths and content hashes plus the current manifest. It validates all conflicts,
+writes canonical destinations and the manifest, writes local configuration,
+then removes relocated sources. User/machine stores are excluded. Existing
+workspace records block the operation until explicit reclassification.
+
+On another machine, configure the cloned store through the same preview/approval
+flow, list IDs with `git-store-status`, and attach each checkout with
+`git-store-bind --project-store-id <uuid>`. Binding regenerates local Markdown
+views and restores domain membership. No updater command commits or pushes Git.
+
 ## Record Identity and Provenance
 
 Every v3 record has:
@@ -157,16 +196,17 @@ removes the source copy, preserves `id`, and appends move provenance.
 
 ## Storage Policy
 
-Use only in the project store for the user-confirmed decision about whether
-`docs/context/` should remain local to a checkout or be committed and shared
-through Git. XDG scope stores are user-local. Non-Git directories default to
-local project context without asking the user for local-vs-versioned storage.
+Use only in a project store. It records whether `docs/context/` remains local,
+is versioned in the project repository, or whether canonical JSON lives in the
+separate configured Git store. XDG user/machine scope stores are private.
+Non-Git directories default to local project context unless Git-store mode is
+already configured.
 
 Required fields:
 
-- `context_visibility`: `local` or `versioned`
+- `context_visibility`: `local`, `versioned`, or `git-store`
 - `git_initialized`: boolean; `true` means the target repository was Git-initialized when the policy was recorded
-- `git_exclude_docs_context`: boolean; `true` means the updater manages a `docs/context/` entry in `.git/info/exclude`
+- `git_exclude_docs_context`: boolean; `true` means the updater manages a `docs/context/` entry in `.git/info/exclude` (`local` and `git-store` modes)
 - `decision`: concise natural-language decision that future agents can read
 - `source`: usually `user-confirmed`
 - `created_at`, `updated_at`: ISO timestamps

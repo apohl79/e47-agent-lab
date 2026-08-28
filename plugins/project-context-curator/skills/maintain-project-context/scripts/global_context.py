@@ -5,7 +5,7 @@
 #   "qdrant-client==1.19.0",
 # ]
 # ///
-"""Derived context index. Canonical data remains in project or XDG context.json."""
+"""Derived context index. Canonical data remains in project, Git, or XDG JSON."""
 
 from __future__ import annotations
 
@@ -217,9 +217,7 @@ def safe_output_field(value: Any, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
-def format_diagnostics(
-    failures: Sequence[str], event: str
-) -> tuple[str, ...]:
+def format_diagnostics(failures: Sequence[str], event: str) -> tuple[str, ...]:
     shown_count = (
         len(failures)
         if len(failures) <= DIAGNOSTIC_COUNT_LIMIT
@@ -337,42 +335,53 @@ def context_source(path: Path, root: Path) -> ContextSource:
     )
 
 
-def discovered_sources(roots: Sequence[Path]) -> tuple[ContextSource, ...]:
+def discovered_sources(
+    roots: Sequence[Path],
+    external_sources: Sequence[ContextSource] = (),
+) -> tuple[ContextSource, ...]:
+    sources = {
+        source.project_path: source
+        for source in (
+            context_source(path, root) for path, root in discover_context_files(roots)
+        )
+    }
+    sources.update((source.project_path, source) for source in external_sources)
     return tuple(
-        context_source(path, root) for path, root in discover_context_files(roots)
+        sorted(sources.values(), key=lambda source: source.project_path.casefold())
     )
 
 
 def discover_context_candidates(
     roots: Sequence[Path],
+    external_sources: Sequence[ContextSource] = (),
 ) -> tuple[tuple[ContextSource, ...], tuple[ContextSource, ...]]:
     sources = {
-        Path(source.source_path): source for source in discovered_sources(roots)
+        source.project_path: source
+        for source in discovered_sources(roots, external_sources)
     }
     requiring_initialization: dict[Path, ContextSource] = {}
     for project, root in discover_primary_git_repositories(roots):
         path = project / "docs/context/context.json"
-        if path in sources:
+        if str(project) in sources:
             continue
         directories = (path.parent.parent, path.parent)
         if any(
-            directory.is_symlink()
-            or (directory.exists() and not directory.is_dir())
+            directory.is_symlink() or (directory.exists() and not directory.is_dir())
             for directory in directories
         ):
             continue
         if path.exists() or path.is_symlink():
             continue
         candidate = context_source(path, root)
-        sources[path] = candidate
+        sources[str(project)] = candidate
         requiring_initialization[path] = candidate
-    source_order = sorted(sources, key=lambda path: str(path).casefold())
+    source_order = sorted(sources, key=str.casefold)
     initialization_order = sorted(
         requiring_initialization,
         key=lambda path: str(path).casefold(),
     )
     return (
-        tuple(sources[path] for path in source_order),
+        tuple(sources[project] for project in source_order),
         tuple(requiring_initialization[path] for path in initialization_order),
     )
 
@@ -381,13 +390,60 @@ def source_payload(source: ContextSource) -> dict[str, str]:
     return asdict(source)
 
 
+def parse_external_sources(
+    values: Sequence[str],
+    roots: Sequence[Path],
+) -> tuple[ContextSource, ...]:
+    allowed_roots = {str(root.expanduser().resolve()) for root in roots}
+    sources: dict[str, ContextSource] = {}
+    for raw in values:
+        try:
+            payload = mapping(json.loads(raw), "external source")
+        except json.JSONDecodeError as exc:
+            raise GlobalContextError("external source must be valid JSON") from exc
+        source_path = Path(one_line(payload.get("source_path"))).expanduser()
+        project_path = Path(one_line(payload.get("project_path"))).expanduser()
+        workspace_root = Path(one_line(payload.get("workspace_root"))).expanduser()
+        if not source_path.is_absolute() or not project_path.is_absolute():
+            raise GlobalContextError(
+                "external source and project paths must be absolute"
+            )
+        workspace = workspace_root.resolve()
+        project = project_path.resolve()
+        if source_path.is_symlink():
+            raise GlobalContextError("external canonical source must not be a symlink")
+        source = source_path.resolve()
+        if str(workspace) not in allowed_roots:
+            raise GlobalContextError("external source workspace is not configured")
+        try:
+            project.relative_to(workspace)
+        except ValueError:
+            raise GlobalContextError(
+                "external source project is outside its workspace"
+            ) from None
+        if not source.is_file():
+            raise GlobalContextError(
+                f"external canonical source is unavailable: {source}"
+            )
+        sources[str(project)] = ContextSource(
+            source_path=str(source),
+            project_path=str(project),
+            workspace_root=str(workspace),
+        )
+    return tuple(
+        sorted(sources.values(), key=lambda source: source.project_path.casefold())
+    )
+
+
 def snapshot_fingerprint(
     sources: Sequence[ContextSource], roots: Sequence[Path] | None = None
 ) -> str:
     workspace_roots = (
         tuple(roots)
         if roots is not None
-        else tuple(Path(value) for value in {source.workspace_root for source in sources})
+        else tuple(
+            Path(value) for value in {source.workspace_root for source in sources}
+        )
     )
     payload = {
         "workspace_roots": sorted(
@@ -427,7 +483,9 @@ def resolved_applicability(
             )
         elif kind == "domain":
             if not raw_value or raw_value == "self":
-                raise GlobalContextError("domain applicability requires an explicit selector")
+                raise GlobalContextError(
+                    "domain applicability requires an explicit selector"
+                )
             resolved.add((kind, raw_value))
         elif kind == "workspace":
             if not raw_value:
@@ -517,7 +575,9 @@ def records_from_context(
                     id=record_id or str(uuid.uuid5(uuid.NAMESPACE_URL, key)),
                     key=key,
                     project=project,
-                    project_path=project_path if project_path is not None else str(repo),
+                    project_path=project_path
+                    if project_path is not None
+                    else str(repo),
                     workspace_root=str(workspace_root),
                     kind=kind,
                     label=label,
@@ -592,7 +652,9 @@ def load_scope_records(
 
 
 def catalog_sources(
-    catalog: dict[str, Any], roots: Sequence[Path]
+    catalog: dict[str, Any],
+    roots: Sequence[Path],
+    external_sources: Sequence[ContextSource] = (),
 ) -> tuple[ContextSource, ...]:
     allowed_roots = {
         str(path.expanduser().resolve()): path.expanduser().resolve() for path in roots
@@ -601,11 +663,17 @@ def catalog_sources(
     candidates = (
         raw_sources if isinstance(raw_sources, list) else catalog.get("records", [])
     )
+    external_by_project = {source.project_path: source for source in external_sources}
     sources: dict[str, ContextSource] = {}
     for raw_source in candidates:
         if not isinstance(raw_source, dict):
             continue
         raw_path = raw_source.get("source_path")
+        raw_project = str(raw_source.get("project_path", ""))
+        replacement = external_by_project.get(raw_project)
+        if replacement is not None:
+            sources[replacement.project_path] = replacement
+            continue
         raw_workspace = raw_source.get("workspace_root")
         workspace = allowed_roots.get(str(raw_workspace))
         if not raw_path or workspace is None:
@@ -624,7 +692,7 @@ def catalog_sources(
         ):
             continue
         project = source.parents[2]
-        sources[str(source)] = ContextSource(
+        sources[str(project)] = ContextSource(
             source_path=str(source),
             project_path=str(project),
             workspace_root=str(workspace),
@@ -753,8 +821,7 @@ def project_nodes_from_records(
         if record.project_path
     }
     return tuple(
-        nodes[path]
-        for path in sorted(nodes, key=lambda value: value.casefold())
+        nodes[path] for path in sorted(nodes, key=lambda value: value.casefold())
     )
 
 
@@ -770,8 +837,7 @@ def project_nodes_from_sources(
         if source.project_path
     }
     return tuple(
-        nodes[path]
-        for path in sorted(nodes, key=lambda value: value.casefold())
+        nodes[path] for path in sorted(nodes, key=lambda value: value.casefold())
     )
 
 
@@ -825,12 +891,9 @@ def record_target_mentions(
     for match in matcher.finditer(record.text):
         target_path = aliases.get(match.group(0).casefold())
         if target_path and target_path != record.project_path:
-            mentions.setdefault(target_path, []).append(
-                (match.start(), match.end())
-            )
+            mentions.setdefault(target_path, []).append((match.start(), match.end()))
     return {
-        target_path: tuple(positions)
-        for target_path, positions in mentions.items()
+        target_path: tuple(positions) for target_path, positions in mentions.items()
     }
 
 
@@ -897,10 +960,7 @@ def derive_relationship_graph(
             target.project_path,
             relation,
             confidence,
-            tuple(
-                evidence_by_id[record_id]
-                for record_id in sorted(evidence_by_id)
-            ),
+            tuple(evidence_by_id[record_id] for record_id in sorted(evidence_by_id)),
         )
         for (source_path, target_path, relation), (
             source,
@@ -1248,9 +1308,8 @@ def catalog_has_enrollment_state(catalog: dict[str, Any]) -> bool:
         return False
     if schema_version in SOURCE_CATALOG_SCHEMA_VERSIONS:
         return isinstance(catalog.get("sources"), list)
-    return (
-        schema_version == LEGACY_RECORD_CATALOG_SCHEMA_VERSION
-        and isinstance(catalog.get("records"), list)
+    return schema_version == LEGACY_RECORD_CATALOG_SCHEMA_VERSION and isinstance(
+        catalog.get("records"), list
     )
 
 
@@ -1259,15 +1318,16 @@ def sync_index(
     index_dir: Path,
     catalog_path: Path,
     model_cache: Path,
-    scope_root: Path | None = None,
+    scope_roots: Sequence[Path] | Path | None = None,
     *,
+    external_sources: Sequence[ContextSource] = (),
     enroll_new: bool = False,
     approved_snapshot: str | None = None,
 ) -> tuple[int, int, int, tuple[str, ...]]:
     with exclusive_lock(index_dir.parent / "index.lock"):
         old_catalog = read_catalog(catalog_path)
         if enroll_new:
-            enrolled = discovered_sources(roots)
+            enrolled = discovered_sources(roots, external_sources)
             current_snapshot = snapshot_fingerprint(enrolled, roots)
             if not approved_snapshot or not SNAPSHOT_TOKEN_PATTERN.fullmatch(
                 approved_snapshot
@@ -1285,13 +1345,21 @@ def sync_index(
                     "global enrollment catalog is missing or invalid; preview "
                     "global-enroll and request approval again"
                 )
-            enrolled = catalog_sources(old_catalog, roots)
+            enrolled = catalog_sources(old_catalog, roots, external_sources)
         records, active_sources, failures, failed = load_source_records(enrolled)
-        scope_records, scope_failures, scope_failed = (
-            load_scope_records(scope_root)
-            if scope_root is not None
-            else ((), (), frozenset())
+        normalized_scope_roots = (
+            (scope_roots,)
+            if isinstance(scope_roots, Path)
+            else tuple(scope_roots or ())
         )
+        scope_records: tuple[ContextRecord, ...] = ()
+        scope_failures: tuple[str, ...] = ()
+        scope_failed: frozenset[str] = frozenset()
+        for scope_root in normalized_scope_roots:
+            loaded, current_failures, current_failed = load_scope_records(scope_root)
+            scope_records = sorted_records((*scope_records, *loaded))
+            scope_failures = (*scope_failures, *current_failures)
+            scope_failed = frozenset((*scope_failed, *current_failed))
         failed_sources = frozenset((*failed, *scope_failed))
         records = sorted_records(
             (
@@ -1357,8 +1425,7 @@ def catalog_project_nodes(catalog: dict[str, Any]) -> tuple[ProjectNode, ...]:
                         project_path,
                     )
     return tuple(
-        nodes[path]
-        for path in sorted(nodes, key=lambda value: value.casefold())
+        nodes[path] for path in sorted(nodes, key=lambda value: value.casefold())
     )
 
 
@@ -1411,16 +1478,16 @@ def catalog_relationship_edges(
     nodes: Sequence[ProjectNode],
 ) -> tuple[RelationshipEdge, ...]:
     raw_graph = catalog.get("relationship_graph")
-    if isinstance(raw_graph, dict) and raw_graph.get(
-        "schema_version"
-    ) == RELATIONSHIP_GRAPH_SCHEMA_VERSION:
+    if (
+        isinstance(raw_graph, dict)
+        and raw_graph.get("schema_version") == RELATIONSHIP_GRAPH_SCHEMA_VERSION
+    ):
         raw_edges = raw_graph.get("edges", [])
         if isinstance(raw_edges, list):
             edges = tuple(
                 edge
                 for edge in (
-                    relationship_edge_from_payload(raw_edge)
-                    for raw_edge in raw_edges
+                    relationship_edge_from_payload(raw_edge) for raw_edge in raw_edges
                 )
                 if edge is not None
             )
@@ -1524,8 +1591,7 @@ def graph_reach(
                 confidence = round(source_confidence * edge_confidence, 6)
                 if (
                     distance > 1
-                    and confidence
-                    < RELATIONSHIP_GRAPH_MIN_TRANSITIVE_CONFIDENCE
+                    and confidence < RELATIONSHIP_GRAPH_MIN_TRANSITIVE_CONFIDENCE
                 ):
                     continue
                 existing = reached.get(target_path)
@@ -1674,9 +1740,7 @@ def strong_query_match(
         for token in DISTINCTIVE_QUERY_TOKEN.findall(normalized_query)
         if token.casefold() not in STRONG_QUERY_STOP_TOKENS
     )
-    haystack = " ".join(
-        (label, one_line(hit.get("summary")).casefold())
-    )
+    haystack = " ".join((label, one_line(hit.get("summary")).casefold()))
     return any(token in haystack for token in tokens)
 
 
@@ -1837,9 +1901,7 @@ def search_index(
     )
     eligible: list[dict[str, Any]] = []
     strong_projects: dict[str, RetrievalProject] = {}
-    nodes_by_path = {
-        node.project_path: node for node in catalog_project_nodes(catalog)
-    }
+    nodes_by_path = {node.project_path: node for node in catalog_project_nodes(catalog)}
     for hit in hits:
         if hit_is_retrievable(hit, active, project_paths):
             eligible.append(hit)
@@ -1902,6 +1964,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     discover = subparsers.add_parser("discover")
     discover.add_argument("--workspace-root", type=Path, action="append", required=True)
+    discover.add_argument("--external-source", action="append", default=[])
 
     doctor = subparsers.add_parser("doctor")
     doctor.add_argument("--index-dir", type=Path, required=True)
@@ -1914,7 +1977,8 @@ def build_parser() -> argparse.ArgumentParser:
         subparser.add_argument("--index-dir", type=Path, required=True)
         subparser.add_argument("--catalog", type=Path, required=True)
         subparser.add_argument("--model-cache", type=Path, required=True)
-        subparser.add_argument("--scope-root", type=Path)
+        subparser.add_argument("--scope-root", type=Path, action="append", default=[])
+        subparser.add_argument("--external-source", action="append", default=[])
 
     sync = subparsers.add_parser("sync")
     add_index_arguments(sync)
@@ -1933,7 +1997,11 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "discover":
         roots = tuple(path.expanduser().resolve() for path in args.workspace_root)
-        sources, requiring_initialization = discover_context_candidates(roots)
+        external_sources = parse_external_sources(args.external_source, roots)
+        sources, requiring_initialization = discover_context_candidates(
+            roots,
+            external_sources,
+        )
         print(
             json.dumps(
                 {
@@ -1964,12 +2032,14 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     roots = tuple(path.expanduser().resolve() for path in args.workspace_root)
+    external_sources = parse_external_sources(args.external_source, roots)
     project_count, record_count, changed_count, failures = sync_index(
         roots,
         args.index_dir,
         args.catalog,
         args.model_cache,
         args.scope_root,
+        external_sources=external_sources,
         enroll_new=args.command == "sync" and args.enroll_new,
         approved_snapshot=(args.approved_snapshot if args.command == "sync" else None),
     )

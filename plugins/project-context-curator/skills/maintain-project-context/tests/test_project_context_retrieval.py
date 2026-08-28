@@ -74,7 +74,7 @@ def test_index_renders_retrieval_workflow_and_topical_index(tmp_path: Path) -> N
 
 1. Scan the topical index below for task-specific names and concepts.
 2. Run `project_context.py search --query \"<task term>\"` with the updater path reported by the active session.
-3. Read only the matching generated sections; if nothing matches, search `context.json` with `rg -n -i`.
+3. Read only the matching generated sections; if nothing matches, run `project_context.py status` to locate canonical JSON before using `rg -n -i`.
 
 ## Topical Index
 

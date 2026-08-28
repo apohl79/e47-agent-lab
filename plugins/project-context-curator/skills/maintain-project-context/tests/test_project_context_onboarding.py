@@ -98,9 +98,7 @@ def test_global_init_preview_lists_contexts_requiring_initialization(
                 "change": "initialize",
                 "source": {
                     "project_path": str(missing.resolve()),
-                    "source_path": str(
-                        missing.resolve() / "docs/context/context.json"
-                    ),
+                    "source_path": str(missing.resolve() / "docs/context/context.json"),
                     "workspace_root": str(workspace.resolve()),
                 },
                 "type": "UNTRUSTED_SNAPSHOT_DATA",
@@ -128,7 +126,8 @@ def test_disabled_global_status_in_hook_format_requires_onboarding(
         (
             "Global context onboarding required. Before normal project work, "
             "proactively use the Project Context Curator skill to confirm workspace "
-            "roots and one local-or-versioned policy, preview global-init, request "
+            "roots and the configured Git-store or one local-or-versioned policy, "
+            "preview global-init, request "
             "approval for the exact snapshot, bootstrap every listed missing context "
             "with verified non-empty records, and rerun global-init with the approved token."
         ),

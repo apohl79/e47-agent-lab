@@ -65,9 +65,7 @@ def write_project_context(repo: Path) -> None:
             {
                 "schema_version": 3,
                 "store_id": "b7e8f44a-518d-440b-b4b7-c6f05ba127b5",
-                "default_applicability": [
-                    {"kind": "project", "selector": "self"}
-                ],
+                "default_applicability": [{"kind": "project", "selector": "self"}],
                 "terms": [],
                 "components": [],
                 "patterns": [],
@@ -110,9 +108,7 @@ def install_fake_index(module: ModuleType, hits: Sequence[dict[str, object]]) ->
 def test_scope_loader_preserves_canonical_identity_and_source(tmp_path: Path) -> None:
     module = load_backend_module()
     root = tmp_path / "contexts"
-    path = write_scope_context(
-        root, [{"kind": "domain", "selector": "billing"}]
-    )
+    path = write_scope_context(root, [{"kind": "domain", "selector": "billing"}])
 
     records, failures, failed = module.load_scope_records(root)
 
@@ -140,9 +136,7 @@ def test_scope_loader_preserves_canonical_identity_and_source(tmp_path: Path) ->
 def test_scope_loader_rejects_record_outside_store_boundary(tmp_path: Path) -> None:
     module = load_backend_module()
     root = tmp_path / "contexts"
-    path = write_scope_context(
-        root, [{"kind": "domain", "selector": "billing"}]
-    )
+    path = write_scope_context(root, [{"kind": "domain", "selector": "billing"}])
     data = json.loads(path.read_text(encoding="utf-8"))
     data["patterns"][0]["applicability"] = [{"kind": "universal"}]
     path.write_text(json.dumps(data) + "\n", encoding="utf-8")
@@ -195,6 +189,106 @@ def test_scope_record_is_indexed_without_becoming_an_enrolled_project(
         1,
         [("domain:billing", RECORD_ID)],
     )
+
+
+def test_external_project_source_and_multiple_scope_roots_are_indexed(
+    tmp_path: Path,
+) -> None:
+    module = load_backend_module()
+    workspace = tmp_path / "workspace"
+    project = workspace / "repo"
+    canonical = tmp_path / "git-store/projects/project-id/context.json"
+    canonical.parent.mkdir(parents=True)
+    canonical.write_text(
+        json.dumps(
+            {
+                "schema_version": 3,
+                "store_id": "b7e8f44a-518d-440b-b4b7-c6f05ba127b5",
+                "default_applicability": [{"kind": "project", "selector": "self"}],
+                "terms": [],
+                "components": [],
+                "patterns": [
+                    {
+                        "id": "279075e1-03cf-4e30-9865-388eef3aa6c7",
+                        "name": "Canonical Git knowledge",
+                        "summary": "Project knowledge comes from the Git context store",
+                        "provenance": [],
+                    }
+                ],
+                "open_questions": [],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    domain_root = tmp_path / "git-store/scopes"
+    private_root = tmp_path / "xdg/contexts"
+    write_scope_context(domain_root, [{"kind": "domain", "selector": "billing"}])
+    private_path = write_scope_context(
+        private_root,
+        [{"kind": "user", "selector": "test-user"}],
+        record_id="27a7b440-1053-476b-a5e6-c3c1353c0182",
+    )
+    external = module.ContextSource(
+        source_path=str(canonical),
+        project_path=str(project),
+        workspace_root=str(workspace),
+    )
+    install_fake_index(module, ())
+    module.collection_is_available = lambda _path: False
+    sources = module.discovered_sources((workspace,), (external,))
+    catalog_path = tmp_path / "catalog.json"
+
+    result = module.sync_index(
+        (workspace,),
+        tmp_path / "index",
+        catalog_path,
+        tmp_path / "models",
+        (domain_root, private_root),
+        external_sources=(external,),
+        enroll_new=True,
+        approved_snapshot=module.snapshot_fingerprint(sources, (workspace,)),
+    )
+    catalog = module.read_catalog(catalog_path)
+
+    assert (
+        result[:3],
+        catalog["project_count"],
+        frozenset(record["source_path"] for record in catalog["records"]),
+    ) == (
+        (1, 3, 3),
+        1,
+        frozenset(
+            {
+                str(canonical),
+                str((domain_root / "domains/billing/context.json").resolve()),
+                str(private_path.resolve()),
+            }
+        ),
+    )
+
+
+def test_external_source_replaces_an_enrolled_repository_path(
+    tmp_path: Path,
+) -> None:
+    module = load_backend_module()
+    workspace = tmp_path / "workspace"
+    project = workspace / "repo"
+    write_project_context(project)
+    enrolled = module.discovered_sources((workspace,))
+    catalog = module.catalog_from_records((), enrolled)
+    canonical = tmp_path / "store/projects/project-id/context.json"
+    canonical.parent.mkdir(parents=True)
+    (project / "docs/context/context.json").replace(canonical)
+    external = module.ContextSource(
+        source_path=str(canonical),
+        project_path=str(project),
+        workspace_root=str(workspace),
+    )
+
+    resolved = module.catalog_sources(catalog, (workspace,), (external,))
+
+    assert resolved == (external,)
 
 
 def test_schema_v2_catalog_rebuilds_approved_sources_without_new_enrollment(
@@ -262,9 +356,7 @@ def test_search_discards_inapplicable_hits_before_limit(tmp_path: Path) -> None:
         "project": "other",
         "label": "Other rule",
         "score": 0.99,
-        "applicability": [
-            {"kind": "project", "selector": str(tmp_path / "other")}
-        ],
+        "applicability": [{"kind": "project", "selector": str(tmp_path / "other")}],
     }
     applicable = {
         "project": "domain:billing",
@@ -294,7 +386,7 @@ def test_search_discards_inapplicable_hits_before_limit(tmp_path: Path) -> None:
         tmp_path / "index",
         catalog_path,
         tmp_path / "models",
-        frozenset({("domain", "billing")} ),
+        frozenset({("domain", "billing")}),
     )
 
     assert hits == (applicable,)

@@ -1,7 +1,7 @@
 {
   "name": "project-context-curator",
-  "version": "2.1.0",
-  "description": "Maintains canonical project and XDG-scoped context with graph-assisted hybrid retrieval.",
+  "version": "3.0.0",
+  "description": "Maintains canonical project, private XDG, and optional Git-backed context with graph-assisted hybrid retrieval.",
   "author": {
     "name": "Local developer"
   }
