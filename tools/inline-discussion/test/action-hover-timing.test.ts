@@ -20,7 +20,7 @@ test('block action controls keep a two-second dismissal window and stack before 
   const copyStyle = dom.window.getComputedStyle(copy);
   const indicatorStyle = dom.window.getComputedStyle(indicator);
 
-  assert.match(stylesheet, /\[data-block-id\]:hover\s*\{[^}]*outline-color:/);
+  assert.match(stylesheet, /\[data-block-id\]:hover\s*\{[^}]*background:/);
   assert.deepEqual(
     {
       highlightActionsMs: HOVER_ACTION_DISMISS_MS,

@@ -572,13 +572,11 @@ button.primary:hover {
 
 [data-block-id] {
   position: relative;
-  outline: 1px solid transparent;
-  outline-offset: 2px;
-  transition: outline-color 120ms ease;
+  transition: background 120ms ease;
 }
 
 [data-block-id]:hover {
-  outline-color: color-mix(in srgb, var(--accent) 28%, transparent);
+  background: color-mix(in srgb, var(--accent-soft) 38%, transparent);
 }
 
 .block-shell {
