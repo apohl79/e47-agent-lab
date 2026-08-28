@@ -30,7 +30,13 @@ XDG. Local mode's saved project visibility is `local` (Git-excluded) or
 - `<git-store>/project-context-store.json` persists stable project IDs and
   domain membership. Absolute checkout bindings stay in XDG configuration.
 - Project checkouts retain generated Markdown views, not a writable JSON mirror.
-- The updater never commits or pushes the Git store.
+- The updater serializes Git-store mutations, synchronizes the configured
+  remote's `main` before writing, and creates and pushes one Conventional Commit
+  directly to `main` when curator-managed files changed. No-op writes do not
+  create empty commits.
+- Automatic synchronization requires the store checkout on `main` and an exact
+  push remote. Unrelated dirty files block mutation; a rejected post-write push
+  keeps the local commit and returns an error for retry.
 - Generated human-readable files: `docs/context/index.md`, `glossary.md`, `components.md`, `architecture.md`, and `inbox.md`
 - Generated Markdown covers the project's canonical store. Search merges all
   applicable project, Git-store, and private XDG records.
@@ -88,7 +94,10 @@ writes every destination before removing a source, preserves store/record IDs
 and provenance, and rejects stale approval, conflicts, unsafe paths, legacy
 workspace applicability, or a Git project without exactly one local checkout
 binding. User/machine context remains private XDG in both modes. The updater
-never commits or pushes affected repositories.
+binds the preview token to the exact push remote, branch, and hashed push URL.
+After approved Git-store migration and every later canonical mutation, it
+commits and pushes curator-managed paths automatically. Local/versioned project
+repositories are not auto-committed.
 
 After configuration, `init` automatically creates a new project's canonical
 JSON in the Git store and leaves generated Markdown in the project checkout.

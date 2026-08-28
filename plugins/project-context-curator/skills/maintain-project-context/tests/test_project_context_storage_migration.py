@@ -5,6 +5,7 @@ import subprocess
 from pathlib import Path
 
 from scope_test_support import (
+    initialize_git_store,
     isolated_environment,
     project_context,
     read_json,
@@ -29,6 +30,48 @@ def snapshot_token(output: str) -> str:
         line.removeprefix(prefix)
         for line in output.splitlines()
         if line.startswith(prefix)
+    )
+
+
+def remove_context_identities(repo: Path) -> bytes:
+    path = repo / "docs/context/context.json"
+    data = read_json(path)
+    data["schema_version"] = 1
+    data.pop("store_id")
+    for term in data["terms"]:
+        term.pop("id")
+    path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return path.read_bytes()
+
+
+def prepare_legacy_context(repo: Path, env: dict[str, str]) -> bytes:
+    git_init(repo)
+    run_context("init", "--visibility", "local", repo=repo, env=env)
+    run_context(
+        "add-term",
+        "--term",
+        "Legacy",
+        "--definition",
+        "Legacy context",
+        repo=repo,
+        env=env,
+    )
+    return remove_context_identities(repo)
+
+
+def preview_git_store(
+    repo: Path, env: dict[str, str], store: Path, workspace: Path
+) -> subprocess.CompletedProcess[str]:
+    return run_context(
+        "storage-migrate",
+        "--target",
+        "git-store",
+        "--store",
+        str(store),
+        "--workspace-root",
+        str(workspace),
+        repo=repo,
+        env=env,
     )
 
 
@@ -166,7 +209,7 @@ def test_storage_migration_round_trip_preserves_records_and_private_context(
     repo = workspace / "service"
     store = tmp_path / "context-store"
     git_init(repo)
-    git_init(store)
+    initialize_git_store(store)
     initialized = run_context("init", "--visibility", "local", repo=repo, env=env)
     run_context(
         "add-pattern",
@@ -282,7 +325,7 @@ def test_reverse_migration_rejects_stale_snapshot_without_partial_changes(
     repo = tmp_path / "repo"
     store = tmp_path / "store"
     git_init(repo)
-    git_init(store)
+    initialize_git_store(store)
     run_context("init", "--visibility", "local", repo=repo, env=env)
     migrate_to_git_store(repo, env, store, tmp_path)
     preview = run_context(
@@ -334,7 +377,7 @@ def test_reverse_migration_requires_every_project_to_have_one_local_binding(
     repo = tmp_path / "repo"
     store = tmp_path / "store"
     git_init(repo)
-    git_init(store)
+    initialize_git_store(store)
     run_context("init", "--visibility", "local", repo=repo, env=env)
     migrate_to_git_store(repo, env, store, tmp_path)
     config_path = tmp_path / "xdg/config/config.json"
@@ -366,7 +409,7 @@ def test_reverse_migration_rejects_conflicting_local_context_without_mutation(
     repo = tmp_path / "repo"
     store = tmp_path / "store"
     git_init(repo)
-    git_init(store)
+    initialize_git_store(store)
     run_context("init", "--visibility", "local", repo=repo, env=env)
     run_context(
         "add-term",
@@ -433,3 +476,21 @@ def test_init_uses_configured_local_runtime_default_visibility(
         data["storage_policy"]["context_visibility"],
         "docs/context/" in exclude_text.splitlines(),
     ) == (0, "versioned", False)
+
+
+def test_git_store_preview_with_legacy_context_is_repeatable(tmp_path: Path) -> None:
+    env = isolated_environment(tmp_path / "xdg")
+    workspace = tmp_path / "workspace"
+    repo = workspace / "service"
+    store = tmp_path / "store"
+    initialize_git_store(store)
+    original = prepare_legacy_context(repo, env)
+    first = preview_git_store(repo, env, store, workspace)
+    second = preview_git_store(repo, env, store, workspace)
+
+    assert (
+        first.returncode,
+        second.returncode,
+        first.stdout,
+        (repo / "docs/context/context.json").read_bytes(),
+    ) == (0, 0, second.stdout, original)

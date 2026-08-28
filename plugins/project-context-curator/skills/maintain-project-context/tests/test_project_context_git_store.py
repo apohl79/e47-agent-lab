@@ -5,6 +5,7 @@ import subprocess
 from pathlib import Path
 
 from scope_test_support import (
+    initialize_git_store,
     isolated_environment,
     project_context,
     read_json,
@@ -52,7 +53,7 @@ def test_approved_git_store_migration_moves_shareable_context_and_keeps_private_
     repo = workspace / "service"
     store = tmp_path / "shared-context"
     initialize_git_project(repo, env)
-    git_init(store)
+    initialize_git_store(store)
     run_context(
         "add-pattern",
         "--name",
@@ -190,7 +191,7 @@ def test_git_store_rejects_symlinked_destination_without_writing_outside(
     store = tmp_path / "store"
     outside = tmp_path / "outside"
     initialize_git_project(repo, env)
-    git_init(store)
+    initialize_git_store(store)
     outside.mkdir()
     (store / "projects").symlink_to(outside, target_is_directory=True)
     result = run_context(
@@ -217,7 +218,7 @@ def test_git_store_rejects_stale_snapshot_without_partial_migration(
     repo = tmp_path / "repo"
     store = tmp_path / "store"
     initialize_git_project(repo, env)
-    git_init(store)
+    initialize_git_store(store)
     preview = run_context(
         "git-store-init",
         "--store",
@@ -263,7 +264,7 @@ def test_configured_git_store_is_canonical_for_new_project_writes(
     second = tmp_path / "second"
     store = tmp_path / "store"
     initialize_git_project(first, env)
-    git_init(store)
+    initialize_git_store(store)
     preview = run_context(
         "git-store-init",
         "--store",
@@ -313,7 +314,7 @@ def test_workspace_applicability_is_read_only_and_blocks_git_store_migration(
     repo = tmp_path / "repo"
     store = tmp_path / "store"
     initialize_git_project(repo, env)
-    git_init(store)
+    initialize_git_store(store)
     rejected_write = run_context(
         "add-term",
         "--term",
@@ -385,7 +386,7 @@ def test_existing_git_store_can_bind_a_fresh_checkout_by_stable_store_id(
     fresh = tmp_path / "fresh"
     store = tmp_path / "store"
     initialize_git_project(original, first_env)
-    git_init(store)
+    initialize_git_store(store)
     run_context(
         "add-term",
         "--term",

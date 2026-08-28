@@ -43,6 +43,7 @@ RELATIONSHIP_GRAPH_SCHEMA_VERSION = 1
 RELATIONSHIP_GRAPH_MAX_DEPTH = 2
 RELATIONSHIP_GRAPH_MIN_TRANSITIVE_CONFIDENCE = 0.7
 IGNORE_MARKER = ".no-project-context"
+GIT_STORE_MANIFEST = "project-context-store.json"
 UNTRUSTED_RESULT_PREFIX = "UNTRUSTED_CONTEXT_DATA"
 UNTRUSTED_DIAGNOSTIC_TYPE = "UNTRUSTED_CONTEXT_DIAGNOSTIC"
 PROJECT_OUTPUT_LIMIT = 120
@@ -323,6 +324,9 @@ def discover_primary_git_repositories(
                 continue
             if (project / IGNORE_MARKER).exists():
                 continue
+            if is_git_store_repository(project):
+                names[:] = []
+                continue
             discovered.setdefault(project, root)
     return tuple(sorted(discovered.items(), key=lambda item: str(item[0]).casefold()))
 
@@ -335,6 +339,11 @@ def context_source(path: Path, root: Path) -> ContextSource:
     )
 
 
+def is_git_store_repository(project: Path) -> bool:
+    manifest = project / GIT_STORE_MANIFEST
+    return manifest.is_file() and not manifest.is_symlink()
+
+
 def discovered_sources(
     roots: Sequence[Path],
     external_sources: Sequence[ContextSource] = (),
@@ -344,6 +353,7 @@ def discovered_sources(
         for source in (
             context_source(path, root) for path, root in discover_context_files(roots)
         )
+        if not is_git_store_repository(Path(source.project_path))
     }
     sources.update((source.project_path, source) for source in external_sources)
     return tuple(
@@ -769,7 +779,14 @@ def load_source_records(
             failed_sources.add(source.source_path)
             continue
         try:
-            records.extend(records_from_context(path, Path(source.workspace_root)))
+            records.extend(
+                records_from_context(
+                    path,
+                    Path(source.workspace_root),
+                    project_path=source.project_path,
+                    project_name=project.name,
+                )
+            )
         except (OSError, json.JSONDecodeError, GlobalContextError) as exc:
             failures.append(f"{path}: {exc}")
             failed_sources.add(source.source_path)

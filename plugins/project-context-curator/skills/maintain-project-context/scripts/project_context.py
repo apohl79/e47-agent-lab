@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import getpass
 import hashlib
 import hmac
@@ -14,12 +15,15 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import unicodedata
 import uuid
+from contextlib import contextmanager
 from copy import deepcopy
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 
 SCHEMA_VERSION = 3
@@ -51,6 +55,39 @@ GIT_STORE_MANIFEST_FILE = "project-context-store.json"
 GIT_STORE_SCHEMA_VERSION = 1
 GIT_STORE_PROJECTS_DIR = "projects"
 GIT_STORE_SCOPES_DIR = "scopes"
+GIT_STORE_BRANCH = "main"
+GIT_STORE_MANAGED_PATHS = (
+    GIT_STORE_MANIFEST_FILE,
+    ":(glob)projects/*/context.json",
+    ":(glob)scopes/**/context.json",
+)
+GIT_STORE_STAGE_PATHS = (
+    GIT_STORE_MANIFEST_FILE,
+    GIT_STORE_PROJECTS_DIR,
+    GIT_STORE_SCOPES_DIR,
+)
+GIT_STORE_UNMANAGED_PATHS = (
+    ".",
+    f":(exclude){GIT_STORE_MANIFEST_FILE}",
+    ":(exclude,glob)projects/*/context.json",
+    ":(exclude,glob)scopes/**/context.json",
+)
+GIT_STORE_MUTATING_COMMANDS = frozenset(
+    {
+        "add-component",
+        "add-pattern",
+        "add-question",
+        "add-term",
+        "domain-remove",
+        "domain-set",
+        "init",
+        "move",
+        "remove",
+        "update",
+    }
+)
+GIT_STORE_LOCK_TIMEOUT_SECONDS = 30
+GIT_STORE_NETWORK_TIMEOUT_SECONDS = 30
 GLOBAL_INDEX_SCHEMA_VERSION = 3
 GLOBAL_RELATIONSHIP_GRAPH_SCHEMA_VERSION = 1
 GLOBAL_LEGACY_RECORD_CATALOG_SCHEMA_VERSION = 1
@@ -122,6 +159,14 @@ REMOVE_TARGETS = {
 
 SearchSpec = tuple[str, str, str, str, tuple[str, ...]]
 SearchResult = tuple[int, str, str, str, str, str, tuple[str, ...]]
+
+
+@dataclass(frozen=True)
+class GitUpstream:
+    remote: str
+    branch: str
+    push_url: str
+
 
 SEARCH_SPECS: tuple[SearchSpec, ...] = (
     (
@@ -1300,6 +1345,250 @@ def git_output(cwd: Path, *args: str) -> str | None:
     return output if proc.returncode == 0 and output else None
 
 
+def git_process(
+    cwd: Path,
+    *arguments: str,
+    timeout: int = GIT_STORE_NETWORK_TIMEOUT_SECONDS,
+) -> subprocess.CompletedProcess[str]:
+    environment = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+    try:
+        return subprocess.run(
+            ["git", *arguments],
+            cwd=str(cwd),
+            env=environment,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise SystemExit(f"Git context store command failed: {exc}") from exc
+
+
+def git_error_detail(proc: subprocess.CompletedProcess[str]) -> str:
+    detail = (proc.stderr or proc.stdout).strip()
+    return safe_display_field(
+        detail or f"git exited with status {proc.returncode}",
+        DIAGNOSTIC_OUTPUT_LIMIT,
+    )
+
+
+def git_checked(
+    cwd: Path,
+    *arguments: str,
+    action: str,
+) -> subprocess.CompletedProcess[str]:
+    proc = git_process(cwd, *arguments)
+    if proc.returncode != 0:
+        raise SystemExit(f"Git context store {action} failed: {git_error_detail(proc)}")
+    return proc
+
+
+def git_config_value(root: Path, key: str) -> str | None:
+    proc = git_process(root, "config", "--get", key)
+    if proc.returncode == 1:
+        return None
+    if proc.returncode != 0:
+        raise SystemExit(
+            f"Git context store configuration read failed: {git_error_detail(proc)}"
+        )
+    value = proc.stdout.strip()
+    return value or None
+
+
+def git_store_upstream(root: Path) -> GitUpstream:
+    branch_proc = git_process(root, "symbolic-ref", "--quiet", "--short", "HEAD")
+    branch = branch_proc.stdout.strip()
+    if branch_proc.returncode != 0 or not branch:
+        raise SystemExit(
+            "Git context store must use an attached branch for automatic push."
+        )
+    if branch != GIT_STORE_BRANCH:
+        raise SystemExit(
+            f"Git context store must be checked out on {GIT_STORE_BRANCH} for "
+            "automatic push."
+        )
+    remote = git_config_value(root, f"branch.{branch}.remote")
+    merge = git_config_value(root, f"branch.{branch}.merge")
+    target = merge.removeprefix("refs/heads/") if merge else None
+    if remote in (None, ".") or not target or target == merge:
+        remotes = tuple(
+            item
+            for item in git_checked(
+                root, "remote", action="remote lookup"
+            ).stdout.splitlines()
+            if item
+        )
+        if len(remotes) != 1:
+            raise SystemExit(
+                "Git context store requires one configured push remote or an exact "
+                "branch upstream."
+            )
+        remote = remotes[0]
+        target = branch
+    if target != GIT_STORE_BRANCH:
+        raise SystemExit(f"Git context store must push directly to {GIT_STORE_BRANCH}.")
+    push_url = git_checked(
+        root, "remote", "get-url", "--push", remote, action="push remote lookup"
+    ).stdout.strip()
+    return GitUpstream(remote=remote, branch=target, push_url=push_url)
+
+
+def git_head_exists(root: Path) -> bool:
+    proc = git_process(root, "rev-parse", "--verify", "HEAD")
+    if proc.returncode not in (0, 128):
+        raise SystemExit(
+            f"Git context store HEAD lookup failed: {git_error_detail(proc)}"
+        )
+    return proc.returncode == 0
+
+
+def git_remote_branch_exists(root: Path, upstream: GitUpstream) -> bool:
+    proc = git_process(
+        root,
+        "ls-remote",
+        "--exit-code",
+        "--heads",
+        upstream.remote,
+        f"refs/heads/{upstream.branch}",
+    )
+    if proc.returncode not in (0, 2):
+        raise SystemExit(
+            f"Git context store remote lookup failed: {git_error_detail(proc)}"
+        )
+    return proc.returncode == 0
+
+
+def git_status_for_paths(root: Path, paths: tuple[str, ...]) -> str:
+    proc = git_checked(
+        root,
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+        "--",
+        *paths,
+        action="status inspection",
+    )
+    return proc.stdout.strip()
+
+
+def require_no_unmanaged_git_store_changes(root: Path) -> None:
+    status = git_status_for_paths(root, GIT_STORE_UNMANAGED_PATHS)
+    if status:
+        raise SystemExit(
+            "Git context store has unmanaged changes outside curator paths: "
+            + safe_display_field(status, DIAGNOSTIC_OUTPUT_LIMIT)
+        )
+
+
+def commit_git_store_changes(root: Path, message: str) -> bool:
+    if not git_status_for_paths(root, GIT_STORE_MANAGED_PATHS):
+        return False
+    paths = tuple(
+        path
+        for path in GIT_STORE_STAGE_PATHS
+        if (root / path).exists() or git_process(root, "ls-files", "--", path).stdout
+    )
+    git_checked(root, "add", "-A", "--", *paths, action="staging")
+    diff = git_process(root, "diff", "--cached", "--quiet")
+    if diff.returncode == 0:
+        return False
+    if diff.returncode != 1:
+        raise SystemExit(
+            f"Git context store staged diff failed: {git_error_detail(diff)}"
+        )
+    git_checked(root, "commit", "-m", message, action="commit")
+    return True
+
+
+def rebase_git_store(root: Path, upstream: GitUpstream) -> None:
+    proc = git_process(
+        root,
+        "pull",
+        "--rebase",
+        "--no-autostash",
+        upstream.remote,
+        upstream.branch,
+    )
+    if proc.returncode == 0:
+        return
+    git_process(root, "rebase", "--abort")
+    raise SystemExit(
+        f"Git context store upstream sync failed: {git_error_detail(proc)}"
+    )
+
+
+def push_git_store(
+    root: Path, upstream: GitUpstream
+) -> subprocess.CompletedProcess[str]:
+    return git_process(
+        root,
+        "push",
+        "--set-upstream",
+        upstream.remote,
+        f"HEAD:refs/heads/{upstream.branch}",
+    )
+
+
+def push_git_store_commit(root: Path, upstream: GitUpstream) -> None:
+    proc = push_git_store(root, upstream)
+    if proc.returncode == 0:
+        return
+    first_error = git_error_detail(proc)
+    try:
+        if git_remote_branch_exists(root, upstream):
+            rebase_git_store(root, upstream)
+            retry = push_git_store(root, upstream)
+            if retry.returncode == 0:
+                return
+            first_error = git_error_detail(retry)
+    except SystemExit as exc:
+        first_error = safe_display_field(exc, DIAGNOSTIC_OUTPUT_LIMIT)
+    raise SystemExit(
+        "Git context update was committed locally but push failed: " + first_error
+    )
+
+
+def prepare_git_store(root: Path, upstream: GitUpstream) -> None:
+    require_no_unmanaged_git_store_changes(root)
+    remote_exists = git_remote_branch_exists(root, upstream)
+    local_exists = git_head_exists(root)
+    if remote_exists and not local_exists:
+        raise SystemExit(
+            "Git context store upstream has history but the local branch has no commit."
+        )
+    commit_git_store_changes(root, "chore(context): persist pending updates")
+    if remote_exists:
+        rebase_git_store(root, upstream)
+    if git_head_exists(root):
+        push_git_store_commit(root, upstream)
+
+
+@contextmanager
+def git_store_lock(root: Path) -> Iterator[None]:
+    git_dir = git_path(root, "--git-dir")
+    if git_dir is None:
+        raise SystemExit(f"Git context store has no Git directory: {root}")
+    lock_path = git_dir / "project-context-curator.lock"
+    deadline = time.monotonic() + GIT_STORE_LOCK_TIMEOUT_SECONDS
+    with lock_path.open("a+", encoding="utf-8") as handle:
+        while True:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise SystemExit(
+                        "Timed out waiting for the Git context store lock."
+                    )
+                time.sleep(0.1)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 def git_path(cwd: Path, option: str) -> Path | None:
     raw = git_output(cwd, "rev-parse", option)
     if raw is None:
@@ -1458,6 +1747,10 @@ def ensure_record_identities(data: dict[str, Any]) -> None:
                 )
 
 
+def legacy_context_store_id(path: Path) -> str:
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"project-context:{path.resolve()}"))
+
+
 def default_context() -> dict[str, Any]:
     data = {
         "schema_version": SCHEMA_VERSION,
@@ -1504,7 +1797,6 @@ def migrate_v1_to_v2(data: dict[str, Any]) -> dict[str, Any]:
 def migrate_v2_to_v3(data: dict[str, Any]) -> dict[str, Any]:
     migrated = deepcopy(data)
     migrated["schema_version"] = 3
-    ensure_record_identities(migrated)
     return migrated
 
 
@@ -1676,6 +1968,8 @@ def load_context_file(path: Path) -> tuple[dict[str, Any], tuple[str, ...]]:
     migrated, applied = migrate_context(data)
     merged = default_context()
     merged.update(migrated)
+    if not str(migrated.get("store_id", "")):
+        merged["store_id"] = legacy_context_store_id(path)
     for key in ("terms", "components", "patterns", "open_questions"):
         if not isinstance(merged.get(key), list):
             raise SystemExit(f"Invalid context field {key}: expected list")
@@ -2323,6 +2617,7 @@ def git_store_migration_plan(
         raise SystemExit(
             f"A different Git context store is already configured: {configured['path']}"
         )
+    upstream = git_store_upstream(store_root)
     manifest = load_git_store_manifest(store_root)
     project_moves: list[dict[str, Any]] = []
     blockers: list[str] = []
@@ -2416,6 +2711,11 @@ def git_store_migration_plan(
         "store": str(store_root),
         "store_id": manifest["store_id"],
         "manifest_hash": path_content_hash(git_store_manifest_path(store_root)),
+        "upstream": {
+            "remote": upstream.remote,
+            "branch": upstream.branch,
+            "push_url_hash": hashlib.sha256(upstream.push_url.encode()).hexdigest(),
+        },
         "projects": [
             {
                 "project": str(item["project"]),
@@ -2447,6 +2747,7 @@ def git_store_migration_plan(
         "project_moves": tuple(project_moves),
         "scope_moves": tuple(scope_moves),
         "private_count": private_count,
+        "upstream": upstream,
         "token": token,
     }
 
@@ -2533,6 +2834,7 @@ def local_storage_migration_plan(
         }
 
     configured, root, manifest = require_configured_git_store()
+    upstream = git_store_upstream(root)
     projects_by_id = bound_projects_by_store_id(configured, manifest)
     project_moves: list[dict[str, Any]] = []
     blockers: list[str] = []
@@ -2615,6 +2917,11 @@ def local_storage_migration_plan(
         "config_hash": path_content_hash(global_config_dir() / GLOBAL_CONFIG_FILE),
         "store": str(root),
         "manifest_hash": path_content_hash(git_store_manifest_path(root)),
+        "upstream": {
+            "remote": upstream.remote,
+            "branch": upstream.branch,
+            "push_url_hash": hashlib.sha256(upstream.push_url.encode()).hexdigest(),
+        },
         "projects": [
             {
                 "project": str(item["project"]),
@@ -2645,6 +2952,7 @@ def local_storage_migration_plan(
         "project_moves": tuple(project_moves),
         "scope_moves": tuple(scope_moves),
         "store_root": root,
+        "upstream": upstream,
         "token": token,
     }
 
@@ -2657,12 +2965,19 @@ def snapshot_path_value(path: Path) -> str:
 
 
 def print_git_store_preview(root: Path, plan: dict[str, Any]) -> None:
+    upstream = plan["upstream"]
     print(
         json.dumps(
             {
                 "type": UNTRUSTED_SNAPSHOT_TYPE,
                 "change": "git_store",
                 "store_path": snapshot_path_value(root),
+                "push_remote": safe_display_field(
+                    upstream.remote, GLOBAL_LABEL_OUTPUT_LIMIT
+                ),
+                "push_branch": safe_display_field(
+                    upstream.branch, GLOBAL_LABEL_OUTPUT_LIMIT
+                ),
             },
             ensure_ascii=True,
             sort_keys=True,
@@ -2715,6 +3030,14 @@ def print_storage_migration_preview(plan: dict[str, Any]) -> None:
     store_root = plan.get("store_root")
     if isinstance(store_root, Path):
         event["store_path"] = snapshot_path_value(store_root)
+    upstream = plan.get("upstream")
+    if isinstance(upstream, GitUpstream):
+        event["push_remote"] = safe_display_field(
+            upstream.remote, GLOBAL_LABEL_OUTPUT_LIMIT
+        )
+        event["push_branch"] = safe_display_field(
+            upstream.branch, GLOBAL_LABEL_OUTPUT_LIMIT
+        )
     print(json.dumps(event, ensure_ascii=True, sort_keys=True))
     print(f"Project contexts to move: {len(plan['project_moves'])}")
     for item in plan["project_moves"]:
@@ -2975,7 +3298,6 @@ def storage_migrate(args: argparse.Namespace) -> None:
     print(f"Storage runtime configured: {args.target}")
     print(f"Project contexts moved: {len(plan['project_moves'])}")
     print(f"Shareable scope contexts moved: {len(plan['scope_moves'])}")
-    print("Git commit and push were not run.")
 
 
 def git_store_init(args: argparse.Namespace) -> None:
@@ -2999,7 +3321,6 @@ def git_store_init(args: argparse.Namespace) -> None:
     print(f"Git context store configured: {root}")
     print(f"Project contexts moved: {len(plan['project_moves'])}")
     print(f"Shareable scope contexts moved: {len(plan['scope_moves'])}")
-    print("Git commit and push were not run.")
 
 
 def require_configured_git_store() -> tuple[dict[str, Any], Path, dict[str, Any]]:
@@ -3068,8 +3389,10 @@ def git_store_bind(args: argparse.Namespace) -> None:
 
 def git_store_status(args: argparse.Namespace) -> None:
     configured, root, manifest = require_configured_git_store()
+    upstream = git_store_upstream(root)
     print(f"Git context store: {root}")
     print(f"Store id: {manifest['store_id']}")
+    print(f"Push upstream: {upstream.remote}/{upstream.branch}")
     print(f"Configured project bindings: {len(configured['project_bindings'])}")
     for project_id, metadata in sorted(manifest["projects"].items()):
         name = safe_display_field(metadata.get("name", ""), GLOBAL_LABEL_OUTPUT_LIMIT)
@@ -4139,10 +4462,76 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def git_store_mutation_root(args: argparse.Namespace) -> Path | None:
+    if args.command == "storage-migrate":
+        if not args.approve_snapshot:
+            return None
+        if args.target == "git-store":
+            if args.store is None or args.project_visibility is not None:
+                return None
+            candidate = args.store
+        else:
+            if (
+                args.store is not None
+                or args.workspace_root
+                or not args.project_visibility
+            ):
+                return None
+            candidate = configured_git_store_root()
+        return validate_git_store_root(candidate) if candidate is not None else None
+    if args.command == "git-store-init":
+        return validate_git_store_root(args.store) if args.approve_snapshot else None
+    if args.command not in GIT_STORE_MUTATING_COMMANDS:
+        return None
+    candidate = configured_git_store_root()
+    return validate_git_store_root(candidate) if candidate is not None else None
+
+
+def storage_plan_workspace_roots(args: argparse.Namespace) -> tuple[Path, ...]:
+    configured_roots = workspace_roots(global_config())
+    return (
+        validate_workspace_roots(args.workspace_root)
+        if args.workspace_root
+        else configured_roots
+    )
+
+
+def validate_git_store_approval(args: argparse.Namespace, root: Path) -> None:
+    if args.command not in {"storage-migrate", "git-store-init"}:
+        return
+    repo = context_repo(args.repo)
+    if args.command == "storage-migrate" and args.target == "local":
+        plan = local_storage_migration_plan(args.project_visibility)
+    else:
+        plan = git_store_migration_plan(
+            repo,
+            root,
+            storage_plan_workspace_roots(args),
+        )
+    validate_snapshot_approval({"snapshot": plan["token"]}, args.approve_snapshot)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    args.func(args)
+    root = git_store_mutation_root(args)
+    if root is None:
+        args.func(args)
+        return 0
+    with git_store_lock(root):
+        validate_git_store_approval(args, root)
+        upstream = git_store_upstream(root)
+        prepare_git_store(root, upstream)
+        args.func(args)
+        changed = commit_git_store_changes(
+            root,
+            f"chore(context): apply {args.command}",
+        )
+        if changed:
+            push_git_store_commit(root, upstream)
+    remote = safe_display_field(upstream.remote, GLOBAL_LABEL_OUTPUT_LIMIT)
+    branch = safe_display_field(upstream.branch, GLOBAL_LABEL_OUTPUT_LIMIT)
+    print(f"Git context store synchronized: {remote}/{branch}")
     return 0
 
 

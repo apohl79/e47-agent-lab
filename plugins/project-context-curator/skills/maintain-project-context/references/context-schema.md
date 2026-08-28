@@ -197,25 +197,31 @@ XDG configuration records the runtime decision, store checkout path, store
 identity, and absolute checkout-to-project-ID bindings. `storage-migrate
 --target git-store` changes that configuration only after an exact snapshot
 approval. Its token covers source and destination
-paths and content hashes plus the current manifest. It validates all conflicts,
-writes canonical destinations and the manifest, writes local configuration,
-then removes relocated sources. User/machine stores are excluded. Existing
-workspace records block the operation until explicit reclassification.
+paths and content hashes, the current manifest, and the exact push remote,
+branch, and hashed push URL. It validates all conflicts, writes canonical
+destinations and the manifest, writes local configuration, removes relocated
+sources, then commits and pushes curator-managed paths. User/machine stores are
+excluded. Existing workspace records block the operation until explicit
+reclassification.
 
 `storage-migrate --target local` performs the inverse operation. Every manifest
 project must have exactly one existing local checkout binding. Its token covers
 the store manifest, XDG configuration, visibility choice, and every source and
 destination hash. Approval writes all project and scope destinations first,
 persists local mode, refreshes project policies and views, then removes the
-Git-store canonical JSON and manifest. Unknown files and Git history are
-untouched.
+Git-store canonical JSON and manifest. The removals are committed and pushed;
+unknown files and unrelated Git history are untouched.
 
 On another machine, configure the cloned store through the same preview/approval
 flow, list IDs with `git-store-status`, and attach each checkout with
 `git-store-bind --project-store-id <uuid>`. Binding regenerates local Markdown
 views and restores domain membership. `git-store-init` remains a compatible
-one-way command for existing automation. No updater command commits or pushes
-Git.
+one-way command for existing automation. Git-store mutations require the
+checkout on `main`, synchronize the configured remote's `main`, stage only the
+manifest and canonical context paths, create one Conventional Commit when
+content changed, and push directly to `main`. A no-op creates no commit.
+Unrelated dirty files block mutation, while a rejected post-write push retains
+the local commit and returns an error.
 
 ## Record Identity and Provenance
 

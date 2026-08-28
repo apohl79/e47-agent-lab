@@ -82,6 +82,27 @@ def git_init(repo: Path) -> None:
     )
 
 
+def configure_test_upstream(repo: Path) -> None:
+    remote = repo.with_name(f"{repo.name}-remote.git")
+    hooks = repo.with_name(f"{repo.name}-hooks")
+    remote.mkdir()
+    hooks.mkdir()
+    subprocess.run(["git", "init", "--bare"], cwd=remote, check=True)
+    commands = (
+        ("symbolic-ref", "HEAD", "refs/heads/main"),
+        ("remote", "add", "origin", str(remote)),
+        ("branch", "-M", "main"),
+        ("config", "branch.main.remote", "origin"),
+        ("config", "branch.main.merge", "refs/heads/main"),
+        ("config", "user.email", "test@example.com"),
+        ("config", "user.name", "Test User"),
+        ("config", "commit.gpgsign", "false"),
+        ("config", "core.hooksPath", str(hooks)),
+    )
+    for command in commands:
+        subprocess.run(["git", *command], cwd=repo, check=True)
+
+
 def git_commit(repo: Path, message: str = "initial commit") -> None:
     subprocess.run(
         ["git", "config", "user.email", "test@example.com"],
@@ -238,6 +259,7 @@ def test_session_start_reads_git_backed_canonical_project_context(
     git_init(repo)
     store.mkdir()
     git_init(store)
+    configure_test_upstream(store)
     project_id = "b7e8f44a-518d-440b-b4b7-c6f05ba127b5"
     canonical = store / f"projects/{project_id}/context.json"
     canonical.parent.mkdir(parents=True)

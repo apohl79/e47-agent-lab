@@ -97,7 +97,9 @@ def test_discovery_skips_dependency_copies_and_linked_worktrees(
     create_git_repository(primary)
     create_git_repository(dependency)
     linked.mkdir(parents=True)
-    (linked / ".git").write_text("gitdir: ../primary/.git/worktrees/linked\n", encoding="utf-8")
+    (linked / ".git").write_text(
+        "gitdir: ../primary/.git/worktrees/linked\n", encoding="utf-8"
+    )
     symlinked.mkdir(parents=True)
     external_git.mkdir()
     (symlinked / ".git").symlink_to(external_git, target_is_directory=True)
@@ -122,6 +124,24 @@ def test_discovery_deduplicates_repositories_under_overlapping_roots(
     discovered = backend.discover_context_candidates((workspace, group))
 
     expected = (source(backend, project, workspace),)
+    assert discovered == (expected, expected)
+
+
+def test_discovery_excludes_git_context_store_repository(
+    backend: ModuleType,
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    ordinary = workspace / "ordinary"
+    store = workspace / "context-store"
+    create_git_repository(ordinary)
+    create_git_repository(store)
+    write_context(store)
+    (store / "project-context-store.json").write_text("{}\n", encoding="utf-8")
+
+    discovered = backend.discover_context_candidates((workspace,))
+
+    expected = (source(backend, ordinary, workspace),)
     assert discovered == (expected, expected)
 
 

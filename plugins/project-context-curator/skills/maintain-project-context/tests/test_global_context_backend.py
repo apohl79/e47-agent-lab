@@ -113,6 +113,41 @@ def test_records_inherit_collection_applicability_and_allow_fact_override(
     assert records[0].applicability == (("universal", "*"),)
 
 
+def test_external_source_keeps_bound_project_identity(tmp_path: Path) -> None:
+    module = load_backend_module()
+    workspace = tmp_path / "workspace"
+    project = workspace / "codex-providers"
+    canonical_root = tmp_path / "context-store-entry"
+    write_context(canonical_root, summary="Owns provider integrations")
+    canonical = canonical_root / "docs/context/context.json"
+    source = module.ContextSource(
+        source_path=str(canonical),
+        project_path=str(project),
+        workspace_root=str(workspace),
+    )
+
+    records, active, failures, failed = module.load_source_records((source,))
+
+    record = records[0]
+    assert (
+        active,
+        failures,
+        failed,
+        record.project,
+        record.project_path,
+        record.source_path,
+        record.applicability,
+    ) == (
+        (source,),
+        (),
+        frozenset(),
+        "codex-providers",
+        str(project),
+        str(canonical),
+        (("project", str(project)),),
+    )
+
+
 def test_invalid_canonical_applicability_is_skipped(tmp_path: Path) -> None:
     module = load_backend_module()
     workspace = tmp_path / "workspace"
