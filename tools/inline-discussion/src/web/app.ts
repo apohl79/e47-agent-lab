@@ -13,6 +13,7 @@ import type {
   SourceRange,
   Thread,
 } from '../types.ts';
+import { ALLOWED_URI_REGEXP } from '../uri-policy.ts';
 import {
   composerKeyAction,
   composerNoteModifierActive,
@@ -116,6 +117,7 @@ function renderMarkdown(text: string): string {
   return DOMPurify.sanitize(raw, {
     ADD_TAGS: ['details', 'summary'] as string[],
     ADD_ATTR: ['checked', 'disabled', 'type'] as string[],
+    ALLOWED_URI_REGEXP,
   });
 }
 
@@ -945,6 +947,7 @@ function renderDoc(html: string): void {
       'disabled',
       'type',
     ] as string[],
+    ALLOWED_URI_REGEXP,
   });
   document.getElementById('doc')!.innerHTML = clean;
   scheduleMermaidRender();

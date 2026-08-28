@@ -8,6 +8,7 @@ import DOMPurify from 'isomorphic-dompurify';
 import { JSDOM } from 'jsdom';
 import { escapeHtml } from './html.ts';
 import { formatSourceRange, parseSourceReference } from './source-reference.ts';
+import { ALLOWED_URI_REGEXP } from './uri-policy.ts';
 
 const KIND_MAP: Record<string, BlockKind | undefined> = {
   heading: 'heading',
@@ -168,8 +169,6 @@ renderer.code = function (code: string, infostring: string | undefined, _escaped
 // remain whitespace, while blank lines continue to separate blocks.
 marked.use({ renderer, gfm: true, breaks: false });
 
-const ALLOWED_URI_REGEXP = /^(?:(?:(?:f|ht)tps?|mailto|tel|callto|sms|cid|xmpp|matrix|slack):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i;
-
 const SANITIZE_OPTS = {
   ADD_TAGS: ['details', 'summary', 'del', 's', 'strike'],
   ADD_ATTR: ['data-block-id', 'data-thread-id', 'data-source-start-line', 'data-source-end-line', 'data-task-checkbox-index', 'checked', 'disabled', 'type'],
@@ -229,20 +228,18 @@ export function renderDoc(markdown: string, documentPath?: string): RenderedDoc 
   const headingIds = new Map<string, number>();
   const pieces = parsed.blocks.map((block) => {
     const clean = DOMPurify.sanitize(preserveInlineSemantics(block.html), SANITIZE_OPTS);
-    const withDocumentAssets = documentPath
-      ? rewriteRelativeDocumentUrls(clean, documentPath)
-      : clean;
+    const withDocumentAssets = rewriteDocumentUrls(clean, documentPath);
     return injectBlockIdViaDom(withDocumentAssets, block, headingIds);
   });
   return { ...parsed, html: pieces.join('\n') };
 }
 
-function rewriteRelativeDocumentUrls(fragmentHtml: string, documentPath: string): string {
+function rewriteDocumentUrls(fragmentHtml: string, documentPath?: string): string {
   const dom = new JSDOM(`<div id="root">${fragmentHtml}</div>`);
   const root = dom.window.document.getElementById('root')!;
   for (const image of Array.from(root.querySelectorAll<HTMLImageElement>('img[src]'))) {
     const source = image.getAttribute('src')?.trim();
-    if (!source || !isRelativeUrl(source)) continue;
+    if (!source || !documentPath || !isRelativeUrl(source)) continue;
     const hash = source.indexOf('#');
     const withoutHash = hash >= 0 ? source.slice(0, hash) : source;
     const query = withoutHash.indexOf('?');
@@ -255,10 +252,29 @@ function rewriteRelativeDocumentUrls(fragmentHtml: string, documentPath: string)
   }
   for (const anchor of Array.from(root.querySelectorAll<HTMLAnchorElement>('a[href]'))) {
     const target = anchor.getAttribute('href')?.trim();
-    if (!target || !isRelativeUrl(target)) continue;
+    if (!target) continue;
+    const slackTarget = normalizeSlackChannelTarget(target);
+    if (slackTarget) {
+      anchor.setAttribute('href', slackTarget);
+      continue;
+    }
+    if (!documentPath || !isRelativeUrl(target)) continue;
     anchor.setAttribute('href', resolveRelativeLinkTarget(target, documentPath));
   }
   return root.innerHTML;
+}
+
+function normalizeSlackChannelTarget(target: string): string | null {
+  try {
+    const url = new URL(target);
+    const team = url.searchParams.get('team');
+    const id = url.searchParams.get('id');
+    return url.protocol === 'slack:' && url.hostname === 'channel' && team && id
+      ? `slack://channel?${new URLSearchParams({ team, id }).toString()}`
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 function resolveRelativeLinkTarget(target: string, documentPath: string): string {
