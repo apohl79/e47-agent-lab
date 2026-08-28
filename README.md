@@ -9,7 +9,7 @@ Dual-host plugin marketplace for Codex and Claude Code.
 | `reviewers` | `0.7.1` | PR finalization, reviewer-team, and Slack review-request workflows. | `plugins/reviewers` | Codex, Claude Code |
 | `auto-compaction` | `0.1.0` | Claude Code auto-compaction gate with setup skill and checkpoint hooks. | `plugins/auto-compaction` | Claude Code |
 | `inline-discussion` | `1.7.7` | Browser UI for markdown docs with threaded AI conversations. Requires the `inline-discussion` CLI on PATH (installed by `./install.sh`). | `plugins/inline-discussion` | Codex, Claude Code |
-| `project-context-curator` | `3.0.0` | Canonical project, private XDG, and optional Git-backed context with graph-assisted hybrid retrieval. | `plugins/project-context-curator` | Codex, Claude Code |
+| `project-context-curator` | `3.1.0` | Selectable local or Git-backed canonical context with graph-assisted hybrid retrieval. | `plugins/project-context-curator` | Codex, Claude Code |
 
 ## Install
 
@@ -47,12 +47,12 @@ Applicability remains the truth scope: non-project selectors such as domain,
 user, machine, and universal must still all be active. Ranking
 combines hybrid relevance, graph distance and confidence, and per-project quotas.
 
-Shareable context can optionally use one dedicated Git checkout as its canonical
-store. `git-store-init` previews and hashes the exact project/domain/universal
-migration before approval; user/machine context stays private in XDG. Project
-checkouts keep generated views, and the updater never commits or pushes the
-store. Stable IDs plus `git-store-bind` restore a cloned store on another
-machine. See the Project Context Curator skill for the complete workflow.
+Initial setup asks the user to select local/distributed or dedicated Git-backed
+canonical storage. `$configure-context-storage` uses `storage-migrate` to preview
+and hash every move before approval and can switch modes in either direction.
+User/machine context stays private in XDG, identities and provenance survive the
+migration, and the updater never commits or pushes. Stable IDs plus
+`git-store-bind` restore a cloned store on another machine.
 
 `./install.sh --with-context-runtime` remains a deterministic convenience for
 provisioning the same runtime directly.

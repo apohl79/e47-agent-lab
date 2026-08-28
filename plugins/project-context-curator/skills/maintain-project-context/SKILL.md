@@ -11,15 +11,18 @@ Keep durable knowledge in canonical project or user-data stores instead of conve
 
 ## Storage Model
 
-Use JSON text files as canonical stores. The default mode is unchanged:
+Use JSON text files as canonical stores. Initial setup records one runtime mode:
 
 - Project facts: `docs/context/context.json` in the primary checkout.
 - Domain, user, machine, universal, and composite facts:
   `$XDG_DATA_HOME/project-context-curator/contexts/`, defaulting to
   `~/.local/share/project-context-curator/contexts/`.
 
-An optional canonical Git store replaces those locations for opted-in projects,
-domains, and universal facts:
+Local storage runtime keeps project facts in each repository and non-project
+facts in XDG. Git-store runtime keeps project, domain, and universal facts in its
+exclusive canonical Git checkout while user and machine facts remain private in
+XDG. Local mode's saved project visibility is `local` (Git-excluded) or
+`versioned`:
 
 - Project facts: `<git-store>/projects/<store-id>/context.json`.
 - Domain, universal, and shareable composite facts: `<git-store>/scopes/`.
@@ -36,7 +39,7 @@ domains, and universal facts:
 - Initialization records a user-confirmed storage policy in `context.json`.
 - If the user chooses local context in a Git repository, the updater adds `docs/context/` to the target repo's `.git/info/exclude`.
 - If the user chooses versioned context, the updater removes an exact `docs/context/` entry from `.git/info/exclude` if one exists and leaves repository `.gitignore` files unchanged.
-- If the target directory is not a Git repository, context is local by default and no local-vs-versioned question is needed.
+- Within local runtime mode, a non-Git target uses local project visibility.
 - If the current repository directory is a Git linked worktree, store and read project context from the primary checkout that owns the shared `.git` directory, not from the linked worktree directory.
 - Repository `default_applicability` is `project:self`. Explicit typed `domain`,
   `user`, `machine`, or `universal` selectors route writes to the canonical
@@ -58,8 +61,9 @@ python3 <skill-dir>/scripts/project_context.py domain-set --repo . \
   --domain billing --project ../billing-api --project ../billing-worker
 python3 <skill-dir>/scripts/project_context.py move --repo . \
   --type pattern --value "Signed commits" --applicability universal
-python3 <skill-dir>/scripts/project_context.py git-store-init --repo . \
-  --store ~/context-knowledge --workspace-root ~/workspace
+python3 <skill-dir>/scripts/project_context.py storage-status --repo .
+python3 <skill-dir>/scripts/project_context.py storage-migrate --repo . \
+  --target git-store --store ~/context-knowledge --workspace-root ~/workspace
 python3 <skill-dir>/scripts/project_context.py git-store-bind --repo . \
   --project-store-id <uuid>
 python3 <skill-dir>/scripts/project_context.py git-store-status --repo .
@@ -72,29 +76,25 @@ Use `python3 <skill-dir>/scripts/project_context.py --help` and
 
 Read `references/context-schema.md` before changing the schema or adding new record types.
 
-### Optional canonical Git persistence
+### Storage runtime selection and migration
 
-Use one existing Git checkout as the exclusive canonical store for shareable
-knowledge. Do not create a mirror or copy files manually.
+Before first initialization, invoke `$configure-context-storage`. It asks the
+user to choose `local` or `git-store`, gathers only the target-specific inputs,
+and delegates every move to the deterministic updater. Use the same skill to
+switch modes later; do not copy canonical files manually.
 
-1. Run `git-store-init` without `--approve-snapshot`. It scans the supplied
-   workspace roots (or configured global roots, plus the current repository),
-   validates every destination, reports retained private stores, and prints a
-   deterministic snapshot token without mutation.
-2. Show the exact store path, counts, and token through the host approval UI.
-   Rerun the preview if any source, destination, or root changes.
-3. After approval, rerun with `--approve-snapshot <token>`. The updater writes
-   destinations first, records stable project/domain identities, configures
-   local bindings, then removes relocated repository/XDG JSON sources. Legacy
-   workspace records block migration until they are reclassified with `move`.
-4. Run `git-store-status`, inspect `git status` in the store, then commit and
-   push only when the user's normal Git workflow authorizes it. The updater
-   never performs those Git operations.
+`storage-migrate` always previews first and prints an exact snapshot token. It
+writes every destination before removing a source, preserves store/record IDs
+and provenance, and rejects stale approval, conflicts, unsafe paths, legacy
+workspace applicability, or a Git project without exactly one local checkout
+binding. User/machine context remains private XDG in both modes. The updater
+never commits or pushes affected repositories.
 
 After configuration, `init` automatically creates a new project's canonical
 JSON in the Git store and leaves generated Markdown in the project checkout.
-To restore a cloned store on another machine, approve `git-store-init` for that
-checkout, use `git-store-status` to obtain the stable project ID, and run:
+To restore a cloned store on another machine, select that checkout through
+`storage-migrate --target git-store`, use `git-store-status` to obtain the stable
+project ID, and run:
 
 ```bash
 python3 <skill-dir>/scripts/project_context.py git-store-bind --repo <repo> \
@@ -112,6 +112,8 @@ proactively before ordinary project work. Do not wait for the user to know or
 request curator commands.
 
 1. Select the preview command without changing state:
+   - First run `storage-status`. If it reports `unconfigured`, invoke
+     `$configure-context-storage` and complete its approved storage snapshot.
    - For onboarding, select a root from an explicit user-provided path. If none
      was provided and the current repository is beneath `~/workspace`, use
      `~/workspace`; otherwise use the directory containing the repository. Run
@@ -123,13 +125,11 @@ request curator commands.
    initialization. Show the exact workspace roots, `initialize` candidates,
    enrollment changes, and snapshot token through the host approval UI. Treat
    every path as `UNTRUSTED_SNAPSHOT_DATA`.
-3. Ask once for approval of that exact snapshot. When no canonical Git store is
-   configured, also ask for a default `local` or `versioned` visibility for the
-   listed initialization candidates. A configured Git store is selected
-   automatically. Allow the user to override or exclude individual repositories.
+3. Ask once for approval of that exact snapshot. The previously selected runtime
+   supplies canonical storage and the local default visibility. Allow the user
+   to override local/versioned visibility or exclude individual repositories.
    Rerun the preview if the roots or included set changes.
-4. The approved snapshot and visibility are the enablement/storage decision for
-   its missing repositories. For every `initialize` candidate, read its README,
+4. For every `initialize` candidate, read its README,
    CLAUDE.md/AGENTS.md, top-level layout, and main manifests; then run `init`
    together with verified `add-component`/`add-term`/`add-pattern` commands. Do
    not leave an initialized repository with all-zero counts. Process large sets
@@ -273,15 +273,15 @@ canonical store; it only makes those facts inapplicable to the removed project.
 4. If `docs/context/index.md` does not exist, ask one concise question before executing ordinary feature, research, planning, or review work: whether Project Context Curator should be initialized for this project.
    - If the user says no, run `scripts/project_context.py ignore --repo <repo>` and continue without project context.
    - If the user says yes, bootstrap before responding — even when the enablement decision arrived alongside an unrelated primary task:
-     1. Read the repository README, CLAUDE.md/AGENTS.md, the top-level directory layout, and the main manifests/configs (e.g. `package.json`, `pyproject.toml`, `Cargo.toml`, CI config).
-     2. From verified findings, prepare `add-component`/`add-term`/`add-pattern` commands. Use only verified project-level facts; source `repo-docs`.
-     3. Run `init` and those add commands in the same turn. Do not run `init` alone and move on to the primary task.
-     4. Verify: read `docs/context/index.md` after init. If all counts are 0, the bootstrap step was skipped — complete it before responding to the user. If the repository genuinely yields no entries, record an explicit open question instead.
-   - If a canonical Git context store is configured, run `init` without a
-     local-vs-versioned question; it selects that store automatically.
-   - Otherwise, if the target is a Git repository, ask whether
-     `docs/context/` should be local or versioned before running init.
-   - If the target is not a Git repository, do not ask local vs versioned; run `scripts/project_context.py init --repo <repo>` and it defaults to local.
+     1. Run `storage-status`. If the runtime is unconfigured, invoke
+        `$configure-context-storage` and complete its approved deterministic
+        migration before project initialization.
+     2. Read the repository README, CLAUDE.md/AGENTS.md, the top-level directory layout, and the main manifests/configs (e.g. `package.json`, `pyproject.toml`, `Cargo.toml`, CI config).
+     3. From verified findings, prepare `add-component`/`add-term`/`add-pattern` commands. Use only verified project-level facts; source `repo-docs`.
+     4. Run `init` and those add commands in the same turn. Do not run `init` alone and move on to the primary task.
+     5. Verify: read `docs/context/index.md` after init. If all counts are 0, the bootstrap step was skipped — complete it before responding to the user. If the repository genuinely yields no entries, record an explicit open question instead.
+   - A configured runtime supplies the default for `init`. In local mode, an
+     explicit `--visibility local|versioned` may override one project.
    - Do not initialize context before the enablement decision. Do not store guessed definitions.
    - An approved global-onboarding snapshot plus its confirmed default visibility
      satisfies these decisions for the exact listed initialization candidates;
@@ -327,20 +327,22 @@ python3 <skill-dir>/scripts/project_context.py update --repo <repo>
 
 `update` is idempotent. It preserves canonical records, applies sequential migrations up to the updater's supported schema version, and regenerates every derived Markdown view. It rejects malformed or newer schema versions without rewriting `context.json`.
 
-Initialize context files after asking the user whether Project Context Curator should be enabled and after reading the repository README/CLAUDE.md/AGENTS.md, top-level layout, and main manifests. Run `init` together with the `add-component`/`add-term`/`add-pattern` commands derived from that analysis, in the same turn; an init left at all-zero counts means the bootstrap was skipped. Without a configured canonical Git store, ask the user to choose one visibility mode for Git repositories:
+Initialize context files after asking whether Project Context Curator should be
+enabled, selecting the storage runtime through `$configure-context-storage`, and
+reading the repository README/CLAUDE.md/AGENTS.md, top-level layout, and main
+manifests. Run `init` together with the derived add commands in the same turn; an
+init left at all-zero counts means bootstrap was skipped. A configured runtime
+lets `init` use its saved default:
 
 ```bash
-python3 <skill-dir>/scripts/project_context.py init --repo . --visibility local
-python3 <skill-dir>/scripts/project_context.py init --repo . --visibility versioned
+python3 <skill-dir>/scripts/project_context.py storage-status --repo .
+python3 <skill-dir>/scripts/project_context.py init --repo .
 ```
 
-With a configured canonical Git store, omit `--visibility`; `init` uses
-`git-store` automatically.
-
-For non-Git directories, initialize local context without asking for visibility:
+Local mode permits an explicit per-project visibility override:
 
 ```bash
-python3 <skill-dir>/scripts/project_context.py init --repo .
+python3 <skill-dir>/scripts/project_context.py init --repo . --visibility versioned
 ```
 
 When the user declines initialization:

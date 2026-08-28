@@ -1,7 +1,7 @@
 {
   "name": "project-context-curator",
-  "version": "3.0.0",
-  "description": "Maintains canonical project, private XDG, and optional Git-backed context with graph-assisted hybrid retrieval.",
+  "version": "3.1.0",
+  "description": "Maintains selectable local or Git-backed canonical context with graph-assisted hybrid retrieval.",
   "author": {
     "name": "Local developer"
   },
@@ -11,7 +11,7 @@
         "slot": "contextual_user",
         "position": "supplement",
         "condition_shell": "test \"${PROJECT_CONTEXT_CURATOR_DISABLED:-0}\" != \"1\" && root=\"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" && common=\"$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)\" && case \"$common\" in */.git) root=\"${common%/.git}\" ;; esac && test ! -e \"$root/.no-project-context\"",
-        "text": "Capture only durable knowledge. Before any add-* write, search existing context and admit a candidate only if it is expected to outlive the current task or branch, benefit unrelated future work, and is not ordinary implementation detail readily recoverable from code, tests, or docs. Update or consolidate an existing record instead of creating overlap. Do not record behavior introduced by active implementation until the work is complete and verified on a long-lived branch. An explicitly user-confirmed durable invariant or architectural decision may be captured earlier; phrase it as a decision or invariant, not as present behavior. Store admitted knowledge in the same turn. Facts default to project applicability. Without a configured Git context store, project facts stay in the repository and non-project facts use XDG. With one configured, project, domain, and universal facts use that exclusive canonical Git store while user and machine facts remain private in XDG. Classify as domain only from user confirmation, authoritative domain documentation, or corroborating evidence in multiple registered domain projects. Workspace applicability is legacy and read-only; use user or machine only for the current identity or environment and universal only for context-independent facts. Use move for promotion or reclassification so the canonical record keeps its identity and provenance instead of being duplicated."
+        "text": "Capture only durable knowledge. Before any add-* write, search existing context and admit a candidate only if it is expected to outlive the current task or branch, benefit unrelated future work, and is not ordinary implementation detail readily recoverable from code, tests, or docs. Update or consolidate an existing record instead of creating overlap. Do not record behavior introduced by active implementation until the work is complete and verified on a long-lived branch. An explicitly user-confirmed durable invariant or architectural decision may be captured earlier; phrase it as a decision or invariant, not as present behavior. Store admitted knowledge in the same turn. Facts default to project applicability. Local storage runtime keeps project facts in each repository and non-project facts in XDG. Git-store runtime keeps project, domain, and universal facts in its exclusive canonical Git checkout while user and machine facts remain private in XDG. Classify as domain only from user confirmation, authoritative domain documentation, or corroborating evidence in multiple registered domain projects. Workspace applicability is legacy and read-only; use user or machine only for the current identity or environment and universal only for context-independent facts. Use move for promotion or reclassification so the canonical record keeps its identity and provenance instead of being duplicated."
       }
     ]
   },
@@ -19,7 +19,7 @@
   "interface": {
     "displayName": "Project Context Curator",
     "shortDescription": "Capture durable project context.",
-    "longDescription": "Project Context Curator stores durable facts in repository, private XDG, or optional canonical Git stores and retrieves relevant context across named and related projects.",
+    "longDescription": "Project Context Curator selects and migrates durable facts between local and canonical Git storage, keeps private facts in XDG, and retrieves context across named and related projects.",
     "developerName": "Local developer",
     "category": "Productivity",
     "capabilities": [

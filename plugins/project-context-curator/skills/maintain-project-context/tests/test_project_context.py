@@ -124,14 +124,15 @@ def test_init_without_visibility_defaults_local_for_non_git(tmp_path: Path):
     assert not (tmp_path / ".gitignore").exists()
 
 
-def test_init_requires_visibility_decision_for_git_repo(tmp_path: Path):
+def test_init_requires_storage_runtime_decision_for_git_repo(tmp_path: Path):
     git_init(tmp_path)
 
     proc = run_context("init", repo=tmp_path)
 
     assert proc.returncode == 1
     assert proc.stdout == ""
-    assert "Context visibility decision required for Git repositories" in proc.stderr
+    assert "Storage runtime decision required for initial setup" in proc.stderr
+    assert "$configure-context-storage" in proc.stderr
     assert not (tmp_path / "docs" / "context").exists()
     assert not (tmp_path / ".gitignore").exists()
 

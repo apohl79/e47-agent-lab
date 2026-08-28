@@ -28,6 +28,8 @@ CONTEXT_FILE = CONTEXT_DIR / "context.json"
 GIT_EXCLUDE_ENTRY = "docs/context/"
 IGNORE_MARKER = ".no-project-context"
 CONTEXT_VISIBILITIES = {"git-store", "local", "versioned"}
+STORAGE_RUNTIME_MODES = {"git-store", "local"}
+LOCAL_CONTEXT_VISIBILITIES = {"local", "versioned"}
 APPLICABILITY_KINDS = {
     "domain",
     "machine",
@@ -38,7 +40,7 @@ APPLICABILITY_KINDS = {
 LEGACY_APPLICABILITY_KINDS = {"workspace"}
 SHAREABLE_APPLICABILITY_KINDS = frozenset({"domain", "universal"})
 DEFAULT_APPLICABILITY = [{"kind": "project", "selector": "self"}]
-GLOBAL_CONFIG_SCHEMA_VERSION = 4
+GLOBAL_CONFIG_SCHEMA_VERSION = 5
 GLOBAL_CONFIG_FILE = "config.json"
 GLOBAL_RUNTIME_FILE = "runtime.json"
 GLOBAL_CATALOG_FILE = "catalog.json"
@@ -67,8 +69,8 @@ LOCAL_SUMMARY_OUTPUT_LIMIT = 500
 SNAPSHOT_TOKEN_PATTERN = re.compile(r"[0-9a-f]{64}")
 GLOBAL_ONBOARDING_GUIDANCE = (
     "Global context onboarding required. Before normal project work, proactively use "
-    "the Project Context Curator skill to confirm workspace roots and the configured "
-    "Git-store or one local-or-versioned policy, preview global-init, request approval for the exact "
+    "the Project Context Curator skill, honor the storage runtime status, confirm "
+    "workspace roots, preview global-init, request approval for the exact "
     "snapshot, bootstrap every listed missing context with verified non-empty records, "
     "and rerun global-init with the approved token."
 )
@@ -537,6 +539,79 @@ def write_global_config(config: dict[str, Any]) -> None:
     write_json_object(global_config_dir() / GLOBAL_CONFIG_FILE, config)
 
 
+def configured_storage_runtime(
+    config: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    source_config = config if config is not None else global_config()
+    raw = source_config.get("storage_runtime")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise SystemExit("Invalid storage_runtime in global context configuration.")
+    mode = raw.get("mode")
+    if mode not in STORAGE_RUNTIME_MODES:
+        raise SystemExit(
+            "Invalid storage_runtime.mode in global context configuration."
+        )
+    visibility = raw.get("project_visibility")
+    if mode == "local" and visibility not in LOCAL_CONTEXT_VISIBILITIES:
+        raise SystemExit(
+            "Local storage runtime requires project_visibility local or versioned."
+        )
+    if mode == "git-store" and visibility is not None:
+        raise SystemExit(
+            "Git-store storage runtime must not define project_visibility."
+        )
+    return dict(raw)
+
+
+def storage_runtime_mode(config: dict[str, Any] | None = None) -> str:
+    source_config = config if config is not None else global_config()
+    runtime = configured_storage_runtime(source_config)
+    git_store = configured_git_store(source_config)
+    if runtime is None:
+        return "git-store" if git_store is not None else "unconfigured"
+    mode = str(runtime["mode"])
+    if mode == "git-store" and git_store is None:
+        raise SystemExit(
+            "Storage runtime is git-store but no Git context store is configured."
+        )
+    if mode == "local" and git_store is not None:
+        raise SystemExit(
+            "Storage runtime is local but a Git context store is still configured."
+        )
+    return mode
+
+
+def set_storage_runtime(
+    config: dict[str, Any],
+    mode: str,
+    project_visibility: str | None = None,
+) -> None:
+    if mode not in STORAGE_RUNTIME_MODES:
+        raise SystemExit(f"Invalid storage runtime mode: {mode}")
+    if mode == "local" and project_visibility not in LOCAL_CONTEXT_VISIBILITIES:
+        raise SystemExit(
+            "Local storage runtime requires project visibility local or versioned."
+        )
+    if mode == "git-store" and project_visibility is not None:
+        raise SystemExit(
+            "Git-store storage runtime does not accept project visibility."
+        )
+    stamp = now_iso()
+    existing = config.get("storage_runtime")
+    previous = existing if isinstance(existing, dict) else {}
+    runtime = {
+        "mode": mode,
+        "source": "user-confirmed",
+        "created_at": previous.get("created_at", stamp),
+        "updated_at": stamp,
+    }
+    if project_visibility is not None:
+        runtime["project_visibility"] = project_visibility
+    config["storage_runtime"] = runtime
+
+
 def configured_git_store(
     config: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
@@ -995,12 +1070,15 @@ def global_init(args: argparse.Namespace) -> None:
         "workspace_roots": [str(root) for root in roots],
         "domains": previous.get("domains", {}),
         "git_store": previous.get("git_store"),
+        "storage_runtime": previous.get("storage_runtime"),
         "runtime_upgrade_policy": "prompt",
         "created_at": previous.get("created_at", stamp),
         "updated_at": stamp,
     }
     if config["git_store"] is None:
         del config["git_store"]
+    if config["storage_runtime"] is None:
+        del config["storage_runtime"]
     write_global_config(config)
     print(detail or "Qdrant runtime ready")
     print(proc.stdout.strip())
@@ -2332,6 +2410,9 @@ def git_store_migration_plan(
             "store migration:\n" + "\n".join(blockers)
         )
     token_payload = {
+        "source_mode": storage_runtime_mode(config),
+        "target_mode": "git-store",
+        "config_hash": path_content_hash(global_config_dir() / GLOBAL_CONFIG_FILE),
         "store": str(store_root),
         "store_id": manifest["store_id"],
         "manifest_hash": path_content_hash(git_store_manifest_path(store_root)),
@@ -2359,10 +2440,211 @@ def git_store_migration_plan(
         json.dumps(token_payload, separators=(",", ":"), sort_keys=True).encode()
     ).hexdigest()
     return {
+        "source_mode": storage_runtime_mode(config),
+        "target_mode": "git-store",
+        "store_root": store_root,
         "manifest": manifest,
         "project_moves": tuple(project_moves),
         "scope_moves": tuple(scope_moves),
         "private_count": private_count,
+        "token": token,
+    }
+
+
+def validate_local_storage_target(root: Path, path: Path) -> None:
+    canonical_root = root.resolve()
+    candidate = path.absolute()
+    try:
+        relative = candidate.relative_to(canonical_root)
+    except ValueError:
+        raise SystemExit(
+            f"Local context target is outside its root: {candidate}"
+        ) from None
+    current = canonical_root
+    for part in relative.parts[:-1]:
+        current /= part
+        if current.is_symlink():
+            raise SystemExit(f"Local context target traverses a symlink: {current}")
+        if current.exists() and not current.is_dir():
+            raise SystemExit(
+                f"Local context target parent is not a directory: {current}"
+            )
+    if candidate.is_symlink():
+        raise SystemExit(f"Local context target is a symlink: {candidate}")
+    if candidate.exists() and not candidate.is_file():
+        raise SystemExit(f"Local context target is not a file: {candidate}")
+
+
+def bound_projects_by_store_id(
+    configured: dict[str, Any],
+    manifest: dict[str, Any],
+) -> dict[str, Path]:
+    candidates: dict[str, set[Path]] = {
+        project_id: set() for project_id in manifest["projects"]
+    }
+    for raw_project, project_id in configured["project_bindings"].items():
+        project = Path(raw_project)
+        if project_id in candidates and project.is_dir():
+            candidates[project_id].add(context_repo(project))
+    invalid = {
+        project_id: tuple(sorted(projects, key=str))
+        for project_id, projects in candidates.items()
+        if len(projects) != 1
+    }
+    if invalid:
+        details = ", ".join(
+            f"{project_id}={len(projects)}"
+            for project_id, projects in sorted(invalid.items())
+        )
+        raise SystemExit(
+            "Every Git-store project requires exactly one local checkout binding "
+            f"before migration to local mode: {details}. Use git-store-bind on this machine."
+        )
+    return {
+        project_id: next(iter(projects)) for project_id, projects in candidates.items()
+    }
+
+
+def local_storage_migration_plan(
+    project_visibility: str,
+) -> dict[str, Any]:
+    config = global_config()
+    source_mode = storage_runtime_mode(config)
+    if source_mode != "git-store":
+        payload = {
+            "source_mode": source_mode,
+            "target_mode": "local",
+            "project_visibility": project_visibility,
+            "config_hash": path_content_hash(global_config_dir() / GLOBAL_CONFIG_FILE),
+            "projects": [],
+            "scopes": [],
+        }
+        token = hashlib.sha256(
+            json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
+        ).hexdigest()
+        return {
+            "source_mode": source_mode,
+            "target_mode": "local",
+            "project_visibility": project_visibility,
+            "project_moves": (),
+            "scope_moves": (),
+            "store_root": None,
+            "token": token,
+        }
+
+    configured, root, manifest = require_configured_git_store()
+    projects_by_id = bound_projects_by_store_id(configured, manifest)
+    project_moves: list[dict[str, Any]] = []
+    blockers: list[str] = []
+    target_projects: set[Path] = set()
+    for project_id in sorted(manifest["projects"]):
+        project = projects_by_id[project_id]
+        if project in target_projects:
+            raise SystemExit(
+                f"Multiple Git-store projects resolve to one local checkout: {project}"
+            )
+        target_projects.add(project)
+        if project_visibility == "versioned" and not is_git_initialized(project):
+            raise SystemExit(
+                f"Versioned project context requires a Git checkout: {project}"
+            )
+        source = git_store_project_path(root, project_id)
+        validate_git_store_target(root, source)
+        if not source.is_file():
+            raise SystemExit(f"Canonical project context is missing: {source}")
+        data, _ = load_context_file(source)
+        workspace_labels = legacy_workspace_records(data)
+        if workspace_labels:
+            blockers.append(f"{source}: {', '.join(workspace_labels)}")
+            continue
+        target = local_context_path(project)
+        validate_local_storage_target(project, target)
+        if target.exists():
+            target_data, _ = load_context_file(target)
+            if not contexts_have_same_records(data, target_data):
+                raise SystemExit(
+                    f"Local context target conflicts with {source}: {target}"
+                )
+        project_moves.append(
+            {
+                "source": source,
+                "target": target,
+                "project": project,
+                "project_id": project_id,
+                "data": data,
+            }
+        )
+
+    scope_moves: list[dict[str, Any]] = []
+    git_scopes = root / GIT_STORE_SCOPES_DIR
+    if git_scopes.is_dir():
+        resolved_scopes = git_scopes.resolve()
+        for source in sorted(git_scopes.rglob("context.json"), key=str):
+            if (
+                not source.is_file()
+                or source.is_symlink()
+                or resolved_scopes not in source.resolve().parents
+            ):
+                continue
+            data = load_discovered_scope_context(source)
+            workspace_labels = legacy_workspace_records(data)
+            if workspace_labels:
+                blockers.append(f"{source}: {', '.join(workspace_labels)}")
+                continue
+            target = scope_context_root() / source.resolve().relative_to(
+                resolved_scopes
+            )
+            validate_local_storage_target(scope_context_root(), target)
+            if target.exists():
+                target_data = load_discovered_scope_context(target)
+                if not contexts_have_same_records(data, target_data):
+                    raise SystemExit(
+                        f"Local scope target conflicts with {source}: {target}"
+                    )
+            scope_moves.append({"source": source, "target": target, "data": data})
+
+    if blockers:
+        raise SystemExit(
+            "Reclassify legacy workspace applicability with move before local "
+            "storage migration:\n" + "\n".join(blockers)
+        )
+    token_payload = {
+        "source_mode": source_mode,
+        "target_mode": "local",
+        "project_visibility": project_visibility,
+        "config_hash": path_content_hash(global_config_dir() / GLOBAL_CONFIG_FILE),
+        "store": str(root),
+        "manifest_hash": path_content_hash(git_store_manifest_path(root)),
+        "projects": [
+            {
+                "project": str(item["project"]),
+                "source": str(item["source"]),
+                "source_hash": path_content_hash(item["source"]),
+                "target": str(item["target"]),
+                "target_hash": path_content_hash(item["target"]),
+            }
+            for item in project_moves
+        ],
+        "scopes": [
+            {
+                "source": str(item["source"]),
+                "source_hash": path_content_hash(item["source"]),
+                "target": str(item["target"]),
+                "target_hash": path_content_hash(item["target"]),
+            }
+            for item in scope_moves
+        ],
+    }
+    token = hashlib.sha256(
+        json.dumps(token_payload, separators=(",", ":"), sort_keys=True).encode()
+    ).hexdigest()
+    return {
+        "source_mode": source_mode,
+        "target_mode": "local",
+        "project_visibility": project_visibility,
+        "project_moves": tuple(project_moves),
+        "scope_moves": tuple(scope_moves),
+        "store_root": root,
         "token": token,
     }
 
@@ -2421,6 +2703,55 @@ def print_git_store_preview(root: Path, plan: dict[str, Any]) -> None:
     print("No changes made. Ask the user to approve this exact snapshot token.")
 
 
+def print_storage_migration_preview(plan: dict[str, Any]) -> None:
+    event: dict[str, Any] = {
+        "type": UNTRUSTED_SNAPSHOT_TYPE,
+        "change": "storage_runtime",
+        "source_mode": plan["source_mode"],
+        "target_mode": plan["target_mode"],
+    }
+    if plan.get("project_visibility") is not None:
+        event["project_visibility"] = plan["project_visibility"]
+    store_root = plan.get("store_root")
+    if isinstance(store_root, Path):
+        event["store_path"] = snapshot_path_value(store_root)
+    print(json.dumps(event, ensure_ascii=True, sort_keys=True))
+    print(f"Project contexts to move: {len(plan['project_moves'])}")
+    for item in plan["project_moves"]:
+        print(
+            json.dumps(
+                {
+                    "type": UNTRUSTED_SNAPSHOT_TYPE,
+                    "change": "move",
+                    "kind": "project",
+                    "source_path": snapshot_path_value(item["source"]),
+                    "target_path": snapshot_path_value(item["target"]),
+                },
+                ensure_ascii=True,
+                sort_keys=True,
+            )
+        )
+    print(f"Shareable scope contexts to move: {len(plan['scope_moves'])}")
+    for item in plan["scope_moves"]:
+        print(
+            json.dumps(
+                {
+                    "type": UNTRUSTED_SNAPSHOT_TYPE,
+                    "change": "move",
+                    "kind": "scope",
+                    "source_path": snapshot_path_value(item["source"]),
+                    "target_path": snapshot_path_value(item["target"]),
+                },
+                ensure_ascii=True,
+                sort_keys=True,
+            )
+        )
+    if "private_count" in plan:
+        print(f"Private XDG scope contexts retained: {plan['private_count']}")
+    print(f"Snapshot token: {plan['token']}")
+    print("No changes made. Ask the user to approve this exact snapshot token.")
+
+
 def git_project_metadata(
     repo: Path, existing: dict[str, Any] | None = None
 ) -> dict[str, Any]:
@@ -2448,6 +2779,7 @@ def configure_git_store(
         "created_at": previous.get("created_at", stamp) if previous else stamp,
         "updated_at": stamp,
     }
+    set_storage_runtime(config, "git-store")
     write_global_config(config)
 
 
@@ -2503,6 +2835,149 @@ def apply_git_store_migration(root: Path, plan: dict[str, Any]) -> None:
         render_markdown(project, data)
 
 
+def write_local_project_context(path: Path, data: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".json.tmp")
+    temporary.write_text(
+        json.dumps(data, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+
+
+def apply_local_storage_migration(plan: dict[str, Any]) -> None:
+    visibility = str(plan["project_visibility"])
+    rendered: list[tuple[Path, dict[str, Any]]] = []
+    for item in plan["project_moves"]:
+        project = item["project"]
+        data = deepcopy(item["data"])
+        existing_policy = data.get("storage_policy")
+        data["storage_policy"] = storage_policy(
+            visibility,
+            "user-confirmed",
+            is_git_initialized(project),
+            existing_policy if isinstance(existing_policy, dict) else None,
+        )
+        normalize(data)
+        write_local_project_context(item["target"], data)
+        rendered.append((project, data))
+    for item in plan["scope_moves"]:
+        data = deepcopy(item["data"])
+        normalize(data)
+        metadata = data.get("scope_store")
+        if isinstance(metadata, dict):
+            metadata["updated_at"] = now_iso()
+        write_json_object(item["target"], data)
+
+    config = global_config()
+    config.pop("git_store", None)
+    set_storage_runtime(config, "local", visibility)
+    write_global_config(config)
+    for project, data in rendered:
+        ensure_context_gitignore(project / CONTEXT_DIR)
+        apply_storage_policy(project, data)
+        render_markdown(project, data)
+    for item in (*plan["project_moves"], *plan["scope_moves"]):
+        source = item["source"]
+        if source != item["target"] and source.exists():
+            source.unlink()
+    store_root = plan.get("store_root")
+    if isinstance(store_root, Path):
+        manifest = git_store_manifest_path(store_root)
+        if manifest.exists():
+            manifest.unlink()
+
+
+def storage_status(args: argparse.Namespace) -> None:
+    config = global_config()
+    mode = storage_runtime_mode(config)
+    runtime = configured_storage_runtime(config)
+    payload: dict[str, Any] = {
+        "configured": mode != "unconfigured",
+        "mode": mode,
+    }
+    if mode == "local" and runtime is not None:
+        payload["project_visibility"] = runtime["project_visibility"]
+    if mode == "git-store":
+        store = configured_git_store(config)
+        if store is not None:
+            payload["store_path"] = store["path"]
+            payload["store_id"] = store["store_id"]
+    if args.format == "json":
+        print(json.dumps(payload, sort_keys=True))
+        return
+    if mode == "unconfigured":
+        print("Storage runtime mode: unconfigured (local compatibility mode).")
+        if args.format == "hook":
+            print(
+                "Storage runtime selection required before initial setup. Invoke "
+                "$configure-context-storage and ask the user to choose local or "
+                "git-store mode."
+            )
+        return
+    if mode == "local":
+        print(
+            "Storage runtime mode: local "
+            f"(new project visibility: {payload['project_visibility']})."
+        )
+        return
+    print(
+        f"Storage runtime mode: git-store (canonical store: {payload['store_path']})."
+    )
+
+
+def storage_migrate(args: argparse.Namespace) -> None:
+    repo = context_repo(args.repo)
+    if args.target == "git-store":
+        if args.store is None:
+            raise SystemExit("Git-store migration requires --store.")
+        if args.project_visibility is not None:
+            raise SystemExit(
+                "--project-visibility applies only when the target mode is local."
+            )
+        root = validate_git_store_root(args.store)
+        configured_roots = workspace_roots(global_config())
+        roots = (
+            validate_workspace_roots(args.workspace_root)
+            if args.workspace_root
+            else configured_roots
+        )
+        plan = git_store_migration_plan(repo, root, roots)
+        if not args.approve_snapshot:
+            print_storage_migration_preview(plan)
+            return
+        validate_snapshot_approval(
+            {"snapshot": plan["token"]},
+            args.approve_snapshot,
+        )
+        apply_git_store_migration(root, plan)
+    else:
+        if args.store is not None:
+            raise SystemExit("Local storage migration does not accept --store.")
+        if args.workspace_root:
+            raise SystemExit(
+                "Local storage migration uses configured Git-store bindings and does "
+                "not accept --workspace-root."
+            )
+        if args.project_visibility is None:
+            raise SystemExit(
+                "Local storage migration requires --project-visibility local or versioned."
+            )
+        plan = local_storage_migration_plan(args.project_visibility)
+        if not args.approve_snapshot:
+            print_storage_migration_preview(plan)
+            return
+        validate_snapshot_approval(
+            {"snapshot": plan["token"]},
+            args.approve_snapshot,
+        )
+        apply_local_storage_migration(plan)
+    print(f"Storage runtime configured: {args.target}")
+    print(f"Project contexts moved: {len(plan['project_moves'])}")
+    print(f"Shareable scope contexts moved: {len(plan['scope_moves'])}")
+    print("Git commit and push were not run.")
+
+
 def git_store_init(args: argparse.Namespace) -> None:
     repo = context_repo(args.repo)
     root = validate_git_store_root(args.store)
@@ -2531,8 +3006,8 @@ def require_configured_git_store() -> tuple[dict[str, Any], Path, dict[str, Any]
     configured = configured_git_store()
     if configured is None:
         raise SystemExit(
-            "No Git context store is configured. Run git-store-init preview and "
-            "approve its exact snapshot first."
+            "No Git context store is configured. Invoke $configure-context-storage "
+            "and approve the exact storage-migrate snapshot first."
         )
     root = validate_git_store_root(Path(configured["path"]))
     manifest = load_git_store_manifest(root)
@@ -2564,8 +3039,8 @@ def git_store_bind(args: argparse.Namespace) -> None:
         )
     if local_context_path(repo).exists():
         raise SystemExit(
-            "A repository-local context already exists. Use git-store-init preview and "
-            "approval to migrate it."
+            "A repository-local context already exists. Use storage-migrate preview and "
+            "exact approval to migrate it."
         )
     data, _ = load_context_file(target)
     bindings = dict(configured["project_bindings"])
@@ -2611,8 +3086,8 @@ def enroll_empty_git_store_project(repo: Path, data: dict[str, Any]) -> None:
     target = git_store_project_path(root, project_id)
     if local_context_path(repo).exists():
         raise SystemExit(
-            "A repository-local context already exists. Use git-store-init preview and "
-            "approval to migrate it."
+            "A repository-local context already exists. Use storage-migrate preview and "
+            "exact approval to migrate it."
         )
     if target.exists():
         raise SystemExit(f"Git context target already exists: {target}")
@@ -2637,22 +3112,39 @@ def enroll_empty_git_store_project(repo: Path, data: dict[str, Any]) -> None:
 def init_context(args: argparse.Namespace) -> None:
     repo = context_repo(args.repo)
     git_initialized = is_git_initialized(repo)
+    config = global_config()
+    runtime_mode = storage_runtime_mode(config)
+    runtime = configured_storage_runtime(config)
     visibility = args.visibility
-    git_store = configured_git_store()
-    if visibility is None and git_store is not None:
+    git_store = configured_git_store(config)
+    record_local_runtime = False
+    if runtime_mode == "git-store" and visibility not in (None, "git-store"):
+        raise SystemExit(
+            "Storage runtime mode is git-store; project initialization must use its "
+            "canonical Git context repository."
+        )
+    if runtime_mode == "local" and visibility == "git-store":
+        raise SystemExit(
+            "Storage runtime mode is local. Use storage-migrate with exact preview "
+            "approval before initializing a Git-store project."
+        )
+    if visibility is None and runtime_mode == "git-store":
         visibility = "git-store"
+    if visibility is None and runtime_mode == "local" and runtime is not None:
+        visibility = str(runtime["project_visibility"])
     if visibility is None and git_initialized:
         raise SystemExit(
-            "Context visibility decision required for Git repositories. Ask the user whether "
-            "docs/context should stay local or be versioned, then rerun with --visibility local "
-            "or --visibility versioned."
+            "Storage runtime decision required for initial setup. Invoke "
+            "$configure-context-storage so the user can choose local or git-store mode."
         )
     if visibility is None:
         visibility = "local"
+    if runtime_mode == "unconfigured" and visibility in LOCAL_CONTEXT_VISIBILITIES:
+        record_local_runtime = args.visibility is not None
     if visibility == "git-store" and git_store is None:
         raise SystemExit(
-            "No Git context store is configured. Run git-store-init preview and "
-            "approve its exact snapshot first."
+            "No Git context store is configured. Invoke $configure-context-storage "
+            "and approve the exact storage-migrate snapshot first."
         )
 
     data = load_context(repo)
@@ -2679,6 +3171,9 @@ def init_context(args: argparse.Namespace) -> None:
     if visibility == "git-store" and git_store_project_binding(repo) is None:
         enroll_empty_git_store_project(repo, data)
     policy_result = save_context(repo, data)
+    if record_local_runtime:
+        set_storage_runtime(config, "local", visibility)
+        write_global_config(config)
     location_label = "local context" if visibility != "git-store" else "project context"
     print(f"Initialized {location_label}: {repo / CONTEXT_DIR}")
     print(f"Context visibility: {visibility}")
@@ -3357,6 +3852,52 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_repo(status_parser)
     status_parser.set_defaults(func=status_context)
+
+    storage_status_parser = subparsers.add_parser(
+        "storage-status",
+        help="Report the configured canonical storage runtime mode",
+    )
+    add_repo(storage_status_parser)
+    storage_status_parser.add_argument(
+        "--format", choices=("text", "json", "hook"), default="text"
+    )
+    storage_status_parser.set_defaults(func=storage_status)
+
+    storage_migrate_parser = subparsers.add_parser(
+        "storage-migrate",
+        help=(
+            "Preview or approve deterministic migration between local and Git-store "
+            "canonical storage"
+        ),
+    )
+    add_repo(storage_migrate_parser)
+    storage_migrate_parser.add_argument(
+        "--target", choices=sorted(STORAGE_RUNTIME_MODES), required=True
+    )
+    storage_migrate_parser.add_argument(
+        "--store",
+        type=Path,
+        help="Existing Git checkout root required for a git-store target",
+    )
+    storage_migrate_parser.add_argument(
+        "--workspace-root",
+        type=Path,
+        action="append",
+        help=(
+            "Root to scan for local project contexts when targeting git-store; "
+            "repeat as needed"
+        ),
+    )
+    storage_migrate_parser.add_argument(
+        "--project-visibility",
+        choices=sorted(LOCAL_CONTEXT_VISIBILITIES),
+        help="Default and migrated project visibility required for a local target",
+    )
+    storage_migrate_parser.add_argument(
+        "--approve-snapshot",
+        help="User-approved token from an unchanged storage-migrate preview",
+    )
+    storage_migrate_parser.set_defaults(func=storage_migrate)
 
     git_store_init_parser = subparsers.add_parser(
         "git-store-init",

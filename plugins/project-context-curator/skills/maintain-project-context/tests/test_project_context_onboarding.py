@@ -125,9 +125,8 @@ def test_disabled_global_status_in_hook_format_requires_onboarding(
         "Global context index: disabled.",
         (
             "Global context onboarding required. Before normal project work, "
-            "proactively use the Project Context Curator skill to confirm workspace "
-            "roots and the configured Git-store or one local-or-versioned policy, "
-            "preview global-init, request "
+            "proactively use the Project Context Curator skill, honor the storage "
+            "runtime status, confirm workspace roots, preview global-init, request "
             "approval for the exact snapshot, bootstrap every listed missing context "
             "with verified non-empty records, and rerun global-init with the approved token."
         ),

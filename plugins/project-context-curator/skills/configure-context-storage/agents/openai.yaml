@@ -1,0 +1,4 @@
+interface:
+  display_name: "Configure Context Storage"
+  short_description: "Select and migrate canonical context storage"
+  default_prompt: "Use $configure-context-storage to choose or migrate the canonical Project Context Curator storage mode."

@@ -1,12 +1,13 @@
 # Project Context Schema
 
-By default, project facts use `docs/context/context.json` as their canonical text
-store. Broader or different applicability uses canonical JSON under
+The user selects a canonical storage runtime during initial setup. In `local`
+mode, project facts use `docs/context/context.json` as their canonical text
+store and broader applicability uses canonical JSON under
 `$XDG_DATA_HOME/project-context-curator/contexts/` (default
-`~/.local/share/project-context-curator/contexts/`). An optional configured Git
-store becomes exclusive canonical storage for opted-in project, domain, and
-universal facts. User, machine, and composites containing either remain private
-in XDG.
+`~/.local/share/project-context-curator/contexts/`). In `git-store` mode, one
+configured Git checkout becomes exclusive canonical storage for project, domain,
+and universal facts. User, machine, and composites containing either remain
+private in XDG.
 
 Project Markdown files are generated views for humans and agents; `index.md`
 includes a compact topical index. In Git-store mode, the project checkout has no
@@ -105,6 +106,29 @@ stable store and record UUIDs plus an empty provenance list where missing. It
 does not silently relocate existing non-project records; use `move` for explicit
 promotion or reclassification.
 
+## Storage Runtime Configuration
+
+XDG configuration schema version 5 records the user-confirmed runtime decision:
+
+```json
+{
+  "schema_version": 5,
+  "storage_runtime": {
+    "mode": "local",
+    "project_visibility": "versioned",
+    "source": "user-confirmed",
+    "created_at": "2026-08-28T08:00:00+00:00",
+    "updated_at": "2026-08-28T08:00:00+00:00"
+  }
+}
+```
+
+`mode` is `local` or `git-store`. Local mode requires a default
+`project_visibility` of `local` or `versioned`; Git-store mode omits it and
+requires `git_store` configuration. Older configuration without either field is
+reported as `unconfigured` while retaining local compatibility. An older valid
+`git_store` configuration is inferred as Git-store mode.
+
 ## Canonical Store Layout
 
 | Applicability | Default mode | Configured Git-store mode |
@@ -169,18 +193,29 @@ checkout paths:
 }
 ```
 
-XDG configuration records the store checkout path, store identity, and absolute
-checkout-to-project-ID bindings. `git-store-init` changes that configuration
-only after an exact snapshot approval. Its token covers source and destination
+XDG configuration records the runtime decision, store checkout path, store
+identity, and absolute checkout-to-project-ID bindings. `storage-migrate
+--target git-store` changes that configuration only after an exact snapshot
+approval. Its token covers source and destination
 paths and content hashes plus the current manifest. It validates all conflicts,
 writes canonical destinations and the manifest, writes local configuration,
 then removes relocated sources. User/machine stores are excluded. Existing
 workspace records block the operation until explicit reclassification.
 
+`storage-migrate --target local` performs the inverse operation. Every manifest
+project must have exactly one existing local checkout binding. Its token covers
+the store manifest, XDG configuration, visibility choice, and every source and
+destination hash. Approval writes all project and scope destinations first,
+persists local mode, refreshes project policies and views, then removes the
+Git-store canonical JSON and manifest. Unknown files and Git history are
+untouched.
+
 On another machine, configure the cloned store through the same preview/approval
 flow, list IDs with `git-store-status`, and attach each checkout with
 `git-store-bind --project-store-id <uuid>`. Binding regenerates local Markdown
-views and restores domain membership. No updater command commits or pushes Git.
+views and restores domain membership. `git-store-init` remains a compatible
+one-way command for existing automation. No updater command commits or pushes
+Git.
 
 ## Record Identity and Provenance
 
@@ -198,9 +233,9 @@ removes the source copy, preserves `id`, and appends move provenance.
 
 Use only in a project store. It records whether `docs/context/` remains local,
 is versioned in the project repository, or whether canonical JSON lives in the
-separate configured Git store. XDG user/machine scope stores are private.
-Non-Git directories default to local project context unless Git-store mode is
-already configured.
+separate configured Git store. XDG user/machine scope stores are private. The
+global runtime decision supplies the default for new projects; local mode may
+still use an explicit per-project local/versioned override.
 
 Required fields:
 

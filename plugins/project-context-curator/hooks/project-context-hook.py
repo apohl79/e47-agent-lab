@@ -253,6 +253,29 @@ def global_context_status(repo: Path, script: Path) -> str:
     return status
 
 
+def storage_runtime_status(repo: Path, script: Path) -> str:
+    try:
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(script),
+                "storage-status",
+                "--format",
+                "hook",
+                "--repo",
+                str(repo),
+            ],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return proc.stdout.strip() if proc.returncode == 0 else ""
+
+
 def session_start(payload: dict[str, Any]) -> None:
     cwd = cwd_from_payload(payload)
     current_worktree = worktree_root(cwd)
@@ -263,6 +286,7 @@ def session_start(payload: dict[str, Any]) -> None:
     script = updater_script()
     update_warning = update_existing_context(repo, script)
     global_status = global_context_status(repo, script)
+    storage_status = storage_runtime_status(repo, script)
     context_status = project_context_status(repo, script)
     index = repo / CONTEXT_INDEX
     git_initialized = is_git_initialized(repo)
@@ -297,10 +321,10 @@ def session_start(payload: dict[str, Any]) -> None:
             "complete and verified on a long-lived branch. An explicitly user-confirmed durable "
             "invariant or architectural decision may be captured earlier; phrase it as a decision or "
             "invariant, not as present behavior. Store admitted knowledge in the same turn. Facts "
-            "default to project applicability. Without a configured Git context store, project "
-            "facts stay in the repository and non-project facts use XDG. With one configured, "
-            "project, domain, and universal facts use that exclusive canonical Git store while "
-            "user and machine facts remain private in XDG. Classify as domain only from user "
+            "default to project applicability. Local storage runtime keeps project facts in each "
+            "repository and non-project facts in XDG. Git-store runtime keeps project, domain, "
+            "and universal facts in its exclusive canonical Git checkout while user and machine "
+            "facts remain private in XDG. Classify as domain only from user "
             "confirmation, authoritative domain documentation, or corroborating evidence in "
             "multiple registered domain projects. Workspace applicability is legacy and read-only; "
             "use user or machine only for the current identity or environment and universal only "
@@ -336,15 +360,33 @@ def session_start(payload: dict[str, Any]) -> None:
         lines.insert(2, update_warning)
     if global_status:
         lines.insert(2, global_status)
+    if storage_status:
+        lines.insert(2, storage_status)
     if current_worktree != repo:
         lines.insert(2, f"Current worktree: {current_worktree}")
 
-    git_store_configured = "Git context store configured:" in context_status
+    storage_unconfigured = "Storage runtime mode: unconfigured" in storage_status
+    storage_local = "Storage runtime mode: local" in storage_status
+    storage_git = "Storage runtime mode: git-store" in storage_status
+    git_store_configured = (
+        storage_git or "Git context store configured:" in context_status
+    )
     git_store_canonical = "Canonical context:" in context_status
     if git_store_configured or git_store_canonical:
         lines.append(
             "A canonical Git context store is configured; init uses it automatically, so no "
             "local-vs-versioned question is needed. Git commit and push remain explicit."
+        )
+    elif storage_unconfigured:
+        lines.append(
+            "Before context initialization or global onboarding, invoke "
+            "$configure-context-storage so the user can choose the canonical storage "
+            "runtime and approve its deterministic snapshot."
+        )
+    elif storage_local:
+        lines.append(
+            "Local storage runtime is configured; init uses its saved project visibility "
+            "unless an explicit per-project local/versioned override is provided."
         )
     elif git_initialized:
         lines.append(

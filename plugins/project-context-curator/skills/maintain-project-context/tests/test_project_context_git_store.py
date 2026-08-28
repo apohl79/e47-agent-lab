@@ -162,6 +162,8 @@ def test_git_store_preview_and_invalid_checkout_do_not_mutate_sources(
         env=env,
     )
     before = (repo / "docs/context/context.json").read_bytes()
+    config_path = tmp_path / "xdg/config/config.json"
+    config_before = config_path.read_bytes()
     store.mkdir()
     result = run_context(
         "git-store-init",
@@ -176,8 +178,8 @@ def test_git_store_preview_and_invalid_checkout_do_not_mutate_sources(
         "must be a Git checkout root" in result.stderr,
         (repo / "docs/context/context.json").read_bytes(),
         tuple(store.iterdir()),
-        (tmp_path / "xdg/config/config.json").exists(),
-    ) == (1, True, before, (), False)
+        config_path.read_bytes(),
+    ) == (1, True, before, (), config_before)
 
 
 def test_git_store_rejects_symlinked_destination_without_writing_outside(
@@ -223,6 +225,8 @@ def test_git_store_rejects_stale_snapshot_without_partial_migration(
         repo=repo,
         env=env,
     )
+    config_path = tmp_path / "xdg/config/config.json"
+    config_before = config_path.read_bytes()
     run_context(
         "add-term",
         "--term",
@@ -247,8 +251,8 @@ def test_git_store_rejects_stale_snapshot_without_partial_migration(
         "snapshot changed" in approved.stderr.casefold(),
         (repo / "docs/context/context.json").exists(),
         (store / "project-context-store.json").exists(),
-        (tmp_path / "xdg/config/config.json").exists(),
-    ) == (1, True, True, False, False)
+        config_path.read_bytes(),
+    ) == (1, True, True, False, config_before)
 
 
 def test_configured_git_store_is_canonical_for_new_project_writes(
