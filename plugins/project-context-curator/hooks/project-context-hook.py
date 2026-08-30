@@ -276,6 +276,29 @@ def storage_runtime_status(repo: Path, script: Path) -> str:
     return proc.stdout.strip() if proc.returncode == 0 else ""
 
 
+def context_audit_status(repo: Path, script: Path) -> str:
+    try:
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(script),
+                "audit",
+                "--format",
+                "hook",
+                "--repo",
+                str(repo),
+            ],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=3,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return proc.stdout.strip() if proc.returncode == 0 else ""
+
+
 ADMISSION_GATE = (
     "Before any add-* write, search existing context and apply the context admission gate. "
     "Admit a candidate only if it is expected to outlive the current task or branch, benefit "
@@ -318,6 +341,7 @@ def session_start(payload: dict[str, Any]) -> None:
     global_status = global_context_status(repo, script)
     storage_status = storage_runtime_status(repo, script)
     context_status = project_context_status(repo, script)
+    audit_status = context_audit_status(repo, script)
     index = repo / CONTEXT_INDEX
     git_initialized = is_git_initialized(repo)
 
@@ -325,6 +349,7 @@ def session_start(payload: dict[str, Any]) -> None:
         "Project Context Curator is active for this session.",
         f"Repository root: {repo}",
         context_status,
+        *((audit_status,) if audit_status else ()),
         (
             "For feature work, research, planning, or review: use durable project context. "
             "If docs/context/index.md exists, read it before making project-specific claims."
