@@ -17,6 +17,13 @@
   const ctx = canvas.getContext("2d");
   const tooltip = document.getElementById("tooltip");
   const sidebar = (id) => document.getElementById(id);
+  const FOCAL = 900;
+  const MAX_SPEED = 30;
+  const HINTS = {
+    flat: "drag: pan · wheel: zoom · click: select · double-click: expand or collapse a store",
+    deep: "drag: orbit · shift+drag: pan · wheel: zoom · click: select · double-click: expand or collapse a store",
+  };
+  const clamp = (value, low, high) => Math.max(low, Math.min(high, value));
 
   const nodes = DATA.nodes.map((raw, index) => {
     const angle = index * 2.399963;
@@ -24,18 +31,22 @@
     const total = Object.values(raw.counts).reduce((sum, value) => sum + value, 0);
     return Object.assign({}, raw, {
       x: Math.cos(angle) * radius, y: Math.sin(angle) * radius, z: ((index * 37) % 200) - 100,
-      vx: 0, vy: 0, vz: 0, total: total, visible: false, neighbours: new Set(),
+      vx: 0, vy: 0, vz: 0, seed: index, total: total, visible: false, neighbours: new Set(),
       r: STORE_KINDS.has(raw.kind) ? 7 + Math.min(20, Math.sqrt(total) * 1.6) : 3.5,
     });
   });
   const byId = new Map(nodes.map((node) => [node.id, node]));
   const edges = DATA.edges.map((raw) => Object.assign({}, raw, {s: byId.get(raw.source), t: byId.get(raw.target)}));
   edges.forEach((edge) => { edge.s.neighbours.add(edge.t.id); edge.t.neighbours.add(edge.s.id); });
+  const placed = new Map();
   nodes.forEach((node) => {
-    if (!STORE_KINDS.has(node.kind)) {
-      const store = byId.get(node.store);
-      if (store) { node.x = store.x + ((node.z % 23) - 11); node.y = store.y + ((node.z % 17) - 8); }
-    }
+    if (STORE_KINDS.has(node.kind)) return;
+    const store = byId.get(node.store);
+    if (!store) return;
+    const slot = placed.get(store.id) || 0;
+    placed.set(store.id, slot + 1);
+    const angle = slot * 2.399963, radius = store.r + 12 + 6 * Math.sqrt(slot);
+    node.x = store.x + Math.cos(angle) * radius; node.y = store.y + Math.sin(angle) * radius; node.z = store.z + ((slot * 37) % 60) - 30;
   });
   const stores = nodes.filter((node) => STORE_KINDS.has(node.kind));
   const relationNames = Array.from(new Set(edges.map((edge) => edge.relation))).sort();
@@ -44,8 +55,8 @@
   const state = {
     expanded: new Set(DATA.view.level === "records" ? stores.map((node) => node.id) : []),
     relations: new Set(relationNames), kinds: new Set(kindNames), minConfidence: 0, query: "",
-    selected: null, hover: null, visibleNodes: [], visibleEdges: [], alpha: 1,
-    cam: {x: 0, y: 0, k: 1}, drag: null, width: 0, height: 0,
+    selected: null, hover: null, visibleNodes: [], visibleEdges: [], visibleStores: [], visibleRecords: [], clusters: [], order: [], alpha: 1,
+    mode3d: false, spin: false, cam: {x: 0, y: 0, z: 0, k: 1, rotX: -0.35, rotY: 0.6}, drag: null, width: 0, height: 0,
   };
 
   function matches(node) {
@@ -58,30 +69,45 @@
     state.visibleNodes = nodes.filter((node) => node.visible);
     state.visibleEdges = edges.filter((edge) => edge.s.visible && edge.t.visible && state.relations.has(edge.relation)
       && (STRUCTURAL.has(edge.relation) || edge.confidence >= state.minConfidence));
+    state.visibleStores = state.visibleNodes.filter((node) => STORE_KINDS.has(node.kind));
+    state.visibleRecords = state.visibleNodes.filter((node) => !STORE_KINDS.has(node.kind));
+    const clusters = new Map();
+    state.visibleRecords.forEach((node) => {
+      if (!clusters.has(node.store)) clusters.set(node.store, []);
+      clusters.get(node.store).push(node);
+    });
+    state.clusters = Array.from(clusters.values());
+    state.visibleNodes.forEach((node) => { node.degree = 0; });
+    state.visibleEdges.forEach((edge) => { edge.s.degree += 1; edge.t.degree += 1; });
     if (reheat) state.alpha = Math.max(state.alpha, 0.6);
     if (state.selected && !state.selected.visible) select(null);
     draw();
   }
 
+  function repel(a, b, charge, alpha) {
+    let dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z;
+    let l = dx * dx + dy * dy + dz * dz;
+    if (l < 1) { dx = (a.seed % 3) - 1 || 0.5; dy = (b.seed % 3) - 1 || -0.5; l = 1; }
+    if (l > 250000) return;
+    const w = charge * alpha / l;
+    a.vx -= dx * w; a.vy -= dy * w; a.vz -= dz * w;
+    b.vx += dx * w; b.vy += dy * w; b.vz += dz * w;
+  }
   function tick() {
     if (state.alpha < 0.002) return;
     const alpha = state.alpha;
     state.alpha += (0 - alpha) * 0.0228;
-    const visible = state.visibleNodes;
-    for (let i = 0; i < visible.length; i++) {
-      const a = visible[i];
-      for (let j = i + 1; j < visible.length; j++) {
-        const b = visible[j];
-        let dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z;
-        let l = dx * dx + dy * dy + dz * dz;
-        if (l < 1) { dx = (i % 3) - 1 || 0.5; dy = (j % 3) - 1 || -0.5; l = 1; }
-        if (l > 250000) continue;
-        const charge = (STORE_KINDS.has(a.kind) && STORE_KINDS.has(b.kind)) ? 900 : (STORE_KINDS.has(a.kind) || STORE_KINDS.has(b.kind)) ? 220 : 60;
-        const w = charge * alpha / l;
-        a.vx -= dx * w; a.vy -= dy * w; a.vz -= dz * w;
-        b.vx += dx * w; b.vy += dy * w; b.vz += dz * w;
-      }
+    // Records only repel siblings of their own store; store-store repulsion keeps clusters apart.
+    const storesVisible = state.visibleStores, records = state.visibleRecords;
+    for (let i = 0; i < storesVisible.length; i++) {
+      for (let j = i + 1; j < storesVisible.length; j++) repel(storesVisible[i], storesVisible[j], 900, alpha);
+      for (let j = 0; j < records.length; j++) repel(storesVisible[i], records[j], 220, alpha);
     }
+    state.clusters.forEach((cluster) => {
+      for (let i = 0; i < cluster.length; i++) {
+        for (let j = i + 1; j < cluster.length; j++) repel(cluster[i], cluster[j], 60, alpha);
+      }
+    });
     state.visibleEdges.forEach((edge) => {
       const a = edge.s, b = edge.t;
       const dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z;
@@ -89,20 +115,46 @@
       const target = edge.relation === "stored_in" ? 40 + a.r + b.r : (STORE_KINDS.has(a.kind) && STORE_KINDS.has(b.kind)) ? 150 : 70;
       const strength = edge.relation === "stored_in" ? 0.2 : 0.06;
       const f = (d - target) / d * strength * alpha;
-      a.vx += dx * f; a.vy += dy * f; a.vz += dz * f;
-      b.vx -= dx * f; b.vy -= dy * f; b.vz -= dz * f;
+      // High-degree nodes (stores) absorb less of each spring, as in d3-force's link bias.
+      const bias = b.degree / (a.degree + b.degree);
+      a.vx += dx * f * bias; a.vy += dy * f * bias; a.vz += dz * f * bias;
+      b.vx -= dx * f * (1 - bias); b.vy -= dy * f * (1 - bias); b.vz -= dz * f * (1 - bias);
     });
-    visible.forEach((node) => {
+    state.visibleNodes.forEach((node) => {
       if (node === (state.drag && state.drag.node)) { node.vx = node.vy = node.vz = 0; return; }
-      node.vx -= node.x * 0.02 * alpha; node.vy -= node.y * 0.02 * alpha; node.vz -= node.z * 0.05 * alpha;
+      node.vx -= node.x * 0.02 * alpha; node.vy -= node.y * 0.02 * alpha; node.vz -= node.z * (state.mode3d ? 0.02 : 0.05) * alpha;
       node.vx *= 0.6; node.vy *= 0.6; node.vz *= 0.6;
+      const speed = Math.hypot(node.vx, node.vy, node.vz);
+      if (speed > MAX_SPEED) { const s = MAX_SPEED / speed; node.vx *= s; node.vy *= s; node.vz *= s; }
       node.x += node.vx; node.y += node.vy; node.z += node.vz;
     });
+    const count = state.visibleNodes.length;
+    if (!count) return;
+    let cx = 0, cy = 0, cz = 0;
+    state.visibleNodes.forEach((node) => { cx += node.x; cy += node.y; cz += node.z; });
+    cx /= count; cy /= count; cz /= count;
+    const held = state.drag && state.drag.node;
+    state.visibleNodes.forEach((node) => { if (node !== held) { node.x -= cx; node.y -= cy; node.z -= cz; } });
   }
 
-  function project(node) {
-    return {x: (node.x - state.cam.x) * state.cam.k + state.width / 2, y: (node.y - state.cam.y) * state.cam.k + state.height / 2, s: 1};
+  function rotate(x, y, z) {
+    const cam = state.cam, cy = Math.cos(cam.rotY), sy = Math.sin(cam.rotY), cx = Math.cos(cam.rotX), sx = Math.sin(cam.rotX);
+    const x1 = x * cy + z * sy, z1 = z * cy - x * sy;
+    return {x: x1, y: y * cx - z1 * sx, z: y * sx + z1 * cx};
   }
+  function unrotate(x, y, z) {
+    const cam = state.cam, cy = Math.cos(cam.rotY), sy = Math.sin(cam.rotY), cx = Math.cos(cam.rotX), sx = Math.sin(cam.rotX);
+    const y1 = y * cx + z * sx, z1 = z * cx - y * sx;
+    return {x: x * cy - z1 * sy, y: y1, z: x * sy + z1 * cy};
+  }
+  function project(node) {
+    const cam = state.cam;
+    if (!state.mode3d) return {x: (node.x - cam.x) * cam.k + state.width / 2, y: (node.y - cam.y) * cam.k + state.height / 2, s: 1, depth: 0};
+    const p = rotate(node.x - cam.x, node.y - cam.y, node.z - cam.z);
+    const s = FOCAL / Math.max(FOCAL * 0.2, FOCAL + p.z);
+    return {x: p.x * s * cam.k + state.width / 2, y: p.y * s * cam.k + state.height / 2, s: s, depth: p.z};
+  }
+  function fade(scale) { return state.mode3d ? clamp(0.4 + scale * 0.6, 0.3, 1) : 1; }
   function emphasis(node) {
     if (state.selected) {
       const focus = state.selected.s ? [state.selected.s, state.selected.t] : [state.selected];
@@ -114,10 +166,15 @@
   function draw() {
     ctx.clearRect(0, 0, state.width, state.height);
     const k = state.cam.k;
-    state.visibleEdges.forEach((edge) => {
-      const a = project(edge.s), b = project(edge.t);
+    state.visibleNodes.forEach((node) => { node.p = project(node); });
+    state.order = state.mode3d ? state.visibleNodes.slice().sort((a, b) => b.p.depth - a.p.depth) : state.visibleNodes;
+    const edgeOrder = state.mode3d
+      ? state.visibleEdges.slice().sort((a, b) => (b.s.p.depth + b.t.p.depth) - (a.s.p.depth + a.t.p.depth))
+      : state.visibleEdges;
+    edgeOrder.forEach((edge) => {
+      const a = edge.s.p, b = edge.t.p;
       const strong = state.selected && (state.selected === edge || state.selected === edge.s || state.selected === edge.t);
-      ctx.globalAlpha = Math.min(emphasis(edge.s), emphasis(edge.t)) * (strong ? 1 : 0.3 + edge.confidence * 0.6);
+      ctx.globalAlpha = Math.min(emphasis(edge.s), emphasis(edge.t)) * (strong ? 1 : 0.3 + edge.confidence * 0.6) * fade(Math.min(a.s, b.s));
       ctx.strokeStyle = RELATION_COLORS[edge.relation] || "#7f8a9e";
       ctx.lineWidth = (strong || state.hover === edge ? 2.5 : 1) * Math.min(a.s, b.s);
       ctx.setLineDash(STRUCTURAL.has(edge.relation) ? [3, 4] : []);
@@ -135,10 +192,10 @@
       }
     });
     ctx.font = "12px -apple-system, Helvetica, Arial, sans-serif";
-    state.visibleNodes.forEach((node) => {
-      const p = project(node), r = node.r * k * p.s;
+    state.order.forEach((node) => {
+      const p = node.p, r = node.r * k * p.s;
       const active = node === state.hover || node === state.selected;
-      ctx.globalAlpha = emphasis(node);
+      ctx.globalAlpha = emphasis(node) * fade(p.s);
       ctx.fillStyle = KIND_COLORS[node.kind] || "#8fa3b8";
       ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI * 2); ctx.fill();
       ctx.lineWidth = active ? 3 : 1.2;
@@ -154,8 +211,8 @@
   }
 
   function hitTest(x, y) {
-    for (let i = state.visibleNodes.length - 1; i >= 0; i--) {
-      const node = state.visibleNodes[i], p = project(node), r = node.r * state.cam.k * p.s + 3;
+    for (let i = state.order.length - 1; i >= 0; i--) {
+      const node = state.order[i], p = project(node), r = node.r * state.cam.k * p.s + 3;
       if ((p.x - x) ** 2 + (p.y - y) ** 2 <= r * r) return node;
     }
     let best = null, bestDistance = 5;
@@ -212,16 +269,35 @@
   }
   function fit() {
     if (!state.visibleNodes.length) return;
-    const xs = state.visibleNodes.map((node) => node.x), ys = state.visibleNodes.map((node) => node.y);
-    const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
-    state.cam.x = (minX + maxX) / 2; state.cam.y = (minY + maxY) / 2;
-    state.cam.k = Math.max(0.05, Math.min(4, 0.9 * Math.min(state.width / (maxX - minX + 120), state.height / (maxY - minY + 120))));
+    const span = (axis) => {
+      const values = state.visibleNodes.map((node) => node[axis]), low = Math.min(...values), high = Math.max(...values);
+      state.cam[axis] = (low + high) / 2; return high - low;
+    };
+    const width = span("x"), height = span("y"), depth = span("z");
+    const extent = state.mode3d ? Math.max(width, height, depth) : 0;
+    state.cam.k = clamp(0.9 * Math.min(state.width / (Math.max(width, extent) + 120), state.height / (Math.max(height, extent) + 120)), 0.05, 4);
     draw();
+  }
+  function moveNode(node, dx, dy) {
+    const scale = state.cam.k * (node.p ? node.p.s : 1);
+    const d = state.mode3d ? unrotate(dx / scale, dy / scale, 0) : {x: dx / scale, y: dy / scale, z: 0};
+    node.x += d.x; node.y += d.y; node.z += d.z; state.alpha = Math.max(state.alpha, 0.3);
+  }
+  function pan(dx, dy) {
+    const d = state.mode3d ? unrotate(dx / state.cam.k, dy / state.cam.k, 0) : {x: dx / state.cam.k, y: dy / state.cam.k, z: 0};
+    state.cam.x -= d.x; state.cam.y -= d.y; state.cam.z -= d.z;
+  }
+  function setMode(mode3d) {
+    state.mode3d = mode3d;
+    sidebar("mode-3d").classList.toggle("active", mode3d);
+    sidebar("spin").disabled = !mode3d;
+    sidebar("hint").textContent = mode3d ? HINTS.deep : HINTS.flat;
+    state.alpha = Math.max(state.alpha, 0.5); fit();
   }
 
   canvas.addEventListener("mousedown", (event) => {
     const hit = hitTest(event.offsetX, event.offsetY);
-    state.drag = {node: hit && !hit.s ? hit : null, x: event.offsetX, y: event.offsetY, moved: false};
+    state.drag = {node: hit && !hit.s ? hit : null, x: event.offsetX, y: event.offsetY, moved: false, pan: event.shiftKey};
     canvas.classList.add("dragging");
   });
   window.addEventListener("mousemove", (event) => {
@@ -230,8 +306,9 @@
     if (state.drag) {
       const dx = x - state.drag.x, dy = y - state.drag.y;
       if (Math.abs(dx) + Math.abs(dy) > 2) state.drag.moved = true;
-      if (state.drag.node) { state.drag.node.x += dx / state.cam.k; state.drag.node.y += dy / state.cam.k; state.alpha = Math.max(state.alpha, 0.3); }
-      else { state.cam.x -= dx / state.cam.k; state.cam.y -= dy / state.cam.k; }
+      if (state.drag.node) moveNode(state.drag.node, dx, dy);
+      else if (state.mode3d && !state.drag.pan) { state.cam.rotY += dx * 0.006; state.cam.rotX = clamp(state.cam.rotX + dy * 0.006, -1.5, 1.5); }
+      else pan(dx, dy);
       state.drag.x = x; state.drag.y = y; draw(); return;
     }
     const hit = hitTest(x, y);
@@ -248,8 +325,9 @@
   canvas.addEventListener("wheel", (event) => {
     event.preventDefault();
     const factor = Math.exp(-event.deltaY * 0.0015);
+    if (state.mode3d) { state.cam.k = clamp(state.cam.k * factor, 0.05, 8); draw(); return; }
     const before = {x: (event.offsetX - state.width / 2) / state.cam.k + state.cam.x, y: (event.offsetY - state.height / 2) / state.cam.k + state.cam.y};
-    state.cam.k = Math.max(0.05, Math.min(8, state.cam.k * factor));
+    state.cam.k = clamp(state.cam.k * factor, 0.05, 8);
     state.cam.x = before.x - (event.offsetX - state.width / 2) / state.cam.k;
     state.cam.y = before.y - (event.offsetY - state.height / 2) / state.cam.k;
     draw();
@@ -285,10 +363,38 @@
     sidebar("relayout").addEventListener("click", () => { state.alpha = 1; });
     sidebar("expand-all").addEventListener("click", () => { stores.forEach((store) => state.expanded.add(store.id)); refresh(true); });
     sidebar("collapse-all").addEventListener("click", () => { state.expanded.clear(); refresh(true); });
+    sidebar("mode-3d").addEventListener("click", () => setMode(!state.mode3d));
+    sidebar("spin").addEventListener("click", () => { state.spin = !state.spin; sidebar("spin").classList.toggle("active", state.spin); });
+  }
+  function buildInsights() {
+    const insights = DATA.insights;
+    const list = (items, field) => items.map((item) => `${escape(item.label)} ${item[field]}`).join(", ") || "none";
+    const counts = (values) => Object.entries(values).map(([key, value]) => `${value} ${key}`).join(", ") || "none";
+    const lines = [
+      `<p>${insights.projects} projects (${counts(insights.project_statuses)}), ${insights.domains} domains, ${insights.records} records, ${insights.edges} edges.</p>`,
+      `<p><b>Hubs:</b> ${list(insights.hubs, "degree")}</p>`,
+      `<p><b>Most referenced:</b> ${list(insights.most_referenced, "in_degree")}</p>`,
+      `<p><b>Orphans:</b> ${insights.orphans.length ? insights.orphans.map(escape).join(", ") : "none"}</p>`,
+      `<p><b>Weak edges:</b> ${insights.weak_edges} of ${insights.relationship_edges}</p>`,
+    ];
+    insights.domain_coverage.forEach((domain) => lines.push(
+      `<p><b>Domain ${escape(domain.id)}:</b> ${domain.members} members (${counts(domain.member_statuses)}), ${domain.records} records, ${domain.internal_edges} internal edges` +
+      (domain.isolated_members.length ? `; isolated: ${domain.isolated_members.map(escape).join(", ")}` : "") + "</p>"));
+    const level = insights.record_level;
+    if (level && level.records) {
+      lines.push(`<p><b>Records:</b> ${level.records} nodes, ${counts(level.relations)}; ${level.unconnected} unconnected; most mentioned: ${list(level.most_mentioned, "mentions")}</p>`);
+    }
+    sidebar("insights").innerHTML = lines.join("");
   }
 
-  function loop() { tick(); if (state.alpha >= 0.002) draw(); requestAnimationFrame(loop); }
-  buildControls(); select(null); resize(); refresh(false);
+  function loop() {
+    tick();
+    const spinning = state.mode3d && state.spin && !state.drag;
+    if (spinning) state.cam.rotY += 0.003;
+    if (state.alpha >= 0.002 || spinning) draw();
+    requestAnimationFrame(loop);
+  }
+  buildControls(); buildInsights(); select(null); resize(); refresh(false);
   setTimeout(fit, 900);
   loop();
 })();

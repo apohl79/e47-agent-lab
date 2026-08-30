@@ -19,6 +19,9 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
 #sidebar input[type="range"] { width: 100%; }
 #sidebar button { margin: 2px 4px 2px 0; padding: 4px 8px; border: 1px solid var(--line); border-radius: 4px; background: var(--bg); color: var(--text); cursor: pointer; }
 #sidebar button.active { border-color: var(--accent); color: var(--accent); }
+#sidebar button:disabled { opacity: 0.4; cursor: default; }
+#sidebar details summary { font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 16px 0 6px; cursor: pointer; }
+#insights p { margin: 3px 0; font-size: 12px; }
 #sidebar ul { margin: 4px 0; padding-left: 18px; }
 #sidebar li { margin: 2px 0; }
 .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
