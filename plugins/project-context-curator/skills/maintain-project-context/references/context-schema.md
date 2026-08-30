@@ -79,8 +79,9 @@ Selectors are typed objects:
 - `self` resolves while indexing to the owning project or current user.
 - `machine` is local to the active XDG data directory, so it has no host or
   other machine identifier.
-- `domain` requires an explicit validated domain ID and exact project membership
-  in the user configuration; `domain:self` is invalid.
+- `domain` requires an explicit validated domain ID and exact membership in the
+  user configuration, declared as checkout paths and/or normalized Git remote
+  URLs; `domain:self` is invalid.
 - `universal` has no selector and denotes knowledge that is independent of
   those boundaries.
 - Multiple selectors are an intersection: every selector must be active for a
@@ -147,9 +148,14 @@ reported as `unconfigured` while retaining local compatibility. An older valid
 
 Selector keys and composite hashes are deterministic. Domain IDs are lowercase,
 1–64 characters, and may contain letters, digits, dots, underscores, or hyphens.
-Without Git-store mode, domain membership is stored in XDG configuration. A Git
-store persists membership as stable project store IDs in its manifest; absolute
-checkout bindings remain local in XDG configuration.
+Domain membership is stored in XDG configuration as
+`{"projects": [<absolute paths>], "remotes": [<normalized remote URLs>]}`; a
+legacy plain path list is still read as `projects`. A checkout belongs to a
+domain when its path is listed or when its normalized Git remote (see
+`remote_url` below) is listed, so remote members need not be cloned. A Git store
+persists path members as stable project store IDs in `domains` and remote
+members verbatim in `domain_remotes`; absolute checkout bindings remain local
+in XDG configuration.
 
 A scope root has no `storage_policy`; that policy applies only to a project
 store. Its additional metadata is:
@@ -193,6 +199,9 @@ checkout paths:
   "domains": {
     "billing": ["f0b9cb7c-2cc4-4eb2-907f-b69ec16d3702"]
   },
+  "domain_remotes": {
+    "billing": ["github.com/acme/billing-worker"]
+  },
   "created_at": "2026-08-28T08:00:00+00:00",
   "updated_at": "2026-08-28T08:00:00+00:00"
 }
@@ -205,6 +214,10 @@ the host is lowercased, so `git@github.com:acme/billing-api.git` and
 on `init`, `git-store-bind`, and `update`; local-path and `file://` remotes
 are never recorded. `init` refuses to enroll a checkout whose remote is already
 registered and points to `git-store-bind --match-remote`.
+
+`domain_remotes` lists each domain's remote-declared members. `init` and
+`git-store-bind` restore a domain into local XDG configuration when the
+checkout's project ID is in `domains` or its remote is in `domain_remotes`.
 
 XDG configuration records the runtime decision, store checkout path, store
 identity, and absolute checkout-to-project-ID bindings. `storage-migrate
