@@ -289,10 +289,15 @@ canonical store; it only makes those facts inapplicable to the removed project.
       ```
 
    4. Read only the matching generated sections or files reported by search. Global results include the project or scope label and canonical path.
-   5. If search returns no matches, run `status` to locate canonical JSON, then
+   5. Domain and universal records are not in the `docs/context` views; the `index.md`
+      "Scoped Context" section and `status` list their counts and canonical paths, and
+      `search` (or the canonical `context.json`) is the only way to read them. On
+      conflict, a project record overrides a domain record, which overrides a
+      universal record.
+   6. If search returns no matches, run `status` to locate canonical JSON, then
       fall back to `rg -n -i '<term1>|<term2>' <canonical-context.json>
       docs/context/*.md`.
-   6. Load an entire large generated view only when the task itself is broad enough to require it.
+   7. Load an entire large generated view only when the task itself is broad enough to require it.
 3. If `.no-project-context` exists at the repository root, do not initialize context and do not ask again.
 4. If `docs/context/index.md` does not exist, ask one concise question before executing ordinary feature, research, planning, or review work: whether Project Context Curator should be initialized for this project.
    - If the user says no, run `scripts/project_context.py ignore --repo <repo>` and continue without project context.

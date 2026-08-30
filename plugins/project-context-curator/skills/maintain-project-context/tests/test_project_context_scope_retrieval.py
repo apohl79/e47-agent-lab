@@ -128,3 +128,72 @@ def test_universal_fact_matches_another_initialized_project(tmp_path: Path) -> N
     search = run_context("search", "--query", "UTC", repo=other, env=env)
 
     assert (added.returncode, "UTC" in search.stdout) == (0, True)
+
+
+def test_status_and_index_expose_applicable_scoped_context(tmp_path: Path) -> None:
+    env = isolated_environment(tmp_path / "xdg")
+    member = tmp_path / "workspace/member"
+    outsider = tmp_path / "outside"
+    initialize(member, env)
+    initialize(outsider, env)
+    run_context(
+        "domain-set", "--domain", "billing", "--project", str(member), repo=member, env=env
+    )
+    run_context(
+        "add-term",
+        "--term",
+        "Ledger",
+        "--definition",
+        "Append-only balance journal",
+        "--applicability",
+        "domain:billing",
+        repo=member,
+        env=env,
+    )
+    run_context(
+        "add-component",
+        "--name",
+        "billing-worker",
+        "--responsibility",
+        "Settles invoices",
+        "--applicability",
+        "domain:billing",
+        repo=member,
+        env=env,
+    )
+    added = run_context(
+        "add-term",
+        "--term",
+        "UTC",
+        "--definition",
+        "Coordinated Universal Time",
+        "--applicability",
+        "universal",
+        repo=outsider,
+        env=env,
+    )
+    domain_path = tmp_path / "xdg/data/contexts/domains/billing/context.json"
+    universal_path = tmp_path / "xdg/data/contexts/universal/context.json"
+    run_context("update", repo=member, env=env)
+    run_context("update", repo=outsider, env=env)
+    member_status = run_context("status", repo=member, env=env).stdout
+    outsider_status = run_context("status", repo=outsider, env=env).stdout
+    member_index = (member / "docs/context/index.md").read_text(encoding="utf-8")
+    outsider_index = (outsider / "docs/context/index.md").read_text(encoding="utf-8")
+
+    assert (
+        added.returncode,
+        f"Scoped context domain:billing: 1 terms, 1 components, 0 patterns "
+        f"(canonical: {domain_path}; not in docs/context views, use search)." in member_status,
+        f"Scoped context universal: 1 terms, 0 components, 0 patterns" in member_status,
+        "domain:billing" in outsider_status,
+        "### domain:billing — 1 terms, 1 components, 0 patterns" in member_index,
+        f"- Canonical: `{domain_path}`" in member_index,
+        "- Terms: Ledger" in member_index,
+        "- Components: billing-worker" in member_index,
+        f"### universal — 1 terms, 0 components, 0 patterns" in member_index,
+        "a project record overrides a domain record, which overrides a universal record"
+        in member_index,
+        "domain:billing" in outsider_index,
+        f"- Canonical: `{universal_path}`" in outsider_index,
+    ) == (0, True, True, False, True, True, True, True, True, True, False, True)
