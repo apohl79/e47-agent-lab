@@ -4477,17 +4477,17 @@ def audit_context(args: argparse.Namespace) -> None:
         )
 
 
-GRAPH_FORMATS = ("json", "text")
+GRAPH_FORMATS = ("json", "text", "mermaid", "dot")
 GRAPH_LEVELS = ("projects", "records")
 
 
-def load_graph_backend() -> Any:
+def load_graph_backend(name: str = "context_graph") -> Any:
     import importlib
 
     scripts = str(Path(__file__).resolve().parent)
     if scripts not in sys.path:
         sys.path.insert(0, scripts)
-    return importlib.import_module("context_graph")
+    return importlib.import_module(name)
 
 
 def knowledge_graph_inputs(repo: Path) -> tuple[tuple[Any, ...], tuple[Any, ...], list[Any]]:
@@ -4539,7 +4539,13 @@ def graph_context(args: argparse.Namespace) -> None:
         raise SystemExit(f"Knowledge graph view failed: {exc}") from exc
     if args.level == backend.RECORD_LEVEL:
         graph = backend.add_record_level(graph, records)
-    renderers = {"json": backend.render_json, "text": backend.render_text}
+    exports = load_graph_backend("context_graph_export")
+    renderers = {
+        "json": backend.render_json,
+        "text": backend.render_text,
+        "mermaid": exports.render_mermaid,
+        "dot": exports.render_dot,
+    }
     output = renderers[args.format](graph)
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)

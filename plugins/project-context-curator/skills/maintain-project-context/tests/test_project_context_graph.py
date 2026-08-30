@@ -135,6 +135,8 @@ def test_graph_text_views_focus_on_repo_domain_and_output_file(tmp_path: Path) -
     detailed = run_context(
         "graph", "--domain", "billing", "--level", "records", repo=gateway, env=env
     )
+    mermaid = run_context("graph", "--project", "--format", "mermaid", repo=gateway, env=env)
+    dot = run_context("graph", "--project", "--format", "dot", repo=gateway, env=env)
 
     assert (
         overview.returncode,
@@ -145,6 +147,7 @@ def test_graph_text_views_focus_on_repo_domain_and_output_file(tmp_path: Path) -
         (tmp_path / "out/graph.txt").read_text(encoding="utf-8") == overview.stdout,
         (unknown.returncode, unknown.stderr.strip()),
         detailed.stdout.splitlines()[-1],
+        (mermaid.stdout.splitlines()[:3], dot.stdout.splitlines()[0], dot.stdout.splitlines()[-1]),
     ) == (
         0,
         [
@@ -162,4 +165,9 @@ def test_graph_text_views_focus_on_repo_domain_and_output_file(tmp_path: Path) -
         (1, "Knowledge graph view failed: unknown domain 'ops'"),
         "Records: 2 nodes; record edges (1 owns); 1 without record edges; "
         "most mentioned: none",
+        (
+            ["graph LR", '    n0["gateway"]', '    n1["ledger"]'],
+            "digraph knowledge {",
+            "}",
+        ),
     )
