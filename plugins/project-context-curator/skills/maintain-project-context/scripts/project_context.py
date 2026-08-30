@@ -4478,6 +4478,7 @@ def audit_context(args: argparse.Namespace) -> None:
 
 
 GRAPH_FORMATS = ("json", "text")
+GRAPH_LEVELS = ("projects", "records")
 
 
 def load_graph_backend() -> Any:
@@ -4536,6 +4537,8 @@ def graph_context(args: argparse.Namespace) -> None:
         graph = backend.apply_view(graph, view)
     except ValueError as exc:
         raise SystemExit(f"Knowledge graph view failed: {exc}") from exc
+    if args.level == backend.RECORD_LEVEL:
+        graph = backend.add_record_level(graph, records)
     renderers = {"json": backend.render_json, "text": backend.render_text}
     output = renderers[args.format](graph)
     if args.output:
@@ -5304,6 +5307,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     graph_parser.add_argument(
         "--depth", type=int, default=1, help="Hops to include around the focus node"
+    )
+    graph_parser.add_argument(
+        "--level",
+        choices=GRAPH_LEVELS,
+        default="projects",
+        help="Stop at project and domain nodes or attach every record of the shown stores",
     )
     graph_parser.add_argument(
         "--min-confidence",

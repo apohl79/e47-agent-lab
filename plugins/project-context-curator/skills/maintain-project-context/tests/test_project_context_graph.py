@@ -132,6 +132,9 @@ def test_graph_text_views_focus_on_repo_domain_and_output_file(tmp_path: Path) -
         "graph", "--output", str(tmp_path / "out/graph.txt"), repo=gateway, env=env
     )
     unknown = run_context("graph", "--domain", "ops", repo=gateway, env=env)
+    detailed = run_context(
+        "graph", "--domain", "billing", "--level", "records", repo=gateway, env=env
+    )
 
     assert (
         overview.returncode,
@@ -141,6 +144,7 @@ def test_graph_text_views_focus_on_repo_domain_and_output_file(tmp_path: Path) -
         written.stdout,
         (tmp_path / "out/graph.txt").read_text(encoding="utf-8") == overview.stdout,
         (unknown.returncode, unknown.stderr.strip()),
+        detailed.stdout.splitlines()[-1],
     ) == (
         0,
         [
@@ -156,4 +160,6 @@ def test_graph_text_views_focus_on_repo_domain_and_output_file(tmp_path: Path) -
         f"Knowledge graph written to {tmp_path / 'out/graph.txt'}\n",
         True,
         (1, "Knowledge graph view failed: unknown domain 'ops'"),
+        "Records: 2 nodes; record edges (1 owns); 1 without record edges; "
+        "most mentioned: none",
     )

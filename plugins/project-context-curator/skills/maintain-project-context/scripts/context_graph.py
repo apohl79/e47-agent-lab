@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Sequence
@@ -20,6 +21,15 @@ MEMBER_RELATION = "member_of"
 RECORD_KINDS = ("term", "component", "pattern", "question")
 WEAK_CONFIDENCE = 0.6
 EVIDENCE_FIELDS = ("record_id", "kind", "label")
+STORE_KINDS = frozenset({"project", "domain", "universal"})
+RECORD_LEVEL = "records"
+STORED_IN_RELATION = "stored_in"
+MENTIONS_RELATION = "mentions"
+SHADOWS_RELATION = "shadows"
+DIVERGES_RELATION = "diverges"
+MENTIONS_CONFIDENCE = 0.7
+MENTION_LABEL_KINDS = ("term", "component")
+MIN_MENTION_LABEL = 3
 
 
 @dataclass(frozen=True)
@@ -31,6 +41,7 @@ class GraphNode:
     path: str = ""
     store: str = ""
     counts: tuple[tuple[str, int], ...] = ()
+    summary: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {**asdict(self), "counts": dict(self.counts)}
@@ -315,6 +326,165 @@ def apply_view(graph: KnowledgeGraph, view: GraphView) -> KnowledgeGraph:
     )
 
 
+def record_node_id(record: ContextRecord) -> str:
+    return f"record:{record.id}"
+
+
+def record_key(record: ContextRecord) -> tuple[str, str]:
+    return record.kind, record.label.casefold()
+
+
+def applicable_stores(graph: KnowledgeGraph, store: str) -> tuple[str, ...]:
+    stores = [store]
+    stores.extend(
+        edge.target
+        for edge in graph.edges
+        if edge.relation == MEMBER_RELATION and edge.source == store
+    )
+    if graph.node("universal") is not None:
+        stores.append("universal")
+    return tuple(dict.fromkeys(stores))
+
+
+def mention_matcher(
+    records: Sequence[ContextRecord],
+) -> tuple[re.Pattern[str] | None, dict[str, list[ContextRecord]]]:
+    targets: dict[str, list[ContextRecord]] = {}
+    for record in records:
+        if record.kind in MENTION_LABEL_KINDS and len(record.label) >= MIN_MENTION_LABEL:
+            targets.setdefault(record.label.casefold(), []).append(record)
+    if not targets:
+        return None, {}
+    alternatives = "|".join(
+        re.escape(label) for label in sorted(targets, key=lambda value: (-len(value), value))
+    )
+    return re.compile(rf"(?<![\w-])(?:{alternatives})(?![\w-])", re.IGNORECASE), targets
+
+
+def mention_edges(
+    by_store: dict[str, list[ContextRecord]],
+    graph: KnowledgeGraph,
+) -> list[GraphEdge]:
+    edges: list[GraphEdge] = []
+    matchers: dict[tuple[str, ...], Any] = {}
+    for store, records in by_store.items():
+        stores = applicable_stores(graph, store)
+        if stores not in matchers:
+            matchers[stores] = mention_matcher(
+                [record for scope in stores for record in by_store.get(scope, ())]
+            )
+        matcher, targets = matchers[stores]
+        if matcher is None:
+            continue
+        for record in records:
+            mentioned = {match.group(0).casefold() for match in matcher.finditer(record.text)}
+            for label in sorted(mentioned):
+                for target in targets[label]:
+                    if record_key(target) != record_key(record):
+                        edges.append(
+                            GraphEdge(
+                                record_node_id(record),
+                                record_node_id(target),
+                                MENTIONS_RELATION,
+                                MENTIONS_CONFIDENCE,
+                                RECORD_LEVEL,
+                            )
+                        )
+    return edges
+
+
+def shadow_edges(
+    by_store: dict[str, list[ContextRecord]],
+    graph: KnowledgeGraph,
+) -> list[GraphEdge]:
+    by_key = {
+        store: {record_key(record): record for record in records}
+        for store, records in by_store.items()
+    }
+    return [
+        GraphEdge(
+            record_node_id(record),
+            record_node_id(by_key[scope][record_key(record)]),
+            SHADOWS_RELATION,
+            1.0,
+            RECORD_LEVEL,
+        )
+        for store, records in by_store.items()
+        if store.startswith("project:")
+        for scope in applicable_stores(graph, store)[1:]
+        for record in records
+        if record_key(record) in by_key.get(scope, {})
+    ]
+
+
+def divergence_edges(
+    by_store: dict[str, list[ContextRecord]],
+    graph: KnowledgeGraph,
+) -> list[GraphEdge]:
+    edges: list[GraphEdge] = []
+    for domain in (node for node in graph.nodes if node.kind == "domain"):
+        definitions: dict[tuple[str, str], list[ContextRecord]] = {}
+        for edge in graph.edges:
+            if edge.relation != MEMBER_RELATION or edge.target != domain.id:
+                continue
+            for record in by_store.get(edge.source, ()):
+                if record.kind in MENTION_LABEL_KINDS:
+                    definitions.setdefault(record_key(record), []).append(record)
+        for records in definitions.values():
+            ordered = sorted(records, key=record_node_id)
+            for index, first in enumerate(ordered):
+                for second in ordered[index + 1 :]:
+                    if first.summary.casefold() != second.summary.casefold():
+                        edges.append(
+                            GraphEdge(
+                                record_node_id(first),
+                                record_node_id(second),
+                                DIVERGES_RELATION,
+                                1.0,
+                                RECORD_LEVEL,
+                            )
+                        )
+    return edges
+
+
+def add_record_level(graph: KnowledgeGraph, records: Sequence[ContextRecord]) -> KnowledgeGraph:
+    by_store: dict[str, list[ContextRecord]] = {}
+    for record in records:
+        store = "" if is_private(record) else store_of(record)
+        if graph.node(store) is not None:
+            by_store.setdefault(store, []).append(record)
+    nodes = list(graph.nodes)
+    edges = list(graph.edges)
+    known: set[str] = set()
+    for store, store_records in by_store.items():
+        for record in store_records:
+            node_id = record_node_id(record)
+            known.add(node_id)
+            nodes.append(
+                GraphNode(
+                    node_id, record.kind, record.label, "", "", store, summary=record.summary
+                )
+            )
+            edges.append(GraphEdge(node_id, store, STORED_IN_RELATION, 1.0, RECORD_LEVEL))
+    for edge in graph.edges:
+        for record_id, _, _ in edge.evidence:
+            if f"record:{record_id}" in known:
+                edges.append(
+                    GraphEdge(
+                        f"record:{record_id}",
+                        edge.target,
+                        edge.relation,
+                        edge.confidence,
+                        RECORD_LEVEL,
+                    )
+                )
+    edges.extend(mention_edges(by_store, graph))
+    edges.extend(shadow_edges(by_store, graph))
+    edges.extend(divergence_edges(by_store, graph))
+    ordered = tuple(sorted(nodes, key=lambda node: node.id.casefold()))
+    return KnowledgeGraph(ordered, dedupe_edges(edges), replace(graph.view, level=RECORD_LEVEL))
+
+
 def ranked(values: dict[str, int], labels: dict[str, str], limit: int) -> list[tuple[str, int]]:
     ordered = sorted(values.items(), key=lambda item: (-item[1], labels[item[0]].casefold()))
     return [(labels[node_id], count) for node_id, count in ordered[:limit] if count]
@@ -322,6 +492,36 @@ def ranked(values: dict[str, int], labels: dict[str, str], limit: int) -> list[t
 
 def display_label(node: GraphNode) -> str:
     return node.label if node.kind == "project" else node.id
+
+
+def record_insights(graph: KnowledgeGraph) -> dict[str, Any]:
+    records = [node for node in graph.nodes if node.kind not in STORE_KINDS]
+    if not records:
+        return {}
+    stores = {node.id: display_label(node) for node in graph.nodes if node.kind in STORE_KINDS}
+    labels = {
+        node.id: f"{node.kind} {node.label} ({stores.get(node.store, node.store)})"
+        for node in records
+    }
+    connected: set[str] = set()
+    mentioned = {node.id: 0 for node in records}
+    relations: dict[str, int] = {}
+    for edge in graph.edges:
+        if edge.level != RECORD_LEVEL or edge.relation == STORED_IN_RELATION:
+            continue
+        relations[edge.relation] = relations.get(edge.relation, 0) + 1
+        connected.update((edge.source, edge.target))
+        if edge.relation == MENTIONS_RELATION:
+            mentioned[edge.target] += 1
+    return {
+        "records": len(records),
+        "relations": dict(sorted(relations.items())),
+        "unconnected": sum(node.id not in connected for node in records),
+        "most_mentioned": [
+            {"label": label, "mentions": count}
+            for label, count in ranked(mentioned, labels, 5)
+        ],
+    }
 
 
 def graph_insights(graph: KnowledgeGraph) -> dict[str, Any]:
@@ -336,7 +536,7 @@ def graph_insights(graph: KnowledgeGraph) -> dict[str, Any]:
     weak = 0
     for edge in graph.edges:
         relations[edge.relation] = relations.get(edge.relation, 0) + 1
-        if edge.relation == MEMBER_RELATION:
+        if edge.relation == MEMBER_RELATION or edge.level == RECORD_LEVEL:
             continue
         degree[edge.source] += 1
         degree[edge.target] += 1
@@ -380,7 +580,8 @@ def graph_insights(graph: KnowledgeGraph) -> dict[str, Any]:
         "records": sum(count for node in graph.nodes for _, count in node.counts),
         "edges": len(graph.edges),
         "relationship_edges": sum(
-            count for relation, count in relations.items() if relation != MEMBER_RELATION
+            edge.relation != MEMBER_RELATION and edge.level != RECORD_LEVEL
+            for edge in graph.edges
         ),
         "relations": dict(sorted(relations.items())),
         "weak_edges": weak,
@@ -397,6 +598,7 @@ def graph_insights(graph: KnowledgeGraph) -> dict[str, Any]:
             if node.status == "initialized" and degree[node.id] == 0
         ),
         "domain_coverage": coverage,
+        "record_level": record_insights(graph),
     }
 
 
@@ -433,6 +635,14 @@ def render_text(graph: KnowledgeGraph) -> str:
             f"records; {domain['internal_edges']} edges between members; "
             f"{len(isolated)} initialized members without edges"
             + (": " + ", ".join(isolated) if isolated else "")
+        )
+    records = insights["record_level"]
+    if records:
+        lines.append(
+            f"Records: {records['records']} nodes; record edges "
+            f"({format_counts(records['relations'])}); {records['unconnected']} without "
+            "record edges; most mentioned: "
+            + format_ranked(records["most_mentioned"], "mentions")
         )
     return "\n".join(lines)
 
