@@ -465,4 +465,13 @@ def test_existing_git_store_can_bind_a_fresh_checkout_by_stable_store_id(
         config["domains"]["portable-domain"],
         (fresh / "docs/context/index.md").exists(),
         (fresh / "docs/context/context.json").exists(),
-    ) == (0, 0, project_id, True, True, [str(fresh.resolve())], True, False)
+    ) == (
+        0,
+        0,
+        project_id,
+        True,
+        True,
+        {"projects": [str(fresh.resolve())], "remotes": []},
+        True,
+        False,
+    )

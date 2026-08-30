@@ -44,7 +44,9 @@ in the query, direct relationships, and high-confidence relationships within two
 graph hops. Explicit workspace-wide queries consider every enrolled repository,
 while strongly matched otherwise unrelated records are eligible individually.
 Applicability remains the truth scope: non-project selectors such as domain,
-user, machine, and universal must still all be active. Ranking
+user, machine, and universal must still all be active. Domain membership is
+declared per checkout path or per Git remote URL, so a domain can include
+repositories that are not cloned locally. Ranking
 combines hybrid relevance, graph distance and confidence, and per-project quotas.
 
 Initial setup asks the user to select local/distributed or dedicated Git-backed

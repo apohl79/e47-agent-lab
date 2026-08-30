@@ -64,7 +64,8 @@ python3 <skill-dir>/scripts/project_context.py global-init --repo . \
   --workspace-root ~/workspace
 python3 <skill-dir>/scripts/project_context.py global-enroll --repo .
 python3 <skill-dir>/scripts/project_context.py domain-set --repo . \
-  --domain billing --project ../billing-api --project ../billing-worker
+  --domain billing --project ../billing-api --project ../billing-worker \
+  --remote git@github.com:acme/billing-reports.git
 python3 <skill-dir>/scripts/project_context.py move --repo . \
   --type pattern --value "Signed commits" --applicability universal
 python3 <skill-dir>/scripts/project_context.py storage-status --repo .
@@ -120,7 +121,8 @@ python3 <skill-dir>/scripts/project_context.py git-store-bind --repo <repo> \
   --project-store-id <uuid>
 ```
 
-Binding restores persisted domain membership and regenerates project views.
+Binding (and `init` of a not-yet-registered checkout) restores persisted domain
+membership, including remote-declared members, and regenerates project views.
 User/machine knowledge and local absolute bindings never leave XDG storage.
 
 ### Optional global retrieval
@@ -256,8 +258,10 @@ remain private in XDG.
   verified.
 - Classify as domain only from user confirmation, authoritative domain
   documentation, or corroborating evidence in multiple registered domain
-  projects. Register exact membership with `domain-set`; never infer a domain
-  from directory names, repository names, or a single implementation.
+  projects. Register exact membership with `domain-set`, as checkout paths
+  (`--project`) and/or Git remote URLs (`--remote`) for repositories that may
+  not be cloned; never infer a domain from directory names, repository names,
+  or a single implementation.
 - Workspace applicability is legacy and read-only; reclassify existing records
   with `move`. Use user or machine only for the current identity or environment;
   use universal only for context-independent facts.
@@ -401,11 +405,15 @@ python3 <skill-dir>/scripts/project_context.py add-pattern --repo . \
   --name "Signed commits" --summary "..." --applicability universal
 ```
 
-Configure exact domain membership before storing domain facts:
+Configure exact domain membership before storing domain facts. `--project`
+members are checkout paths; `--remote` members are Git remote URLs, so a
+checkout whose `origin` matches joins the domain as soon as it is initialized
+or bound, even if it was not cloned when the domain was declared:
 
 ```bash
 python3 <skill-dir>/scripts/project_context.py domain-set --repo . \
-  --domain billing --project ../billing-api --project ../billing-worker
+  --domain billing --project ../billing-api --project ../billing-worker \
+  --remote git@github.com:acme/billing-reports.git
 python3 <skill-dir>/scripts/project_context.py add-term --repo ../billing-api \
   --term "Ledger" --definition "..." --applicability domain:billing
 ```
