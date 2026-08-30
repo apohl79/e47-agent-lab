@@ -9,7 +9,7 @@ Dual-host plugin marketplace for Codex and Claude Code.
 | `reviewers` | `0.7.1` | PR finalization, reviewer-team, and Slack review-request workflows. | `plugins/reviewers` | Codex, Claude Code |
 | `auto-compaction` | `0.1.0` | Claude Code auto-compaction gate with setup skill and checkpoint hooks. | `plugins/auto-compaction` | Claude Code |
 | `inline-discussion` | `1.7.7` | Browser UI for markdown docs with threaded AI conversations. Requires the `inline-discussion` CLI on PATH (installed by `./install.sh`). | `plugins/inline-discussion` | Codex, Claude Code |
-| `project-context-curator` | `4.0.0` | Selectable local or automatically synchronized Git-backed context with graph-assisted hybrid retrieval. | `plugins/project-context-curator` | Codex, Claude Code |
+| `project-context-curator` | `5.2.0` | Selectable local or automatically synchronized Git-backed context with graph-assisted hybrid retrieval and context hygiene audits. | `plugins/project-context-curator` | Codex, Claude Code |
 
 ## Install
 
@@ -58,6 +58,11 @@ commits, and pushes only curator-managed files directly to the configured
 remote's `main`. Unrelated checkout changes block the write; a rejected push
 keeps the local commit and returns an error. Stable IDs or recorded Git remote
 URLs plus `git-store-bind` restore a cloned store on another machine.
+
+Session start runs a read-only `audit` and reports one line when stores contain
+time-bound, aged, duplicated, divergent, dead-path, or oversized records.
+`$curate-project-context` triages those findings against repository evidence and
+applies only user-confirmed `remove`, `move`, or rewrite commands.
 
 `./install.sh --with-context-runtime` remains a deterministic convenience for
 provisioning the same runtime directly.

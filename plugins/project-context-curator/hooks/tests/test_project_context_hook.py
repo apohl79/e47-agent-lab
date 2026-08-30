@@ -453,6 +453,37 @@ def test_context_update_failure_is_non_blocking_and_logged(tmp_path: Path) -> No
     ) == (True, True)
 
 
+def test_session_start_reports_audit_findings_only_when_present(tmp_path: Path) -> None:
+    clean = tmp_path / "clean"
+    flagged = tmp_path / "flagged"
+    write_context(clean)
+    write_context(flagged)
+    (flagged / "docs/context/context.json").write_text(
+        json.dumps(
+            {
+                "terms": [],
+                "components": [],
+                "patterns": [{"name": "Retry flag", "summary": "Temporary workaround"}],
+                "open_questions": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    clean_text = run_hook("session-start", {"cwd": str(clean)})["hookSpecificOutput"][
+        "additionalContext"
+    ]
+    flagged_text = run_hook("session-start", {"cwd": str(flagged)})[
+        "hookSpecificOutput"
+    ]["additionalContext"]
+
+    assert (
+        "Context audit:" in clean_text,
+        "Context audit: 1 findings (1 time-bound); run $curate-project-context to review them."
+        in flagged_text,
+    ) == (False, True)
+
+
 def test_session_start_reports_stale_global_runtime_without_installing_it(
     tmp_path: Path,
 ) -> None:
