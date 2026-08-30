@@ -442,6 +442,19 @@ exist, and oversized stores or index views. `--format json` is for tooling and
 python3 <skill-dir>/scripts/project_context.py audit --repo . [--format text|json|hook]
 ```
 
+Export the knowledge graph without changing any store. `graph` turns every
+discovered project store, configured domain, and universal store into nodes,
+adds `member_of` edges from domain configuration (path and remote members), and
+reuses the relationship derivation for typed project edges with record
+evidence. Private user, machine, and workspace records are excluded. Focus with
+`--domain <id>` or `--project [name|path]` (bare `--project` means `--repo`),
+widen with `--depth`, and prune with `--min-confidence` or `--relation`:
+
+```bash
+python3 <skill-dir>/scripts/project_context.py graph --repo . [--domain <id> | --project [name]] \
+  [--depth 1] [--min-confidence 0.0] [--relation depends_on] [--format text|json] [--output PATH]
+```
+
 ## Rules
 
 - Apply the context admission gate before every `add-*` write. Store only durable knowledge with a verified applicability boundary. Follow the active repository or canonical Git-store policy; user/machine XDG stores remain private.

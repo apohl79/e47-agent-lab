@@ -18,6 +18,7 @@ GRAPH_SCHEMA_VERSION = 1
 PRIVATE_SCOPE_KINDS = frozenset({"user", "machine", "workspace"})
 MEMBER_RELATION = "member_of"
 RECORD_KINDS = ("term", "component", "pattern", "question")
+WEAK_CONFIDENCE = 0.6
 EVIDENCE_FIELDS = ("record_id", "kind", "label")
 
 
@@ -84,6 +85,7 @@ class KnowledgeGraph:
             "view": self.view.as_dict(),
             "nodes": [node.as_dict() for node in self.nodes],
             "edges": [edge.as_dict() for edge in self.edges],
+            "insights": graph_insights(self),
         }
 
 
@@ -311,6 +313,128 @@ def apply_view(graph: KnowledgeGraph, view: GraphView) -> KnowledgeGraph:
         ),
         replace(view, focus=focus),
     )
+
+
+def ranked(values: dict[str, int], labels: dict[str, str], limit: int) -> list[tuple[str, int]]:
+    ordered = sorted(values.items(), key=lambda item: (-item[1], labels[item[0]].casefold()))
+    return [(labels[node_id], count) for node_id, count in ordered[:limit] if count]
+
+
+def display_label(node: GraphNode) -> str:
+    return node.label if node.kind == "project" else node.id
+
+
+def graph_insights(graph: KnowledgeGraph) -> dict[str, Any]:
+    labels = {node.id: display_label(node) for node in graph.nodes}
+    projects = [node for node in graph.nodes if node.kind == "project"]
+    statuses: dict[str, int] = {}
+    for node in projects:
+        statuses[node.status] = statuses.get(node.status, 0) + 1
+    relations: dict[str, int] = {}
+    degree = {node.id: 0 for node in graph.nodes}
+    in_degree = {node.id: 0 for node in graph.nodes}
+    weak = 0
+    for edge in graph.edges:
+        relations[edge.relation] = relations.get(edge.relation, 0) + 1
+        if edge.relation == MEMBER_RELATION:
+            continue
+        degree[edge.source] += 1
+        degree[edge.target] += 1
+        in_degree[edge.target] += 1
+        weak += edge.confidence <= WEAK_CONFIDENCE
+    coverage = []
+    for domain in (node for node in graph.nodes if node.kind == "domain"):
+        members = {
+            edge.source
+            for edge in graph.edges
+            if edge.relation == MEMBER_RELATION and edge.target == domain.id
+        }
+        member_statuses: dict[str, int] = {}
+        for member in members:
+            status = graph.node(member).status
+            member_statuses[status] = member_statuses.get(status, 0) + 1
+        coverage.append(
+            {
+                "id": domain.label,
+                "members": len(members),
+                "member_statuses": dict(sorted(member_statuses.items())),
+                "records": sum(count for _, count in domain.counts),
+                "internal_edges": sum(
+                    edge.relation != MEMBER_RELATION
+                    and edge.source in members
+                    and edge.target in members
+                    for edge in graph.edges
+                ),
+                "isolated_members": sorted(
+                    labels[member]
+                    for member in members
+                    if graph.node(member).status == "initialized" and degree[member] == 0
+                ),
+            }
+        )
+    return {
+        "projects": len(projects),
+        "project_statuses": dict(sorted(statuses.items())),
+        "domains": sum(node.kind == "domain" for node in graph.nodes),
+        "universal_stores": sum(node.kind == "universal" for node in graph.nodes),
+        "records": sum(count for node in graph.nodes for _, count in node.counts),
+        "edges": len(graph.edges),
+        "relationship_edges": sum(
+            count for relation, count in relations.items() if relation != MEMBER_RELATION
+        ),
+        "relations": dict(sorted(relations.items())),
+        "weak_edges": weak,
+        "hubs": [
+            {"label": label, "degree": count} for label, count in ranked(degree, labels, 8)
+        ],
+        "most_referenced": [
+            {"label": label, "in_degree": count}
+            for label, count in ranked(in_degree, labels, 5)
+        ],
+        "orphans": sorted(
+            node.label
+            for node in projects
+            if node.status == "initialized" and degree[node.id] == 0
+        ),
+        "domain_coverage": coverage,
+    }
+
+
+def format_counts(counts: dict[str, int]) -> str:
+    return ", ".join(f"{value} {key}" for key, value in counts.items()) or "none"
+
+
+def format_ranked(items: list[dict[str, Any]], field: str) -> str:
+    return ", ".join(f"{item['label']} {item[field]}" for item in items) or "none"
+
+
+def render_text(graph: KnowledgeGraph) -> str:
+    insights = graph_insights(graph)
+    view = graph.view
+    scope = view.kind if not view.focus else f"{view.kind} {graph.node(view.focus).label}"
+    lines = [
+        f"Knowledge graph ({scope}, depth {view.depth}, level {view.level}): "
+        f"{insights['projects']} projects ({format_counts(insights['project_statuses'])}), "
+        f"{insights['domains']} domains, {insights['universal_stores']} universal stores; "
+        f"{insights['records']} records; {insights['edges']} edges "
+        f"({format_counts(insights['relations'])}).",
+        "Hubs: " + format_ranked(insights["hubs"], "degree"),
+        "Most referenced: " + format_ranked(insights["most_referenced"], "in_degree"),
+        f"Orphans (initialized, no relationship edges): {len(insights['orphans'])}"
+        + (": " + ", ".join(insights["orphans"]) if insights["orphans"] else ""),
+        f"Weak edges (confidence <= {WEAK_CONFIDENCE}): {insights['weak_edges']} of "
+        f"{insights['relationship_edges']}",
+    ]
+    for domain in insights["domain_coverage"]:
+        isolated = domain["isolated_members"]
+        lines.append(
+            f"Domain {domain['id']}: {domain['members']} members "
+            f"({format_counts(domain['member_statuses'])}); {domain['records']} domain "
+            f"records; {domain['internal_edges']} edges between members; "
+            f"{len(isolated)} initialized members without edges"
+            + (": " + ", ".join(isolated) if isolated else "")
+        )
+    return "\n".join(lines)
 
 
 def render_json(graph: KnowledgeGraph) -> str:
