@@ -54,8 +54,8 @@ User/machine context stays private in XDG, identities and provenance survive the
 migration, and each changed Git-store command automatically synchronizes,
 commits, and pushes only curator-managed files directly to the configured
 remote's `main`. Unrelated checkout changes block the write; a rejected push
-keeps the local commit and returns an error. Stable IDs plus `git-store-bind`
-restore a cloned store on another machine.
+keeps the local commit and returns an error. Stable IDs or recorded Git remote
+URLs plus `git-store-bind` restore a cloned store on another machine.
 
 `./install.sh --with-context-runtime` remains a deterministic convenience for
 provisioning the same runtime directly.

@@ -62,7 +62,8 @@ before mutation or retained as a local commit after a rejected push.
 Migration from `git-store` to `local` requires exactly one existing local checkout
 binding for every project ID in the store. If preview reports a missing or ambiguous
 binding, run `git-store-status`, ask the user which checkout owns that project ID,
-then use `git-store-bind --repo <checkout> --project-store-id <uuid>`. Preview the
+then use `git-store-bind --repo <checkout> --project-store-id <uuid>` (or
+`--match-remote` when the store records that checkout's Git remote). Preview the
 storage migration again after all bindings are exact.
 
 ## Initial Setup

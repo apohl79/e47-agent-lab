@@ -1,6 +1,6 @@
 {
   "name": "project-context-curator",
-  "version": "5.0.0",
+  "version": "5.1.0",
   "description": "Maintains selectable local or Git-backed canonical context with graph-assisted hybrid retrieval.",
   "author": {
     "name": "Local developer"

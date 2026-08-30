@@ -72,6 +72,8 @@ python3 <skill-dir>/scripts/project_context.py storage-migrate --repo . \
   --target git-store --store ~/context-knowledge --workspace-root ~/workspace
 python3 <skill-dir>/scripts/project_context.py git-store-bind --repo . \
   --project-store-id <uuid>
+python3 <skill-dir>/scripts/project_context.py git-store-bind --repo . \
+  --match-remote
 python3 <skill-dir>/scripts/project_context.py git-store-status --repo .
 ```
 
@@ -102,8 +104,16 @@ repositories are not auto-committed.
 After configuration, `init` automatically creates a new project's canonical
 JSON in the Git store and leaves generated Markdown in the project checkout.
 To restore a cloned store on another machine, select that checkout through
-`storage-migrate --target git-store`, use `git-store-status` to obtain the stable
-project ID, and run:
+`storage-migrate --target git-store` and bind each checkout. When the store
+records the checkout's Git remote (`git-store-status` shows it in the third
+column), no ID lookup is needed:
+
+```bash
+python3 <skill-dir>/scripts/project_context.py git-store-bind --repo <repo> \
+  --match-remote
+```
+
+Otherwise obtain the stable project ID from `git-store-status` and run:
 
 ```bash
 python3 <skill-dir>/scripts/project_context.py git-store-bind --repo <repo> \
