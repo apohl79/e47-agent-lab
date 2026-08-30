@@ -453,12 +453,14 @@ widen with `--depth`, and prune with `--min-confidence` or `--relation`.
 `mentions` (term or component names from applicable stores), `shadows` (project
 record with the same key as a domain or universal record), `diverges` (same term
 or component defined differently across domain members), and the record edges
-behind each project relationship:
+behind each project relationship. `--format mermaid` and `--format dot` render
+the same view for Mermaid or Graphviz (DOT clusters domain members and their
+records):
 
 ```bash
 python3 <skill-dir>/scripts/project_context.py graph --repo . [--domain <id> | --project [name]] \
   [--depth 1] [--level projects|records] [--min-confidence 0.0] [--relation depends_on] \
-  [--format text|json] [--output PATH]
+  [--format text|json|mermaid|dot] [--output PATH]
 ```
 
 ## Rules
