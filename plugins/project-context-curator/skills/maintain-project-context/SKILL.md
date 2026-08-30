@@ -430,6 +430,18 @@ python3 <skill-dir>/scripts/project_context.py move --repo . \
   --type pattern --value "Signed commits" --applicability universal
 ```
 
+Report hygiene problems without changing any store. `audit` flags time-bound
+wording, records not confirmed for `--stale-days` (180), open questions older
+than `--question-days` (60), same-day write bursts of `--burst` (25) or more,
+project records that shadow a domain or universal record, terms or components
+defined differently across domain members, component paths that no longer
+exist, and oversized stores or index views. `--format json` is for tooling and
+`--format hook` prints one line only when findings exist:
+
+```bash
+python3 <skill-dir>/scripts/project_context.py audit --repo . [--format text|json|hook]
+```
+
 ## Rules
 
 - Apply the context admission gate before every `add-*` write. Store only durable knowledge with a verified applicability boundary. Follow the active repository or canonical Git-store policy; user/machine XDG stores remain private.

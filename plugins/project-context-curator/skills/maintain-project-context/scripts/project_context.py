@@ -4171,6 +4171,312 @@ def search_context(args: argparse.Namespace) -> None:
         print(line)
 
 
+AUDIT_KINDS = (("term", "terms"), ("component", "components"), ("pattern", "patterns"))
+AUDIT_TEXT_FIELDS = ("term", "name", "definition", "summary", "responsibility", "notes")
+AUDIT_TIME_BOUND = re.compile(
+    r"\b(?:superseded|deprecated|obsolete|no longer|fixed in|as of 20\d\d|temporar\w*|"
+    r"not yet|for now|wip|work in progress|in progress|installed-version|checkout state)\b"
+    r"|\(20\d\d-\d\d\)|\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w* 20\d\d\b",
+    re.IGNORECASE,
+)
+AUDIT_MAX_PATTERNS = 200
+AUDIT_MAX_INDEX_BYTES = 64 * 1024
+
+
+@dataclass(frozen=True)
+class AuditFinding:
+    check: str
+    kind: str
+    name: str
+    store: str
+    detail: str
+    suggestion: str
+
+    def as_dict(self) -> dict[str, str]:
+        return {
+            "check": self.check,
+            "kind": self.kind,
+            "name": self.name,
+            "store": self.store,
+            "detail": self.detail,
+            "suggestion": self.suggestion,
+        }
+
+
+def audit_days_since(value: Any, now: datetime) -> int | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        stamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return (now - stamp).days
+
+
+def audit_record_text(record: dict[str, Any]) -> str:
+    return " ".join(one_line(record.get(field)) for field in AUDIT_TEXT_FIELDS)
+
+
+def audit_store(
+    label: str,
+    data: dict[str, Any],
+    *,
+    now: datetime,
+    stale_days: int,
+    question_days: int,
+    burst: int,
+) -> list[AuditFinding]:
+    findings: list[AuditFinding] = []
+    if len(data["patterns"]) > AUDIT_MAX_PATTERNS:
+        findings.append(
+            AuditFinding(
+                "oversized",
+                "store",
+                label,
+                label,
+                f"{len(data['patterns'])} patterns exceed {AUDIT_MAX_PATTERNS}; "
+                "index reading and search precision degrade",
+                "consolidate or remove implementation-detail patterns",
+            )
+        )
+    by_day: dict[str, list[str]] = {}
+    for kind, collection in AUDIT_KINDS:
+        key = RECORD_KEYS[collection]
+        for record in data[collection]:
+            name = one_line(record.get(key))
+            created = str(record.get("created_at", ""))[:10]
+            if created:
+                by_day.setdefault(created, []).append(f"{kind} {name}")
+            marker = AUDIT_TIME_BOUND.search(audit_record_text(record))
+            if marker:
+                findings.append(
+                    AuditFinding(
+                        "time-bound",
+                        kind,
+                        name,
+                        label,
+                        f"contains time-bound wording {marker.group(0)!r}",
+                        f"rewrite as a durable invariant with add-{kind} or remove "
+                        f'--type {kind} --value "{name}"',
+                    )
+                )
+            age = audit_days_since(record.get("updated_at"), now)
+            if age is not None and age > stale_days:
+                findings.append(
+                    AuditFinding(
+                        "aged",
+                        kind,
+                        name,
+                        label,
+                        f"not confirmed for {age} days",
+                        f"verify against the repository, then re-add or remove "
+                        f'--type {kind} --value "{name}"',
+                    )
+                )
+    for day, names in sorted(by_day.items()):
+        if len(names) >= burst:
+            findings.append(
+                AuditFinding(
+                    "burst",
+                    "store",
+                    label,
+                    label,
+                    f"{len(names)} records created on {day}: {', '.join(names[:5])}"
+                    + (", …" if len(names) > 5 else ""),
+                    "review the batch for implementation detail that fails the admission gate",
+                )
+            )
+    for question in data["open_questions"]:
+        if question.get("status", "open") != "open":
+            continue
+        age = audit_days_since(question.get("created_at"), now)
+        if age is not None and age > question_days:
+            name = one_line(question.get("question"))
+            findings.append(
+                AuditFinding(
+                    "stale-question",
+                    "question",
+                    name,
+                    label,
+                    f"open for {age} days",
+                    f'answer it with the user or remove --type question --value "{name}"',
+                )
+            )
+    return findings
+
+
+def audit_shadowed(
+    project: dict[str, Any],
+    scopes: tuple[ScopeSummary, ...],
+) -> list[AuditFinding]:
+    findings: list[AuditFinding] = []
+    for kind, collection in AUDIT_KINDS:
+        key = RECORD_KEYS[collection]
+        for record in project[collection]:
+            name = one_line(record.get(key))
+            for scope in scopes:
+                if find_record(scope.data[collection], key, name) is None:
+                    continue
+                findings.append(
+                    AuditFinding(
+                        "shadowed",
+                        kind,
+                        name,
+                        "project",
+                        f"also defined in {scope.label}; the project record wins on read",
+                        f'keep one: remove --type {kind} --value "{name}" here or '
+                        f"re-add the corrected definition in {scope.label}",
+                    )
+                )
+    return findings
+
+
+def audit_divergent(repo: Path) -> list[AuditFinding]:
+    findings: list[AuditFinding] = []
+    domains = configured_domains(global_config())
+    for domain_id in member_domains(repo, domains):
+        members = tuple(
+            member
+            for member in domains[domain_id].projects
+            if member != repo and member.is_dir() and context_path(member).exists()
+        )
+        contexts: list[tuple[Path, dict[str, Any]]] = []
+        for member in members:
+            try:
+                contexts.append((member, load_context(member)))
+            except (OSError, SystemExit):
+                continue
+        project = load_context(repo)
+        for kind, collection in (("term", "terms"), ("component", "components")):
+            key = RECORD_KEYS[collection]
+            for record in project[collection]:
+                name = one_line(record.get(key))
+                others = [
+                    (member, hit)
+                    for member, data in contexts
+                    for hit in (find_record(data[collection], key, name),)
+                    if hit is not None
+                ]
+                if not others:
+                    continue
+                definitions = {
+                    audit_record_text(hit).casefold() for _, hit in others
+                } | {audit_record_text(record).casefold()}
+                findings.append(
+                    AuditFinding(
+                        "divergent",
+                        kind,
+                        name,
+                        f"domain:{domain_id}",
+                        f"defined in {len(others) + 1} member projects with "
+                        f"{len(definitions)} distinct definitions: "
+                        + ", ".join(member.name for member, _ in others),
+                        f'agree on one definition, then move --type {kind} --value "{name}" '
+                        f"--applicability domain:{domain_id} and remove the member copies",
+                    )
+                )
+    return findings
+
+
+def audit_dead_paths(repo: Path, project: dict[str, Any]) -> list[AuditFinding]:
+    findings: list[AuditFinding] = []
+    for component in project["components"]:
+        for raw in component.get("paths", []) or []:
+            path = str(raw)
+            if any(token in path for token in "*?[") or Path(path).is_absolute():
+                continue
+            if not (repo / path).exists():
+                name = one_line(component.get("name"))
+                findings.append(
+                    AuditFinding(
+                        "dead-path",
+                        "component",
+                        name,
+                        "project",
+                        f"path {path} no longer exists in the repository",
+                        f'update paths with add-component --name "{name}" or remove it',
+                    )
+                )
+    return findings
+
+
+def audit_context(args: argparse.Namespace) -> None:
+    repo = context_repo(args.repo)
+    require_initialized_context(repo)
+    now = datetime.now(timezone.utc)
+    project = load_context(repo)
+    scopes = active_shared_scope_contexts(repo)
+    options = {
+        "now": now,
+        "stale_days": args.stale_days,
+        "question_days": args.question_days,
+        "burst": args.burst,
+    }
+    findings = audit_store("project", project, **options)
+    for scope in scopes:
+        findings.extend(audit_store(scope.label, scope.data, **options))
+    findings.extend(audit_shadowed(project, scopes))
+    findings.extend(audit_divergent(repo))
+    findings.extend(audit_dead_paths(repo, project))
+    index = repo / CONTEXT_DIR / "index.md"
+    if index.exists() and index.stat().st_size > AUDIT_MAX_INDEX_BYTES:
+        findings.append(
+            AuditFinding(
+                "oversized",
+                "view",
+                "docs/context/index.md",
+                "project",
+                f"{index.stat().st_size} bytes exceed {AUDIT_MAX_INDEX_BYTES}; every session "
+                "is told to read this file",
+                "reduce record count or shorten summaries",
+            )
+        )
+    stores = ("project", *(scope.label for scope in scopes))
+    if args.format == "json":
+        print(
+            json.dumps(
+                {
+                    "repo": str(repo),
+                    "stores": list(stores),
+                    "findings": [finding.as_dict() for finding in findings],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return
+    counts: dict[str, int] = {}
+    for finding in findings:
+        counts[finding.check] = counts.get(finding.check, 0) + 1
+    summary = ", ".join(f"{count} {check}" for check, count in sorted(counts.items()))
+    if args.format == "hook":
+        if findings:
+            print(
+                f"Context audit: {len(findings)} findings ({summary}); "
+                "run $curate-project-context to review them."
+            )
+        return
+    print(
+        f"Context audit for {repo} across {', '.join(stores)}: "
+        + (f"{len(findings)} findings ({summary})." if findings else "no findings.")
+    )
+    for finding in findings:
+        print(
+            " | ".join(
+                (
+                    finding.check,
+                    finding.kind,
+                    compact_summary(finding.name, 80),
+                    finding.store,
+                    compact_summary(finding.detail, 240),
+                    f"suggest: {compact_summary(finding.suggestion, 240)}",
+                )
+            )
+        )
+
+
 def generated_header() -> str:
     return "<!-- Generated by project-context-curator. Edit canonical context via project_context.py. -->\n\n"
 
@@ -4888,6 +5194,32 @@ def build_parser() -> argparse.ArgumentParser:
     )
     search_parser.add_argument("--limit", type=int, default=20)
     search_parser.set_defaults(func=search_context)
+
+    audit_parser = subparsers.add_parser(
+        "audit",
+        help="Report stale, time-bound, duplicated, or oversized context without changing it",
+    )
+    add_repo(audit_parser)
+    audit_parser.add_argument("--format", choices=("text", "json", "hook"), default="text")
+    audit_parser.add_argument(
+        "--stale-days",
+        type=int,
+        default=180,
+        help="Flag records not updated for more than this many days",
+    )
+    audit_parser.add_argument(
+        "--question-days",
+        type=int,
+        default=60,
+        help="Flag open questions older than this many days",
+    )
+    audit_parser.add_argument(
+        "--burst",
+        type=int,
+        default=25,
+        help="Flag stores where at least this many records were created on one day",
+    )
+    audit_parser.set_defaults(func=audit_context)
 
     return parser
 
