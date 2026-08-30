@@ -79,6 +79,7 @@ GIT_STORE_MUTATING_COMMANDS = frozenset(
         "add-term",
         "domain-remove",
         "domain-set",
+        "git-store-bind",
         "init",
         "move",
         "remove",
@@ -127,6 +128,9 @@ TERM_KINDS = {
 }
 
 DOMAIN_ID_PATTERN = re.compile(r"[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?")
+REMOTE_URL_SCHEMES = ("git+ssh://", "ssh://", "https://", "http://", "git://")
+SCP_REMOTE_PATTERN = re.compile(r"^(?:[^@/\s]+@)?([^:/\s]+):(?!//)(.+)$")
+NORMALIZED_REMOTE_PATTERN = re.compile(r"^[^/\s:@]+(?::\d+)?/\S+$")
 SCOPE_DIRECTORY_NAMES = {
     "domain": "domains",
     "machine": "machines",
@@ -1346,6 +1350,37 @@ def git_output(cwd: Path, *args: str) -> str | None:
         return None
     output = proc.stdout.strip()
     return output if proc.returncode == 0 and output else None
+
+
+def normalize_remote_url(raw: Any) -> str | None:
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    value = raw.strip()
+    lowered = value.casefold()
+    scheme = next((item for item in REMOTE_URL_SCHEMES if lowered.startswith(item)), None)
+    if scheme is not None:
+        value = value[len(scheme) :]
+    elif (match := SCP_REMOTE_PATTERN.match(value)) is not None:
+        value = f"{match.group(1)}/{match.group(2)}"
+    elif NORMALIZED_REMOTE_PATTERN.match(value) is None:
+        return None
+    host, _, path = value.partition("/")
+    host = host.rpartition("@")[2].casefold()
+    path = path.strip("/")
+    if path.casefold().endswith(".git"):
+        path = path[:-4].rstrip("/")
+    if not host or not path:
+        return None
+    return f"{host}/{path}"
+
+
+def repo_remote_url(repo: Path) -> str | None:
+    remotes = git_output(repo, "remote")
+    if remotes is None:
+        return None
+    names = remotes.splitlines()
+    name = "origin" if "origin" in names else names[0]
+    return normalize_remote_url(git_output(repo, "remote", "get-url", name))
 
 
 def git_process(
@@ -2629,6 +2664,11 @@ def load_git_store_manifest(root: Path) -> dict[str, Any]:
             ) from None
         if not isinstance(metadata, dict):
             raise SystemExit(f"Invalid project metadata for {project_id!r} in {path}")
+        remote_url = metadata.get("remote_url")
+        if remote_url is not None and normalize_remote_url(remote_url) != remote_url:
+            raise SystemExit(
+                f"Invalid project remote_url for {project_id!r} in {path}"
+            )
     domains = manifest.setdefault("domains", {})
     if not isinstance(domains, dict):
         raise SystemExit(f"Invalid Git context store domain catalog in {path}")
@@ -3204,11 +3244,72 @@ def git_project_metadata(
     repo: Path, existing: dict[str, Any] | None = None
 ) -> dict[str, Any]:
     stamp = now_iso()
-    return {
+    metadata = {
         "name": repo.name,
         "created_at": existing.get("created_at", stamp) if existing else stamp,
         "updated_at": stamp,
     }
+    remote_url = repo_remote_url(repo)
+    if remote_url is None and existing is not None:
+        remote_url = existing.get("remote_url")
+    if isinstance(remote_url, str) and remote_url:
+        metadata["remote_url"] = remote_url
+    return metadata
+
+
+def git_store_projects_by_remote(
+    manifest: dict[str, Any], remote_url: str | None
+) -> tuple[str, ...]:
+    if remote_url is None:
+        return ()
+    return tuple(
+        sorted(
+            project_id
+            for project_id, metadata in manifest["projects"].items()
+            if metadata.get("remote_url") == remote_url
+        )
+    )
+
+
+def refresh_git_store_project_metadata(
+    repo: Path,
+    project_id: str,
+    root: Path,
+    manifest: dict[str, Any],
+) -> bool:
+    existing = manifest["projects"].get(project_id)
+    if not isinstance(existing, dict):
+        return False
+    remote_url = repo_remote_url(repo)
+    if remote_url is None or existing.get("remote_url") == remote_url:
+        return False
+    duplicates = tuple(
+        other
+        for other in git_store_projects_by_remote(manifest, remote_url)
+        if other != project_id
+    )
+    if duplicates:
+        print(
+            f"WARNING: remote {remote_url} is also registered as project context "
+            + ", ".join(duplicates)
+            + ". Consider consolidating with git-store-bind --match-remote."
+        )
+    manifest["projects"][project_id] = git_project_metadata(repo, existing)
+    manifest["updated_at"] = now_iso()
+    write_git_json(root, git_store_manifest_path(root), manifest)
+    return True
+
+
+def refresh_bound_git_store_project_metadata(repo: Path) -> None:
+    configured = configured_git_store()
+    if configured is None:
+        return
+    project_id = configured["project_bindings"].get(str(repo.resolve()))
+    if project_id is None:
+        return
+    root = validate_git_store_root(Path(configured["path"]))
+    manifest = load_git_store_manifest(root)
+    refresh_git_store_project_metadata(repo, project_id, root, manifest)
 
 
 def configure_git_store(
@@ -3467,12 +3568,25 @@ def require_configured_git_store() -> tuple[dict[str, Any], Path, dict[str, Any]
 def git_store_bind(args: argparse.Namespace) -> None:
     repo = context_repo(args.repo)
     configured, root, manifest = require_configured_git_store()
-    try:
-        project_id = str(uuid.UUID(args.project_store_id))
-    except ValueError:
-        raise SystemExit(
-            f"Invalid project context store id {args.project_store_id!r}."
-        ) from None
+    if args.match_remote:
+        remote_url = repo_remote_url(repo)
+        if remote_url is None:
+            raise SystemExit("Repository has no Git remote URL to match.")
+        matches = git_store_projects_by_remote(manifest, remote_url)
+        if len(matches) != 1:
+            detail = f": {', '.join(matches)}" if matches else ""
+            raise SystemExit(
+                f"Remote {remote_url} matches {len(matches)} project contexts{detail}. "
+                "Use --project-store-id."
+            )
+        project_id = matches[0]
+    else:
+        try:
+            project_id = str(uuid.UUID(args.project_store_id))
+        except ValueError:
+            raise SystemExit(
+                f"Invalid project context store id {args.project_store_id!r}."
+            ) from None
     if project_id not in manifest["projects"]:
         raise SystemExit(f"Unknown project context store id {project_id}.")
     target = git_store_project_path(root, project_id)
@@ -3503,6 +3617,7 @@ def git_store_bind(args: argparse.Namespace) -> None:
             domains[domain_id] = sorted({*domains[domain_id], str(repo.resolve())})
     config["domains"] = domains
     write_global_config(config)
+    refresh_git_store_project_metadata(repo, project_id, root, manifest)
     context_dir = repo / CONTEXT_DIR
     context_dir.mkdir(parents=True, exist_ok=True)
     ensure_context_gitignore(context_dir)
@@ -3521,7 +3636,13 @@ def git_store_status(args: argparse.Namespace) -> None:
     print(f"Configured project bindings: {len(configured['project_bindings'])}")
     for project_id, metadata in sorted(manifest["projects"].items()):
         name = safe_display_field(metadata.get("name", ""), GLOBAL_LABEL_OUTPUT_LIMIT)
-        print(f"{project_id} | {name} | {git_store_project_path(root, project_id)}")
+        remote = safe_display_field(
+            metadata.get("remote_url") or "-", GLOBAL_LABEL_OUTPUT_LIMIT
+        )
+        print(
+            f"{project_id} | {name} | {remote} | "
+            f"{git_store_project_path(root, project_id)}"
+        )
     for domain_id, members in sorted(manifest["domains"].items()):
         print(f"Domain {domain_id}: {', '.join(members)}")
     dirty = git_output(root, "status", "--short")
@@ -3539,6 +3660,14 @@ def enroll_empty_git_store_project(repo: Path, data: dict[str, Any]) -> None:
         )
     if target.exists():
         raise SystemExit(f"Git context target already exists: {target}")
+    remote_url = repo_remote_url(repo)
+    duplicates = git_store_projects_by_remote(manifest, remote_url)
+    if duplicates:
+        raise SystemExit(
+            f"Remote {remote_url} is already registered as project context "
+            f"{', '.join(duplicates)}. Attach this checkout with "
+            "git-store-bind --match-remote instead of initializing a new project."
+        )
     existing_policy = data.get("storage_policy")
     data["storage_policy"] = storage_policy(
         "git-store",
@@ -3666,6 +3795,7 @@ def update_context(args: argparse.Namespace) -> None:
     require_initialized_context(repo)
     data, migrations = load_context_with_migrations(repo)
     save_context(repo, data)
+    refresh_bound_git_store_project_metadata(repo)
     scope_migrations = migrate_private_scope_contexts()
     applied = ", ".join(migrations) if migrations else "none"
     print(f"Updated project context: {repo / CONTEXT_DIR}")
@@ -4381,10 +4511,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     git_store_bind_parser = subparsers.add_parser(
         "git-store-bind",
-        help="Bind a checkout to an existing canonical project context by stable store id",
+        help=(
+            "Bind a checkout to an existing canonical project context by stable "
+            "store id or by its Git remote URL"
+        ),
     )
     add_repo(git_store_bind_parser)
-    git_store_bind_parser.add_argument("--project-store-id", required=True)
+    bind_selector = git_store_bind_parser.add_mutually_exclusive_group(required=True)
+    bind_selector.add_argument("--project-store-id")
+    bind_selector.add_argument(
+        "--match-remote",
+        action="store_true",
+        help="Resolve the project by the checkout's normalized Git remote URL",
+    )
     git_store_bind_parser.set_defaults(func=git_store_bind)
 
     git_store_status_parser = subparsers.add_parser(

@@ -185,6 +185,7 @@ checkout paths:
   "projects": {
     "f0b9cb7c-2cc4-4eb2-907f-b69ec16d3702": {
       "name": "billing-api",
+      "remote_url": "github.com/acme/billing-api",
       "created_at": "2026-08-28T08:00:00+00:00",
       "updated_at": "2026-08-28T08:00:00+00:00"
     }
@@ -196,6 +197,14 @@ checkout paths:
   "updated_at": "2026-08-28T08:00:00+00:00"
 }
 ```
+
+`remote_url` is the normalized Git remote of the bound checkout (`origin`, else
+the first remote): scheme, credentials, and the `.git` suffix are dropped and
+the host is lowercased, so `git@github.com:acme/billing-api.git` and
+`https://github.com/acme/billing-api` identify the same project. It is written
+on `init`, `git-store-bind`, and `update`; local-path and `file://` remotes
+are never recorded. `init` refuses to enroll a checkout whose remote is already
+registered and points to `git-store-bind --match-remote`.
 
 XDG configuration records the runtime decision, store checkout path, store
 identity, and absolute checkout-to-project-ID bindings. `storage-migrate
@@ -218,7 +227,9 @@ unknown files and unrelated Git history are untouched.
 
 On another machine, configure the cloned store through the same preview/approval
 flow, list IDs with `git-store-status`, and attach each checkout with
-`git-store-bind --project-store-id <uuid>`. Binding regenerates local Markdown
+`git-store-bind --project-store-id <uuid>`, or with
+`git-store-bind --match-remote` when the store already records the checkout's
+remote URL. Binding regenerates local Markdown
 views and restores domain membership. `git-store-init` remains a compatible
 one-way command for existing automation. Git-store mutations require the
 checkout on `main`, synchronize the configured remote's `main`, stage only the
