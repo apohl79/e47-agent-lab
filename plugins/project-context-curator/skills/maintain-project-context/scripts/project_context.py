@@ -17,6 +17,7 @@ import sys
 import time
 import unicodedata
 import uuid
+import webbrowser
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, replace
@@ -4549,12 +4550,23 @@ def graph_context(args: argparse.Namespace) -> None:
         "html": exports.render_html,
     }
     output = renderers[args.format](graph)
-    if args.output:
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(output + "\n", encoding="utf-8")
-        print(f"Knowledge graph written to {args.output}")
+    target = args.output
+    if target is None and args.format == "html":
+        target = global_cache_dir() / "graph" / f"{graph_slug(graph)}.html"
+    if target is None:
+        print(output)
         return
-    print(output)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(output + "\n", encoding="utf-8")
+    print(f"Knowledge graph written to {target}")
+    if args.open:
+        webbrowser.open(target.resolve().as_uri())
+
+
+def graph_slug(graph: Any) -> str:
+    focus = graph.node(graph.view.focus)
+    name = "overview" if focus is None else f"{graph.view.kind}-{focus.label}"
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-") or "overview"
 
 
 def generated_header() -> str:
@@ -5334,7 +5346,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Keep only these relation kinds; repeatable",
     )
     graph_parser.add_argument("--format", choices=GRAPH_FORMATS, default="text")
-    graph_parser.add_argument("--output", type=Path, help="Write the export to this file")
+    graph_parser.add_argument(
+        "--output",
+        type=Path,
+        help="Write the export to this file; html defaults to the curator cache directory",
+    )
+    graph_parser.add_argument(
+        "--open", action="store_true", help="Open the written file in the default browser"
+    )
     graph_parser.set_defaults(func=graph_context)
 
     return parser

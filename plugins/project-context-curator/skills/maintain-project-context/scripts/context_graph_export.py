@@ -163,6 +163,10 @@ __CSS__
   <aside id="sidebar">
     <h1>__TITLE__</h1>
     <p id="summary" class="muted"></p>
+    <details id="insights-panel" open>
+      <summary>Insights</summary>
+      <div id="insights"></div>
+    </details>
     <h2>Search</h2>
     <input id="search" type="search" placeholder="Filter nodes by label">
     <h2>Minimum confidence <span id="confidence-value">0.00</span></h2>
@@ -175,6 +179,7 @@ __CSS__
     <div id="buttons">
       <button id="fit">Fit</button><button id="relayout">Re-layout</button>
       <button id="expand-all">Expand all</button><button id="collapse-all">Collapse all</button>
+      <button id="mode-3d" title="Toggle the 3D orbit view">3D</button><button id="spin" title="Slowly orbit the 3D view" disabled>Spin</button>
     </div>
     <h2>Selection</h2>
     <div id="details"></div>

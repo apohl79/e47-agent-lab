@@ -137,6 +137,11 @@ def test_graph_text_views_focus_on_repo_domain_and_output_file(tmp_path: Path) -
     )
     mermaid = run_context("graph", "--project", "--format", "mermaid", repo=gateway, env=env)
     dot = run_context("graph", "--project", "--format", "dot", repo=gateway, env=env)
+    html = run_context(
+        "graph", "--output", str(tmp_path / "out/graph.html"), "--format", "html", repo=gateway, env=env
+    )
+    page = (tmp_path / "out/graph.html").read_text(encoding="utf-8")
+    embedded = json.loads(page.split('type="application/json">')[1].split("</script>")[0])
 
     assert (
         overview.returncode,
@@ -148,6 +153,12 @@ def test_graph_text_views_focus_on_repo_domain_and_output_file(tmp_path: Path) -
         (unknown.returncode, unknown.stderr.strip()),
         detailed.stdout.splitlines()[-1],
         (mermaid.stdout.splitlines()[:3], dot.stdout.splitlines()[0], dot.stdout.splitlines()[-1]),
+        (
+            html.stdout,
+            page.startswith("<!DOCTYPE html>"),
+            embedded["view"]["level"],
+            sorted(node["label"] for node in embedded["nodes"] if node["id"].startswith("record:")),
+        ),
     ) == (
         0,
         [
@@ -170,4 +181,39 @@ def test_graph_text_views_focus_on_repo_domain_and_output_file(tmp_path: Path) -
             "digraph knowledge {",
             "}",
         ),
+        (
+            f"Knowledge graph written to {tmp_path / 'out/graph.html'}\n",
+            True,
+            "projects",
+            ["Gateway calls", "Invoice", "PSP"],
+        ),
+    )
+
+
+def test_graph_html_defaults_to_cache_directory_and_embeds_records(tmp_path: Path) -> None:
+    env, _, ledger, gateway = billing_workspace(tmp_path)
+    cache = Path(env["PROJECT_CONTEXT_CURATOR_CACHE_DIR"]) / "graph"
+    domain = run_context("graph", "--domain", "billing", "--format", "html", repo=gateway, env=env)
+    project = run_context("graph", "--project", "--format", "html", repo=ledger, env=env)
+    page = (cache / "domain-billing.html").read_text(encoding="utf-8")
+    embedded = json.loads(
+        page.split('<script id="graph-data" type="application/json">')[1].split("</script>")[0]
+    )
+
+    assert (
+        (domain.returncode, domain.stdout, project.stdout),
+        sorted(path.name for path in cache.iterdir()),
+        embedded["view"]["level"],
+        sorted(node["label"] for node in embedded["nodes"] if node["id"].startswith("record:")),
+        ('id="mode-3d"' in page, 'id="insights"' in page),
+    ) == (
+        (
+            0,
+            f"Knowledge graph written to {cache / 'domain-billing.html'}\n",
+            f"Knowledge graph written to {cache / 'project-ledger.html'}\n",
+        ),
+        ["domain-billing.html", "project-ledger.html"],
+        "projects",
+        ["Gateway calls", "Invoice"],
+        (True, True),
     )

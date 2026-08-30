@@ -455,12 +455,17 @@ record with the same key as a domain or universal record), `diverges` (same term
 or component defined differently across domain members), and the record edges
 behind each project relationship. `--format mermaid` and `--format dot` render
 the same view for Mermaid or Graphviz (DOT clusters domain members and their
-records):
+records). `--format html` writes a self-contained interactive viewer (no
+external assets) with an insights panel, search, confidence and relation
+filters, per-store expand/collapse of records, and a 2D or 3D orbit view. Without
+`--output` the html file lands in the curator cache directory
+(`$PROJECT_CONTEXT_CURATOR_CACHE_DIR` or `$XDG_CACHE_HOME/project-context-curator`)
+under `graph/<view>.html`; `--open` launches it in the default browser:
 
 ```bash
 python3 <skill-dir>/scripts/project_context.py graph --repo . [--domain <id> | --project [name]] \
   [--depth 1] [--level projects|records] [--min-confidence 0.0] [--relation depends_on] \
-  [--format text|json|mermaid|dot] [--output PATH]
+  [--format text|json|mermaid|dot|html] [--output PATH] [--open]
 ```
 
 ## Rules
