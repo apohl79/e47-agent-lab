@@ -448,11 +448,17 @@ adds `member_of` edges from domain configuration (path and remote members), and
 reuses the relationship derivation for typed project edges with record
 evidence. Private user, machine, and workspace records are excluded. Focus with
 `--domain <id>` or `--project [name|path]` (bare `--project` means `--repo`),
-widen with `--depth`, and prune with `--min-confidence` or `--relation`:
+widen with `--depth`, and prune with `--min-confidence` or `--relation`.
+`--level records` attaches every record of the shown stores with `stored_in`,
+`mentions` (term or component names from applicable stores), `shadows` (project
+record with the same key as a domain or universal record), `diverges` (same term
+or component defined differently across domain members), and the record edges
+behind each project relationship:
 
 ```bash
 python3 <skill-dir>/scripts/project_context.py graph --repo . [--domain <id> | --project [name]] \
-  [--depth 1] [--min-confidence 0.0] [--relation depends_on] [--format text|json] [--output PATH]
+  [--depth 1] [--level projects|records] [--min-confidence 0.0] [--relation depends_on] \
+  [--format text|json] [--output PATH]
 ```
 
 ## Rules

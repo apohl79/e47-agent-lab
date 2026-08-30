@@ -42,7 +42,7 @@ def record(
     )
 
 
-def fixture_graph(tmp_path: Path) -> tuple[ModuleType, object, dict[str, str]]:
+def fixture_graph(tmp_path: Path) -> tuple[ModuleType, object, dict[str, str], tuple]:
     graph = load_graph_module()
     backend = importlib.import_module("global_context")
     alpha, beta, gamma, delta = (
@@ -57,9 +57,11 @@ def fixture_graph(tmp_path: Path) -> tuple[ModuleType, object, dict[str, str]]:
     domain, universal = (("domain", "billing"),), (("universal", "*"),)
     records = (
         record("alpha", str(alpha), "pattern", "Payments", "alpha calls beta for payments"),
-        record("alpha", str(alpha), "term", "Ledger", "Ledger is the book of record"),
+        record("alpha", str(alpha), "term", "Ledger", "Book of record"),
+        record("beta", str(beta), "term", "Ledger", "Ledger service"),
         record("beta", str(beta), "component", "API", "Ledger API; see alpha for terms"),
         record("domain:billing", "", "term", "Invoice", "alpha owns invoices", domain),
+        record("domain:billing", "", "term", "Ledger", "Shared book of record", domain),
         record("universal:*", "", "pattern", "Retries", "Retry with backoff", universal),
         record("machine:*", "", "term", "Laptop", "alpha lives here", (("machine", "*"),)),
     )
@@ -74,7 +76,7 @@ def fixture_graph(tmp_path: Path) -> tuple[ModuleType, object, dict[str, str]]:
         records, sources, domains, {beta: "github.com/acme/beta"}.get
     )
     ids = {path.name: f"project:{path}" for path in (alpha, beta, gamma, delta)}
-    return graph, built, ids
+    return graph, built, ids, records
 
 
 def edge_keys(built: object) -> list[tuple[str, str, str, float]]:
@@ -88,7 +90,7 @@ def counts(**values: int) -> dict[str, int]:
 def test_project_graph_builds_store_nodes_membership_and_relationship_edges(
     tmp_path: Path,
 ) -> None:
-    graph, built, ids = fixture_graph(tmp_path)
+    graph, built, ids, _ = fixture_graph(tmp_path)
 
     assert (
         [(n.id, n.kind, n.label, n.status, dict(n.counts)) for n in built.nodes],
@@ -96,9 +98,9 @@ def test_project_graph_builds_store_nodes_membership_and_relationship_edges(
         built.edges[0].evidence,
     ) == (
         [
-            ("domain:billing", "domain", "billing", "declared", counts(term=1)),
+            ("domain:billing", "domain", "billing", "declared", counts(term=2)),
             (ids["alpha"], "project", "alpha", "initialized", counts(pattern=1, term=1)),
-            (ids["beta"], "project", "beta", "initialized", counts(component=1)),
+            (ids["beta"], "project", "beta", "initialized", counts(component=1, term=1)),
             (ids["delta"], "project", "delta", "missing", {}),
             (ids["gamma"], "project", "gamma", "uninitialized", {}),
             ("remote:github.com/acme/worker", "project", "worker", "remote-only", {}),
@@ -119,7 +121,7 @@ def test_project_graph_builds_store_nodes_membership_and_relationship_edges(
 
 
 def test_views_focus_by_domain_or_project_and_filter_edges(tmp_path: Path) -> None:
-    graph, built, ids = fixture_graph(tmp_path)
+    graph, built, ids, _ = fixture_graph(tmp_path)
     members = ["billing", "alpha", "beta", "delta", "gamma", "worker"]
     shallow = graph.apply_view(
         built, graph.GraphView("domain", "billing", 1, min_confidence=0.8)
@@ -155,4 +157,66 @@ def test_views_focus_by_domain_or_project_and_filter_edges(tmp_path: Path) -> No
         (ids["alpha"], ["billing", "alpha", "beta"]),
         ("", 7, 8),
         1,
+    )
+
+
+def test_record_level_attaches_records_with_mentions_shadows_and_divergence(
+    tmp_path: Path,
+) -> None:
+    graph, built, ids, records = fixture_graph(tmp_path)
+    focused = graph.apply_view(built, graph.GraphView("domain", "billing", 1))
+    detailed = graph.add_record_level(focused, records)
+    record_edges = [
+        (edge.source, edge.target, edge.relation, edge.confidence)
+        for edge in detailed.edges
+        if edge.level == "records" and edge.relation != "stored_in"
+    ]
+
+    assert (
+        detailed.view.level,
+        [
+            (n.kind, n.label, n.store, n.summary)
+            for n in detailed.nodes
+            if n.kind not in graph.STORE_KINDS
+        ],
+        sum(edge.relation == "stored_in" for edge in detailed.edges),
+        record_edges,
+        graph.graph_insights(detailed)["record_level"],
+    ) == (
+        "records",
+        [
+            ("pattern", "Payments", ids["alpha"], "alpha calls beta for payments"),
+            ("term", "Ledger", ids["alpha"], "Book of record"),
+            ("component", "API", ids["beta"], "Ledger API; see alpha for terms"),
+            ("term", "Ledger", ids["beta"], "Ledger service"),
+            ("term", "Invoice", "domain:billing", "alpha owns invoices"),
+            ("term", "Ledger", "domain:billing", "Shared book of record"),
+        ],
+        6,
+        [
+            ("record:alpha:pattern:Payments", ids["beta"], "integrates_with", 0.9),
+            ("record:alpha:term:Ledger", "record:beta:term:Ledger", "diverges", 1.0),
+            ("record:alpha:term:Ledger", "record:domain:billing:term:Ledger", "shadows", 1.0),
+            ("record:beta:component:API", ids["alpha"], "references", 0.6),
+            ("record:beta:component:API", "record:beta:term:Ledger", "mentions", 0.7),
+            ("record:beta:component:API", "record:domain:billing:term:Ledger", "mentions", 0.7),
+            ("record:beta:term:Ledger", "record:domain:billing:term:Ledger", "shadows", 1.0),
+            ("record:domain:billing:term:Invoice", ids["alpha"], "owns", 0.9),
+        ],
+        {
+            "records": 6,
+            "relations": {
+                "diverges": 1,
+                "integrates_with": 1,
+                "mentions": 2,
+                "owns": 1,
+                "references": 1,
+                "shadows": 2,
+            },
+            "unconnected": 0,
+            "most_mentioned": [
+                {"label": "term Ledger (beta)", "mentions": 1},
+                {"label": "term Ledger (domain:billing)", "mentions": 1},
+            ],
+        },
     )
