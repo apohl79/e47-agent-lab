@@ -522,6 +522,39 @@ def active_applicability(repo: Path) -> frozenset[tuple[str, str]]:
     return frozenset(active)
 
 
+@dataclass(frozen=True)
+class ScopeSummary:
+    label: str
+    path: Path
+    data: dict[str, Any]
+
+    def counts(self) -> str:
+        return (
+            f"{len(self.data['terms'])} terms, "
+            f"{len(self.data['components'])} components, "
+            f"{len(self.data['patterns'])} patterns"
+        )
+
+
+def active_shared_scope_contexts(repo: Path) -> tuple[ScopeSummary, ...]:
+    active = active_applicability(repo)
+    summaries: list[ScopeSummary] = []
+    for path in scope_context_files():
+        try:
+            data = load_discovered_scope_context(path)
+        except (OSError, SystemExit):
+            continue
+        applicability = data["default_applicability"]
+        if not applicability_is_shareable(applicability):
+            continue
+        if not applicability_matches(applicability, active):
+            continue
+        if not any(data[collection] for collection in RECORD_KEYS):
+            continue
+        summaries.append(ScopeSummary(applicability_text(applicability), path, data))
+    return tuple(sorted(summaries, key=lambda summary: summary.label))
+
+
 def applicability_pairs(value: Any) -> tuple[tuple[str, str], ...]:
     normalized = normalize_applicability(value, "applicability")
     return tuple((item["kind"], item.get("selector", "*")) for item in normalized)
@@ -3917,6 +3950,11 @@ def status_context(args: argparse.Namespace) -> None:
     )
     if path != local_context_path(repo):
         print(f"Canonical context: {path}")
+    for summary in active_shared_scope_contexts(repo):
+        print(
+            f"Scoped context {summary.label}: {summary.counts()} "
+            f"(canonical: {summary.path}; not in docs/context views, use search)."
+        )
 
 
 def ignore_context(args: argparse.Namespace) -> None:
@@ -4247,7 +4285,9 @@ def render_topical_index(data: dict[str, Any]) -> list[str]:
 def render_markdown(repo: Path, data: dict[str, Any]) -> None:
     ctx_dir = repo / CONTEXT_DIR
     ctx_dir.mkdir(parents=True, exist_ok=True)
-    (ctx_dir / "index.md").write_text(render_index(data), encoding="utf-8")
+    (ctx_dir / "index.md").write_text(
+        render_index(data, active_shared_scope_contexts(repo)), encoding="utf-8"
+    )
     (ctx_dir / "glossary.md").write_text(render_glossary(data), encoding="utf-8")
     (ctx_dir / "components.md").write_text(render_components(data), encoding="utf-8")
     (ctx_dir / "architecture.md").write_text(
@@ -4256,7 +4296,40 @@ def render_markdown(repo: Path, data: dict[str, Any]) -> None:
     (ctx_dir / "inbox.md").write_text(render_inbox(data), encoding="utf-8")
 
 
-def render_index(data: dict[str, Any]) -> str:
+def render_scoped_context(scopes: tuple[ScopeSummary, ...]) -> list[str]:
+    lines = [
+        "## Scoped Context",
+        "",
+        (
+            "Domain and universal records live outside this directory and are not in the "
+            "topical index; retrieve them with `project_context.py search`. On conflict, a "
+            "project record overrides a domain record, which overrides a universal record."
+        ),
+        "",
+    ]
+    if not scopes:
+        lines.extend(["- No domain or universal context applies to this project.", ""])
+        return lines
+    for summary in scopes:
+        lines.extend(
+            [
+                f"### {summary.label} — {summary.counts()}",
+                "",
+                f"- Canonical: `{summary.path}`",
+            ]
+        )
+        for heading, collection in (("Terms", "terms"), ("Components", "components")):
+            names = ", ".join(
+                one_line(record.get(RECORD_KEYS[collection]))
+                for record in summary.data[collection]
+            )
+            if names:
+                lines.append(f"- {heading}: {names}")
+        lines.append("")
+    return lines
+
+
+def render_index(data: dict[str, Any], scopes: tuple[ScopeSummary, ...] = ()) -> str:
     policy = data.get("storage_policy")
     canonical_file = (
         "- Canonical JSON: configured Git context store (run `project_context.py status`)"
@@ -4310,6 +4383,7 @@ def render_index(data: dict[str, Any]) -> str:
             "",
         ]
     )
+    lines.extend(render_scoped_context(scopes))
     lines.extend(render_topical_index(data))
     return "\n".join(lines)
 
