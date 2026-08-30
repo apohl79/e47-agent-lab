@@ -1,6 +1,9 @@
-"""Mermaid and Graphviz DOT exports of a knowledge graph."""
+"""Mermaid, Graphviz DOT, and self-contained HTML exports of a knowledge graph."""
 
 from __future__ import annotations
+
+import json
+from pathlib import Path
 
 from context_graph import (
     MEMBER_RELATION,
@@ -142,3 +145,73 @@ def render_dot(graph: KnowledgeGraph) -> str:
     )
     lines.append("}")
     return "\n".join(lines)
+
+
+ASSETS = Path(__file__).resolve().parent.parent / "assets"
+HTML_TEMPLATE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__</title>
+<style>
+__CSS__
+</style>
+</head>
+<body>
+<div id="app">
+  <aside id="sidebar">
+    <h1>__TITLE__</h1>
+    <p id="summary" class="muted"></p>
+    <h2>Search</h2>
+    <input id="search" type="search" placeholder="Filter nodes by label">
+    <h2>Minimum confidence <span id="confidence-value">0.00</span></h2>
+    <input id="confidence" type="range" min="0" max="1" step="0.05" value="0">
+    <h2>Relations</h2>
+    <div id="relations"></div>
+    <h2>Kinds</h2>
+    <div id="kinds"></div>
+    <h2>Layout</h2>
+    <div id="buttons">
+      <button id="fit">Fit</button><button id="relayout">Re-layout</button>
+      <button id="expand-all">Expand all</button><button id="collapse-all">Collapse all</button>
+    </div>
+    <h2>Selection</h2>
+    <div id="details"></div>
+  </aside>
+  <main id="stage">
+    <canvas id="graph-canvas"></canvas>
+    <div id="tooltip"></div>
+    <div id="hint">drag: pan · wheel: zoom · click: select · double-click: expand or collapse a store</div>
+  </main>
+</div>
+<script id="graph-data" type="application/json">__DATA__</script>
+<script>
+__JS__
+</script>
+</body>
+</html>
+"""
+
+
+def html_title(graph: KnowledgeGraph) -> str:
+    view = graph.view
+    focus = graph.node(view.focus)
+    if focus is None:
+        return "Knowledge graph: overview"
+    return f"Knowledge graph: {view.kind} {focus.label}"
+
+
+def render_html(graph: KnowledgeGraph) -> str:
+    payload = (
+        json.dumps(graph.as_dict(), sort_keys=True)
+        .replace("&", "\\u0026")
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+    )
+    return (
+        HTML_TEMPLATE.replace("__TITLE__", html_title(graph).replace("<", "&lt;"))
+        .replace("__CSS__", (ASSETS / "graph-viewer.css").read_text(encoding="utf-8"))
+        .replace("__JS__", (ASSETS / "graph-viewer.js").read_text(encoding="utf-8"))
+        .replace("__DATA__", payload)
+    )

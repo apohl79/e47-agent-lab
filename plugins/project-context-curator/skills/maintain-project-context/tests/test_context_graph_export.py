@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import importlib
+import json
+import re
 from pathlib import Path
 
-from test_context_graph import fixture_graph
+from test_context_graph import fixture_graph, record
 
 
 def test_mermaid_export_shapes_nodes_by_kind_and_dashes_unavailable_members(
@@ -97,3 +99,81 @@ def test_dot_export_clusters_domain_members_with_their_records(tmp_path: Path) -
             "}",
         ]
     )
+
+
+def test_html_export_embeds_the_graph_and_viewer_without_remote_assets(
+    tmp_path: Path,
+) -> None:
+    graph, built, ids, records = fixture_graph(tmp_path)
+    exports = importlib.import_module("context_graph_export")
+    detailed = graph.add_record_level(
+        graph.apply_view(built, graph.GraphView("domain", "billing", 1)), records
+    )
+    html = exports.render_html(detailed)
+    embedded = re.search(
+        r'<script id="graph-data" type="application/json">(.*?)</script>', html, re.S
+    )
+    payload = json.loads(embedded.group(1)) if embedded else {}
+    head, viewer = html.split('id="graph-data"')
+
+    assert (
+        html.startswith("<!DOCTYPE html>"),
+        "<title>Knowledge graph: domain billing</title>" in html,
+        'id="graph-canvas"' in html,
+        ("http://" in head or "https://" in head or 'src="' in viewer),
+        payload["schema_version"],
+        payload["view"],
+        sorted(node["id"] for node in payload["nodes"] if not node["id"].startswith("record:")),
+        len([node for node in payload["nodes"] if node["id"].startswith("record:")]),
+        "--bg:" in head and "getElementById(\"graph-data\")" in viewer,
+    ) == (
+        True,
+        True,
+        True,
+        False,
+        1,
+        {
+            "kind": "domain",
+            "focus": "domain:billing",
+            "depth": 1,
+            "level": "records",
+            "min_confidence": 0.0,
+            "relations": [],
+        },
+        sorted(
+            [
+                "domain:billing",
+                ids["alpha"],
+                ids["beta"],
+                ids["delta"],
+                ids["gamma"],
+                "remote:github.com/acme/worker",
+            ]
+        ),
+        6,
+        True,
+    )
+
+
+def test_html_export_neutralizes_markup_inside_record_text(tmp_path: Path) -> None:
+    graph, built, _, _ = fixture_graph(tmp_path)
+    exports = importlib.import_module("context_graph_export")
+    hostile = '</script><!--<script id="x"> a & b <br/>'
+    records = (record("alpha", str(tmp_path / "alpha"), "pattern", "Markup", hostile),)
+    detailed = graph.add_record_level(
+        graph.apply_view(built, graph.GraphView("domain", "billing", 1)), records
+    )
+    html = exports.render_html(detailed)
+    embedded = re.search(
+        r'<script id="graph-data" type="application/json">(.*?)</script>', html, re.S
+    )
+    payload = json.loads(embedded.group(1)) if embedded else {"nodes": []}
+    markup = [node for node in payload["nodes"] if node["label"] == "Markup"]
+
+    assert (
+        html.count("<script"),
+        html.count("</script"),
+        html.count("<!--"),
+        embedded is not None and re.search(r"[<>&]", embedded.group(1)) is None,
+        markup[0]["summary"] if markup else None,
+    ) == (2, 2, 0, True, hostile)

@@ -19,7 +19,7 @@ import unicodedata
 import uuid
 from contextlib import contextmanager
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
@@ -4477,7 +4477,7 @@ def audit_context(args: argparse.Namespace) -> None:
         )
 
 
-GRAPH_FORMATS = ("json", "text", "mermaid", "dot")
+GRAPH_FORMATS = ("json", "text", "mermaid", "dot", "html")
 GRAPH_LEVELS = ("projects", "records")
 
 
@@ -4537,14 +4537,16 @@ def graph_context(args: argparse.Namespace) -> None:
         graph = backend.apply_view(graph, view)
     except ValueError as exc:
         raise SystemExit(f"Knowledge graph view failed: {exc}") from exc
-    if args.level == backend.RECORD_LEVEL:
+    if args.level == backend.RECORD_LEVEL or args.format == "html":
         graph = backend.add_record_level(graph, records)
+        graph = replace(graph, view=replace(graph.view, level=args.level))
     exports = load_graph_backend("context_graph_export")
     renderers = {
         "json": backend.render_json,
         "text": backend.render_text,
         "mermaid": exports.render_mermaid,
         "dot": exports.render_dot,
+        "html": exports.render_html,
     }
     output = renderers[args.format](graph)
     if args.output:
