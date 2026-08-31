@@ -48,6 +48,7 @@ GLOBAL_CONFIG_SCHEMA_VERSION = 5
 GLOBAL_CONFIG_FILE = "config.json"
 GLOBAL_RUNTIME_FILE = "runtime.json"
 GLOBAL_CATALOG_FILE = "catalog.json"
+GLOBAL_ENROLLMENT_DEFERRALS_KEY = "global_enrollment_deferrals"
 GLOBAL_INDEX_DIR = "qdrant"
 GLOBAL_MODEL_DIR = "models"
 GLOBAL_CONTEXTS_DIR = "contexts"
@@ -117,6 +118,13 @@ GLOBAL_ENROLLMENT_REPAIR_GUIDANCE = (
     "skill to preview global-enroll for the configured workspace roots, show "
     "the exact snapshot, ask the user to approve that snapshot, and rerun "
     "global-enroll with the approved token."
+)
+GLOBAL_ENROLLMENT_UPDATE_GUIDANCE = (
+    "Global context enrollment update required: the current initialized project "
+    "is missing from the approved source snapshot. Before normal project work, "
+    "proactively use the Project Context Curator skill to preview global-enroll "
+    "for the configured workspace roots, show the exact snapshot, ask the user "
+    "to approve that snapshot, and rerun global-enroll with the approved token."
 )
 
 TERM_KINDS = {
@@ -1215,6 +1223,9 @@ def global_init(args: argparse.Namespace) -> None:
         "workspace_roots": [str(root) for root in roots],
         "domains": previous.get("domains", {}),
         "git_store": previous.get("git_store"),
+        GLOBAL_ENROLLMENT_DEFERRALS_KEY: previous.get(
+            GLOBAL_ENROLLMENT_DEFERRALS_KEY, {}
+        ),
         "storage_runtime": previous.get("storage_runtime"),
         "runtime_upgrade_policy": "prompt",
         "created_at": previous.get("created_at", stamp),
@@ -1222,6 +1233,8 @@ def global_init(args: argparse.Namespace) -> None:
     }
     if config["git_store"] is None:
         del config["git_store"]
+    if not config[GLOBAL_ENROLLMENT_DEFERRALS_KEY]:
+        del config[GLOBAL_ENROLLMENT_DEFERRALS_KEY]
     if config["storage_runtime"] is None:
         del config["storage_runtime"]
     write_global_config(config)
@@ -1261,8 +1274,99 @@ def global_update(args: argparse.Namespace) -> None:
     print(proc.stdout.strip())
 
 
+def current_global_source(
+    repo: Path,
+    roots: tuple[Path, ...],
+) -> dict[str, str] | None:
+    workspace = containing_workspace(repo, roots)
+    source_path = context_path(repo)
+    if workspace is None or not source_path.is_file():
+        return None
+    return {
+        "source_path": str(source_path),
+        "project_path": str(repo),
+        "workspace_root": str(workspace),
+    }
+
+
+def global_enrollment_deferred(
+    config: dict[str, Any],
+    source: dict[str, str],
+) -> bool:
+    raw_deferrals = config.get(GLOBAL_ENROLLMENT_DEFERRALS_KEY)
+    if not isinstance(raw_deferrals, dict):
+        return False
+    raw_deferral = raw_deferrals.get(source["project_path"])
+    return (
+        isinstance(raw_deferral, dict)
+        and raw_deferral.get("source_path") == source["source_path"]
+    )
+
+
+def defer_current_global_enrollment(
+    config: dict[str, Any],
+    repo: Path,
+    roots: tuple[Path, ...],
+) -> None:
+    source = current_global_source(repo, roots)
+    if source is None:
+        raise SystemExit(
+            "Current project has no initialized context within the configured "
+            "global workspace roots."
+        )
+    raw_deferrals = config.get(GLOBAL_ENROLLMENT_DEFERRALS_KEY)
+    deferrals = raw_deferrals if isinstance(raw_deferrals, dict) else {}
+    current = deferrals.get(source["project_path"])
+    if (
+        isinstance(current, dict)
+        and current.get("source_path") == source["source_path"]
+    ):
+        print("Global enrollment prompt is already deferred for the current project.")
+        return
+    deferrals[source["project_path"]] = {
+        "source_path": source["source_path"],
+        "deferred_at": now_iso(),
+    }
+    config[GLOBAL_ENROLLMENT_DEFERRALS_KEY] = deferrals
+    write_global_config(config)
+    print("Deferred global enrollment prompt for the current project.")
+
+
+def clear_enrolled_global_deferrals(
+    config: dict[str, Any],
+    snapshot: dict[str, Any],
+) -> None:
+    raw_deferrals = config.get(GLOBAL_ENROLLMENT_DEFERRALS_KEY)
+    if not isinstance(raw_deferrals, dict):
+        return
+    enrolled = {
+        (source["project_path"], source["source_path"])
+        for source in snapshot_sources(snapshot)
+    }
+    retained = {
+        project: deferral
+        for project, deferral in raw_deferrals.items()
+        if not (
+            isinstance(project, str)
+            and isinstance(deferral, dict)
+            and (project, deferral.get("source_path")) in enrolled
+        )
+    }
+    if retained == raw_deferrals:
+        return
+    if retained:
+        config[GLOBAL_ENROLLMENT_DEFERRALS_KEY] = retained
+    else:
+        config.pop(GLOBAL_ENROLLMENT_DEFERRALS_KEY, None)
+    write_global_config(config)
+
+
 def global_enroll(args: argparse.Namespace) -> None:
-    _, roots = require_global_configuration()
+    config, roots = require_global_configuration()
+    repo = context_repo(args.repo)
+    if args.defer_current:
+        defer_current_global_enrollment(config, repo, roots)
+        return
     snapshot = discover_global_snapshot(roots)
     catalog = read_json_object(global_cache_dir() / GLOBAL_CATALOG_FILE)
     if not args.approve_snapshot:
@@ -1273,6 +1377,7 @@ def global_enroll(args: argparse.Namespace) -> None:
     arguments = backend_base_arguments(roots)
     arguments.extend(("--enroll-new", "--approved-snapshot", args.approve_snapshot))
     proc = invoke_global_backend("sync", arguments, timeout=1800)
+    clear_enrolled_global_deferrals(config, snapshot)
     print(proc.stdout.strip())
 
 
@@ -1294,6 +1399,23 @@ def global_catalog_requires_refresh(catalog: dict[str, Any]) -> bool:
         or not isinstance(graph, dict)
         or graph.get("schema_version") != GLOBAL_RELATIONSHIP_GRAPH_SCHEMA_VERSION
     )
+
+
+def global_catalog_omits_current_project(
+    catalog: dict[str, Any], current_source: dict[str, str]
+) -> bool:
+    raw_sources = catalog.get("sources")
+    if not isinstance(raw_sources, list):
+        return False
+    for enrolled_source in raw_sources:
+        if not isinstance(enrolled_source, dict):
+            continue
+        if (
+            enrolled_source.get("project_path") == current_source["project_path"]
+            or enrolled_source.get("source_path") == current_source["source_path"]
+        ):
+            return False
+    return True
 
 
 def global_status(args: argparse.Namespace) -> None:
@@ -1320,6 +1442,21 @@ def global_status(args: argparse.Namespace) -> None:
         if args.format == "hook":
             print(GLOBAL_ENROLLMENT_REPAIR_GUIDANCE)
         return
+    repo = context_repo(args.repo)
+    source = current_global_source(repo, roots)
+    if (
+        source is not None
+        and global_catalog_omits_current_project(catalog, source)
+        and not global_enrollment_deferred(config, source)
+    ):
+        print(
+            "Global context enrollment update required: the current initialized "
+            "project is missing from the approved source snapshot."
+        )
+        print("Workspace roots: " + ", ".join(str(root) for root in roots))
+        if args.format == "hook":
+            print(GLOBAL_ENROLLMENT_UPDATE_GUIDANCE)
+        return
     projects = catalog.get("projects", [])
     project_count = catalog.get("project_count", len(projects))
     records = catalog.get("records", [])
@@ -1328,18 +1465,17 @@ def global_status(args: argparse.Namespace) -> None:
         f"{len(records)} records."
     )
     print("Workspace roots: " + ", ".join(str(root) for root in roots))
-    current_repo = context_repo(args.repo)
-    active_domains = member_domains(current_repo, configured_domains(config))
+    active_domains = member_domains(repo, configured_domains(config))
     if active_domains:
         print("Active context domains: " + ", ".join(active_domains))
     relationships = catalog.get("relationships", {})
     related = (
-        relationships.get(str(current_repo), [])
+        relationships.get(str(repo), [])
         if isinstance(relationships, dict)
         else []
     )
     if related:
-        print(f"Related projects for {current_repo.name}: {', '.join(related)}")
+        print(f"Related projects for {repo.name}: {', '.join(related)}")
     if args.format == "hook":
         print("The standard search command queries this global index automatically.")
 
@@ -5127,9 +5263,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Preview or approve a replacement snapshot of enrolled projects",
     )
     add_repo(global_enroll_parser)
-    global_enroll_parser.add_argument(
+    global_enroll_action = global_enroll_parser.add_mutually_exclusive_group()
+    global_enroll_action.add_argument(
         "--approve-snapshot",
         help="User-approved token from an unchanged global-enroll preview",
+    )
+    global_enroll_action.add_argument(
+        "--defer-current",
+        action="store_true",
+        help="Persist the user's rejection of the current project's enrollment prompt",
     )
     global_enroll_parser.set_defaults(func=global_enroll)
 

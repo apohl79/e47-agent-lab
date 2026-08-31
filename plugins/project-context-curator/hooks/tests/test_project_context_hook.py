@@ -13,6 +13,7 @@ import pytest
 
 HOOK = Path(__file__).resolve().parents[1] / "project-context-hook.py"
 PLUGIN_ROOT = HOOK.parent.parent
+UPDATER = PLUGIN_ROOT / "skills/maintain-project-context/scripts/project_context.py"
 DISABLED_ENV = "PROJECT_CONTEXT_CURATOR_DISABLED"
 PLUGIN_CONTEXT_CONDITION_SHELL = (
     'test "${PROJECT_CONTEXT_CURATOR_DISABLED:-0}" != "1" '
@@ -61,6 +62,23 @@ def run_hook(
     assert proc.stderr == ""
     assert proc.stdout.strip()
     return json.loads(proc.stdout)
+
+
+def run_updater_process(
+    *args: str,
+    repo: Path,
+    env: dict[str, str],
+) -> subprocess.CompletedProcess[str]:
+    process_env = os.environ.copy()
+    process_env.update(env)
+    return subprocess.run(
+        [sys.executable, str(UPDATER), *args, "--repo", str(repo)],
+        env=process_env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
 
 
 def run_plugin_context_condition(cwd: Path, disabled: str) -> int:
@@ -174,8 +192,7 @@ def enabled_global_environment(tmp_path: Path, workspace: Path) -> dict[str, str
     data_dir.mkdir()
     config = {"enabled": True, "workspace_roots": [str(workspace.resolve())]}
     (config_dir / "config.json").write_text(json.dumps(config), encoding="utf-8")
-    updater = PLUGIN_ROOT / "skills/maintain-project-context/scripts/project_context.py"
-    fingerprint = runpy.run_path(str(updater))["runtime_fingerprint"]()
+    fingerprint = runpy.run_path(str(UPDATER))["runtime_fingerprint"]()
     (data_dir / "runtime.json").write_text(
         json.dumps({"fingerprint": fingerprint}), encoding="utf-8"
     )
@@ -184,6 +201,22 @@ def enabled_global_environment(tmp_path: Path, workspace: Path) -> dict[str, str
         "PROJECT_CONTEXT_CURATOR_CACHE_DIR": str(tmp_path / "cache"),
         "PROJECT_CONTEXT_CURATOR_DATA_DIR": str(data_dir),
     }
+
+
+def write_global_catalog(tmp_path: Path, sources: list[dict[str, str]]) -> None:
+    catalog = tmp_path / "cache" / "catalog.json"
+    catalog.parent.mkdir(parents=True, exist_ok=True)
+    catalog.write_text(
+        json.dumps(
+            {
+                "index_schema_version": 3,
+                "sources": sources,
+                "project_count": len(sources),
+                "records": [],
+            }
+        ),
+        encoding="utf-8",
+    )
 
 
 def test_session_start_emits_context(tmp_path: Path):
@@ -320,6 +353,8 @@ def test_session_start_reads_git_backed_canonical_project_context(
         json.dumps(
             {
                 "schema_version": 4,
+                "enabled": True,
+                "workspace_roots": [str(tmp_path)],
                 "git_store": {
                     "enabled": True,
                     "path": str(store),
@@ -330,6 +365,13 @@ def test_session_start_reads_git_backed_canonical_project_context(
         ),
         encoding="utf-8",
     )
+    data_dir.mkdir()
+    updater = PLUGIN_ROOT / "skills/maintain-project-context/scripts/project_context.py"
+    fingerprint = runpy.run_path(str(updater))["runtime_fingerprint"]()
+    (data_dir / "runtime.json").write_text(
+        json.dumps({"fingerprint": fingerprint}), encoding="utf-8"
+    )
+    write_global_catalog(tmp_path, [])
     (store / "project-context-store.json").write_text(
         json.dumps(
             {
@@ -355,7 +397,8 @@ def test_session_start_reads_git_backed_canonical_project_context(
         "Storage runtime mode: git-store" in text,
         "Storage runtime selection required" in text,
         (repo / "docs/context/index.md").exists(),
-    ) == (True, True, True, False, True)
+        "Global context enrollment update required" in text,
+    ) == (True, True, True, False, True, True)
 
 
 def test_context_admission_policy_is_aligned_across_agent_surfaces(
@@ -570,6 +613,106 @@ def test_session_start_requests_approved_repair_when_catalog_is_missing(
         "preview global-enroll" in text,
         "ask the user to approve that snapshot" in text,
     ) == (True, True, True)
+
+
+def test_session_start_requests_enrollment_when_current_project_is_missing(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    repo = workspace / "repo"
+    repo.mkdir(parents=True)
+    write_context(repo)
+    write_global_catalog(tmp_path, [])
+
+    proc = run_hook_process(
+        "session-start",
+        {"cwd": str(repo)},
+        env=enabled_global_environment(tmp_path, workspace),
+    )
+    text = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
+
+    assert (
+        "Global context enrollment update required" in text,
+        "current initialized project is missing" in text,
+        "preview global-enroll" in text,
+        "ask the user to approve that snapshot" in text,
+    ) == (True, True, True, True)
+
+
+def test_session_start_does_not_request_enrollment_for_current_source(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    repo = workspace / "repo"
+    repo.mkdir(parents=True)
+    write_context(repo)
+    source = repo / "docs/context/context.json"
+    write_global_catalog(
+        tmp_path,
+        [
+            {
+                "source_path": str(source),
+                "project_path": str(repo),
+                "workspace_root": str(workspace),
+            }
+        ],
+    )
+
+    proc = run_hook_process(
+        "session-start",
+        {"cwd": str(repo)},
+        env=enabled_global_environment(tmp_path, workspace),
+    )
+    text = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
+
+    assert "Global context enrollment update required" not in text
+
+
+def test_rejected_enrollment_defers_the_current_project_prompt(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    repo = workspace / "repo"
+    repo.mkdir(parents=True)
+    write_context(repo)
+    write_global_catalog(tmp_path, [])
+    env = enabled_global_environment(tmp_path, workspace)
+
+    deferred = run_updater_process(
+        "global-enroll", "--defer-current", repo=repo, env=env
+    )
+    config = json.loads((tmp_path / "config/config.json").read_text(encoding="utf-8"))
+    proc = run_hook_process("session-start", {"cwd": str(repo)}, env=env)
+    text = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
+
+    assert (
+        deferred.returncode,
+        "Deferred global enrollment prompt" in deferred.stdout,
+        config["global_enrollment_deferrals"][str(repo)]["source_path"],
+        "Global context enrollment update required" in text,
+    ) == (0, True, str(repo / "docs/context/context.json"), False)
+
+
+def test_session_start_ignores_a_deferral_for_a_different_context_source(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    repo = workspace / "repo"
+    repo.mkdir(parents=True)
+    write_context(repo)
+    write_global_catalog(tmp_path, [])
+    env = enabled_global_environment(tmp_path, workspace)
+    config_path = tmp_path / "config/config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["global_enrollment_deferrals"] = {
+        str(repo): {"source_path": str(tmp_path / "obsolete/context.json")}
+    }
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    proc = run_hook_process("session-start", {"cwd": str(repo)}, env=env)
+    text = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
+
+    assert "Global context enrollment update required" in text
 
 
 def test_hooks_are_silent_when_context_is_ignored(tmp_path: Path):

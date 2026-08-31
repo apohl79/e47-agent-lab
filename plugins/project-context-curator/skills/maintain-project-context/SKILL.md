@@ -63,6 +63,7 @@ python3 <skill-dir>/scripts/project_context.py ignore --repo .
 python3 <skill-dir>/scripts/project_context.py global-init --repo . \
   --workspace-root ~/workspace
 python3 <skill-dir>/scripts/project_context.py global-enroll --repo .
+python3 <skill-dir>/scripts/project_context.py global-enroll --repo . --defer-current
 python3 <skill-dir>/scripts/project_context.py domain-set --repo . \
   --domain billing --project ../billing-api --project ../billing-worker \
   --remote git@github.com:acme/billing-reports.git
@@ -127,10 +128,10 @@ User/machine knowledge and local absolute bindings never leave XDG storage.
 
 ### Optional global retrieval
 
-When the session hook or search reports `Global context onboarding required` or
-`Global context enrollment repair required`, begin the matching workflow
-proactively before ordinary project work. Do not wait for the user to know or
-request curator commands.
+When the session hook or search reports `Global context onboarding required`,
+`Global context enrollment repair required`, or `Global context enrollment update
+required`, begin the matching workflow proactively before ordinary project work.
+Do not wait for the user to know or request curator commands.
 
 1. Select the preview command without changing state:
    - First run `storage-status`. If it reports `unconfigured`, invoke
@@ -139,8 +140,8 @@ request curator commands.
      was provided and the current repository is beneath `~/workspace`, use
      `~/workspace`; otherwise use the directory containing the repository. Run
      `global-init` without an approval token.
-   - For enrollment repair, retain the configured workspace roots and run
-     `global-enroll` without an approval token.
+   - For enrollment repair or an enrollment update, retain the configured
+     workspace roots and run `global-enroll` without an approval token.
 2. The preview recursively includes existing canonical contexts plus prospective
    `docs/context/context.json` paths for primary Git checkouts that still need
    initialization. Show the exact workspace roots, `initialize` candidates,
@@ -150,6 +151,11 @@ request curator commands.
    supplies canonical storage and the local default visibility. Allow the user
    to override local/versioned visibility or exclude individual repositories.
    Rerun the preview if the roots or included set changes.
+   - If the user declines enrollment for the current initialized project, run
+     `global-enroll --defer-current --repo <repo>`. This XDG-local,
+     source-bound deferral suppresses repeated SessionStart prompts without
+     altering the global snapshot; a later explicit `global-enroll` preview can
+     still enroll the project.
 4. For every `initialize` candidate, read its README,
    CLAUDE.md/AGENTS.md, top-level layout, and main manifests; then run `init`
    together with verified `add-component`/`add-term`/`add-pattern` commands. Do
@@ -203,9 +209,12 @@ relevance, graph distance and confidence, and per-project quotas.
 never discovers or enrolls a new project.
 
 After repositories are added or removed, run `global-enroll` without a token.
-Its preview also labels primary Git checkouts whose context must be initialized;
-apply the same approval and verified bootstrap workflow before rerunning it with
-`--approve-snapshot <printed-token>`. A repository containing
+The session hook also reports an enrollment update when its initialized current
+project is missing from the active snapshot; it never enrolls the project
+automatically. A rejected current-project prompt is persisted privately in XDG
+against its canonical source path. Its preview also labels primary Git checkouts
+whose context must be initialized; apply the same approval and verified bootstrap
+workflow before rerunning it with `--approve-snapshot <printed-token>`. A repository containing
 `.no-project-context` is excluded from discovery and, if already enrolled,
 removed on the next ordinary refresh.
 
