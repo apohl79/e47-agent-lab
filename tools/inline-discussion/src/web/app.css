@@ -373,15 +373,66 @@ button.primary:hover {
 #doc li:has(> input[type="checkbox"]:first-child),
 .msg.assistant li:has(> input[type="checkbox"]:first-child) {
   list-style: none;
+  padding-left: 2.2em;
 }
 
 #doc li > input[type="checkbox"]:first-child,
 .msg.assistant li > input[type="checkbox"]:first-child {
-  width: 0.95em;
-  height: 0.95em;
-  margin: 0 0.45em 0 -1.15em;
-  vertical-align: -0.08em;
-  accent-color: var(--accent);
+  appearance: none;
+  -webkit-appearance: none;
+  display: inline-grid;
+  width: 1.15em;
+  height: 1.15em;
+  margin: 0 0.45em 0 -2.2em;
+  vertical-align: -0.17em;
+  place-content: center;
+  color: var(--accent-fg);
+  background: var(--bg-elev);
+  border: 2px solid var(--border-strong);
+  border-radius: 0.28em;
+  box-shadow: var(--shadow-sm);
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease, box-shadow 120ms ease;
+}
+
+#doc li > input[type="checkbox"]:first-child::before,
+.msg.assistant li > input[type="checkbox"]:first-child::before {
+  width: 0.55em;
+  height: 0.3em;
+  content: '';
+  border: solid currentColor;
+  border-width: 0 0 0.16em 0.16em;
+  transform: rotate(-45deg) scale(0);
+  transition: transform 120ms ease;
+}
+
+#doc li > input[type="checkbox"]:first-child:checked,
+.msg.assistant li > input[type="checkbox"]:first-child:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+#doc li > input[type="checkbox"]:first-child:checked::before,
+.msg.assistant li > input[type="checkbox"]:first-child:checked::before {
+  transform: rotate(-45deg) scale(1);
+}
+
+#doc li > input[type="checkbox"]:first-child:hover:not(:disabled),
+.msg.assistant li > input[type="checkbox"]:first-child:hover:not(:disabled) {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+#doc li > input[type="checkbox"]:first-child:focus-visible,
+.msg.assistant li > input[type="checkbox"]:first-child:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+#doc li > input[type="checkbox"]:first-child:disabled,
+.msg.assistant li > input[type="checkbox"]:first-child:disabled {
+  cursor: wait;
+  opacity: 0.7;
 }
 
 #doc a {
