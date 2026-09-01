@@ -4,12 +4,12 @@ Dual-host plugin marketplace for Codex and Claude Code.
 
 ## Plugins
 
-| Plugin | Version | Description | Source | Hosts |
-| --- | --- | --- | --- | --- |
-| `reviewers` | `0.7.1` | PR finalization, reviewer-team, and Slack review-request workflows. | `plugins/reviewers` | Codex, Claude Code |
-| `auto-compaction` | `0.1.0` | Claude Code auto-compaction gate with setup skill and checkpoint hooks. | `plugins/auto-compaction` | Claude Code |
-| `inline-discussion` | `1.7.7` | Browser UI for markdown docs with threaded AI conversations. Requires the `inline-discussion` CLI on PATH (installed by `./install.sh`). | `plugins/inline-discussion` | Codex, Claude Code |
-| `project-context-curator` | `5.3.0` | Selectable local or automatically synchronized Git-backed context with graph-assisted hybrid retrieval, context hygiene audits, and an interactive knowledge-graph explorer. | `plugins/project-context-curator` | Codex, Claude Code |
+| Plugin | Version | Description | Hosts |
+| --- | --- | --- | --- |
+| [Reviewers](plugins/reviewers/README.md) | `0.7.6` | PR finalization, reviewer-team, and Slack review-request workflows. | Codex, Claude Code |
+| [Auto Compaction](plugins/auto-compaction/README.md) | `0.1.0` | Claude Code auto-compaction gate with setup skill and checkpoint hooks. | Claude Code |
+| [Inline Discussion](plugins/inline-discussion/README.md) | `1.12.4` | Keep document editing, focused AI side threads, and main-agent updates in one view. | Codex, Claude Code |
+| [Project Context Curator](plugins/project-context-curator/README.md) | `5.4.0` | Durable project knowledge with audit and graph-assisted retrieval. | Codex, Claude Code |
 
 ## Install
 
@@ -28,115 +28,3 @@ From a local clone:
 The installer detects available CLIs and installs host-appropriate plugins into
 Claude Code, Codex, or both. `auto-compaction` is Claude Code only. Use
 `./install.sh --claude` or `./install.sh --codex` to target one host.
-
-Cross-project semantic retrieval is optional. It uses Qdrant's embedded local
-mode, so it does not install or run a Qdrant server. When global context is not
-configured, the session hook proactively directs the agent to begin onboarding.
-The agent performs a read-only recursive preview, includes primary Git checkouts
-that still need context, requests approval for the exact snapshot and storage
-policy, bootstraps approved repositories with verified context, and provisions
-pinned Python packages and models through the deterministic `global-init`
-command.
-
-The disposable catalog derives a typed, evidence-backed relationship graph from
-canonical context. Search considers the current repository, repositories named
-in the query, direct relationships, and high-confidence relationships within two
-graph hops. Explicit workspace-wide queries consider every enrolled repository,
-while strongly matched otherwise unrelated records are eligible individually.
-Applicability remains the truth scope: non-project selectors such as domain,
-user, machine, and universal must still all be active. Domain membership is
-declared per checkout path or per Git remote URL, so a domain can include
-repositories that are not cloned locally. Ranking
-combines hybrid relevance, graph distance and confidence, and per-project quotas.
-
-Initial setup asks the user to select local/distributed or dedicated Git-backed
-canonical storage. `$configure-context-storage` uses `storage-migrate` to preview
-and hash every move before approval and can switch modes in either direction.
-User/machine context stays private in XDG, identities and provenance survive the
-migration, and each changed Git-store command automatically synchronizes,
-commits, and pushes only curator-managed files directly to the configured
-remote's `main`. Unrelated checkout changes block the write; a rejected push
-keeps the local commit and returns an error. Stable IDs or recorded Git remote
-URLs plus `git-store-bind` restore a cloned store on another machine.
-
-Session start runs a read-only `audit` and reports one line when stores contain
-time-bound, aged, duplicated, divergent, dead-path, or oversized records.
-`$curate-project-context` triages those findings against repository evidence and
-applies only user-confirmed `remove`, `move`, or rewrite commands.
-
-`$explore-context-insights` renders the same canonical context as a knowledge
-graph of universal stores, domains, projects, and optionally every record with
-`stored_in`, `mentions`, `shadows`, and `diverges` edges. The read-only `graph`
-command focuses on a domain or project, reports hubs, orphans, weak edges, and
-domain coverage, and exports text, JSON, Mermaid, DOT, or a self-contained
-interactive 2D/3D browser viewer.
-
-`./install.sh --with-context-runtime` remains a deterministic convenience for
-provisioning the same runtime directly.
-For the one-line path, pass the same opt-in explicitly:
-`curl -fsSL https://raw.githubusercontent.com/apohl79/e47-agent-lab/main/install.sh | bash -s -- --with-context-runtime`.
-Existing global-index users are prompted when an interactive installer detects
-runtime drift; non-interactive installs print the same explicit upgrade path.
-Host-managed marketplace updates are detected again by the plugin at session
-start because those update paths do not execute this installer. Codex then asks
-before running the deterministic `global-upgrade`; session hooks never install
-or upgrade dependencies on their own.
-
-The installer also symlinks standalone CLI tools shipped under `tools/` into the
-user bin dir (`~/bin` if it exists, otherwise `~/.local/bin`). Currently:
-
-- `inline-discussion` → `tools/inline-discussion/bin/inline-discussion`
-  (powers the `/inline-discussion:discuss` skill at runtime — the plugin
-  expects this CLI on `PATH`).
-
-The launcher needs the source tree on disk. When `./install.sh` is invoked from
-a local checkout, it links straight into that checkout. When run via the curl
-one-liner, it clones the marketplace into `~/.local/share/e47-agent-lab` and
-links from there. It uses `git clone https://github.com/<slug>.git`, or
-`gh repo clone` when `gh` is already available.
-`./install.sh uninstall` removes the installed symlinks and that managed
-checkout. If neither `gh` nor `git` can clone the repository (e.g. a private
-repo without credentials), CLI tool install is skipped with a warning and
-plugin install still proceeds.
-
-## Host Manifests
-
-- Codex marketplace: `.agents/plugins/marketplace.json`
-- Claude Code marketplace: `.claude-plugin/marketplace.json`
-
-## Versioning
-
-Canonical marketplace and plugin versions live in `plugin-versions.json`. Do not
-hand-edit version fields in host manifests; use the helper so Codex and Claude
-plugin manifests stay aligned.
-
-```bash
-./scripts/plugin-versioning.py list
-./scripts/plugin-versioning.py check
-./scripts/plugin-versioning.py sync
-./scripts/plugin-versioning.py bump reviewers patch
-./scripts/plugin-versioning.py set inline-discussion 0.2.0
-```
-
-`check` verifies `plugin-versions.json`, `.claude-plugin/marketplace.json`, and
-all plugin host manifests. Local `./install.sh` runs the same check before
-installing from a checkout.
-
-Manual Codex CLI install:
-
-```bash
-codex plugin marketplace add apohl79/e47-agent-lab
-codex plugin add reviewers@e47
-codex plugin add inline-discussion@e47
-codex plugin add project-context-curator@e47
-```
-
-Manual Claude Code CLI install:
-
-```bash
-claude plugin marketplace add apohl79/e47-agent-lab --scope user
-claude plugin install reviewers@e47
-claude plugin install auto-compaction@e47
-claude plugin install inline-discussion@e47
-claude plugin install project-context-curator@e47
-```
