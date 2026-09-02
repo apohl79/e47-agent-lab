@@ -91,6 +91,14 @@ For each item, classify it:
 
 Only use `REJECTED` or `DEFERRED` when you can explain the evidence in a PR reply. If an issue is unrelated, prove it by comparing changed files, base-branch behavior, logs, or ownership.
 
+Assess verified findings by both realistic likelihood and impact. A real issue may be
+`DEFERRED` when evidence shows that it is extremely unlikely and low impact, so its
+fix cost or change risk is not justified for this PR. Rarity alone does not justify
+deferring security, privacy, authorization, data-loss or corruption, contract,
+availability, or silently incorrect-behavior risks. In the PR reply, state the
+likelihood and impact evidence, the accepted residual risk, and any follow-up owner
+or ticket; do not silently downgrade a finding because it is difficult to reproduce.
+
 ### 6. Fix and Verify
 
 For each `FIX_REQUIRED` item:
