@@ -23,7 +23,8 @@ const KIND_MAP: Record<string, BlockKind | undefined> = {
 
 function normaliseText(token: Tokens.Generic): string {
   const raw = (token.raw ?? '').trim();
-  return raw.replace(/\s+/g, ' ');
+  const normalizedCheckboxes = raw.replace(/\[[xX]\]/g, '[ ]');
+  return normalizedCheckboxes.replace(/\s+/g, ' ');
 }
 
 function hashKey(kind: BlockKind, normalised: string, lang?: string): string {

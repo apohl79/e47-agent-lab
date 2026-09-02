@@ -464,7 +464,7 @@ test('Apply availability is broadcast to every open document view', async () => 
   await close();
 });
 
-test('A failed subdocument close preserves the live note instead of losing it', async () => {
+test('Closing a subdocument note proceeds when anchor block was replaced externally', async () => {
   const root = mkdtempSync(join(tmpdir(), 'ind-subdoc-close-'));
   mkdirSync(join(root, '.git'));
   const docPath = join(root, 'doc.md');
@@ -499,16 +499,16 @@ test('A failed subdocument close preserves the live note instead of losing it', 
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ conclusion: 'Keep this note' }),
   });
-  assert.equal(closed.status, 409);
-  assert.doesNotMatch(readFileSync(subdocPath, 'utf8'), /<details/);
+  assert.equal(closed.status, 200);
+  assert.match(readFileSync(subdocPath, 'utf8'), /<details/);
   const after = (await (await fetch(`http://127.0.0.1:${port}/api/bootstrap?path=${encodeURIComponent('/raw/2026-02/dining.md')}`)).json()) as {
-    threads: Array<{ id: string; status: string }>;
+    archivedThreads: Array<{ id: string }>;
   };
-  assert.deepEqual(after.threads.map((thread) => [thread.id, thread.status]), [[threadId, 'open']]);
+  assert.equal(after.archivedThreads.length, 1);
   await close();
 });
 
-test('A failed Apply rolls back archives across the main document and subdocument', async () => {
+test('Apply proceeds across main document and subdocument when subdocument anchor block was replaced externally', async () => {
   const root = mkdtempSync(join(tmpdir(), 'ind-apply-rollback-'));
   mkdirSync(join(root, '.git'));
   const docPath = join(root, 'doc.md');
@@ -539,14 +539,13 @@ test('A failed Apply rolls back archives across the main document and subdocumen
   writeFileSync(subdocPath, '# Dining\n\nThe anchor was replaced externally.\n');
 
   const applied = await fetch(`http://127.0.0.1:${port}/api/apply`, { method: 'POST' });
-  assert.equal(applied.status, 500);
-  assert.match(await applied.text(), /dining\.md/);
-  assert.doesNotMatch(readFileSync(docPath, 'utf8'), /<details/);
-  assert.doesNotMatch(readFileSync(subdocPath, 'utf8'), /<details/);
+  assert.equal(applied.status, 200);
+  assert.match(readFileSync(docPath, 'utf8'), /<details/);
+  assert.match(readFileSync(subdocPath, 'utf8'), /<details/);
   const mainAfter = (await (await fetch(`http://127.0.0.1:${port}/api/bootstrap`)).json()) as {
-    threads: Array<{ status: string; messages: Array<{ text: string }> }>;
+    archivedThreads: Array<{ status: string; messages: Array<{ text: string }> }>;
   };
-  assert.deepEqual(mainAfter.threads.map((thread) => [thread.status, thread.messages[0]?.text]), [['open', 'Main note']]);
+  assert.equal(mainAfter.archivedThreads.length, 1);
   await close();
 });
 

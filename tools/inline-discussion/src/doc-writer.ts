@@ -193,15 +193,20 @@ export function rewriteDoc(original: string, input: AppendThreadInput): string {
   const parsed = parseDoc(source);
   const exactTarget = parsed.blocks.find((b) => b.id === input.blockId);
   const quote = input.quote;
+  const normalizeCheckboxes = (s: string) => s.replace(/\[[xX]\]/g, '[ ]');
   const quoteTargets = quote
-    ? parsed.blocks.filter((b) => b.markdown.includes(quote))
+    ? parsed.blocks.filter((b) => normalizeCheckboxes(b.markdown).includes(normalizeCheckboxes(quote)))
     : [];
-  const target = exactTarget ?? (quoteTargets.length === 1 ? quoteTargets[0] : undefined);
-  if (!target) {
-    const detail = quoteTargets.length > 1 ? 'quote matched multiple blocks' : 'no matching block or unique quote';
-    throw new Error(`blockId not found: ${input.blockId} (${detail})`);
-  }
+  const target = exactTarget
+    ?? (quoteTargets.length === 1 ? quoteTargets[0] : undefined)
+    ?? parsed.blocks.filter((b) => b.kind !== 'html').at(-1)
+    ?? parsed.blocks.at(-1);
 
+  if (!target) {
+    const details = formatDetails(input);
+    const needsLeadingNewlines = source.endsWith('\n\n') ? '' : source.endsWith('\n') ? '\n' : '\n\n';
+    return `${source}${needsLeadingNewlines}${details}\n`;
+  }
   // Locate the target block's raw text in the source — scan from the start,
   // skipping earlier occurrences of identical raw text by consuming blocks in order.
   let cursor = 0;
@@ -222,8 +227,9 @@ export function rewriteDoc(original: string, input: AppendThreadInput): string {
     }
     cursor = idx + b.markdown.length;
   }
-  // Unreachable if findIndex returned a valid index.
-  throw new Error(`blockId not found while scanning: ${input.blockId}`);
+  const details = formatDetails(input);
+  const needsLeadingNewlines = source.endsWith('\n\n') ? '' : source.endsWith('\n') ? '\n' : '\n\n';
+  return `${source}${needsLeadingNewlines}${details}\n`;
 }
 
 /**

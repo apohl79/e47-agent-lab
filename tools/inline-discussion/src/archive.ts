@@ -55,7 +55,7 @@ export function findArchivedBlocks(markdown: string): ArchivedBlockInfo[] {
     const headerMatch = summary.match(kind === 'thread' ? THREAD_HEADER_RE : NOTE_HEADER_RE)!;
     const ts = `${headerMatch.groups!['date']}T00:00:00Z`;
 
-    const anchorBlock = findPreviousContentBlock(blocks, i);
+    const anchorBlock = findPreviousContentBlock(blocks, i) ?? (blocks.some((b) => b.kind !== 'html') ? undefined : block);
     if (!anchorBlock) continue;
 
     const rawQuote = headerMatch.groups!['quote'];

@@ -168,3 +168,9 @@ test('renderDoc converts inline line-through styles to semantic del tags', () =>
   assert.match(html, /<del>Done item<\/del>/);
   assert.doesNotMatch(html, /style=/);
 });
+
+test('parseDoc generates identical block IDs regardless of task checkbox checked state', () => {
+  const unchecked = '- [ ] First\n- [ ] Second\n';
+  const checked = '- [x] First\n- [X] Second\n';
+  assert.equal(parseDoc(unchecked).blocks[0]!.id, parseDoc(checked).blocks[0]!.id);
+});

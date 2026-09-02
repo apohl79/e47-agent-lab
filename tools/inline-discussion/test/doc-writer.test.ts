@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { appendThreadDetails, removeAllArchivedBlocks, removeArchivedBlock, removeThreadDetails } from '../src/doc-writer.ts';
+import { appendThreadDetails, removeAllArchivedBlocks, removeArchivedBlock, removeThreadDetails, updateTaskCheckbox } from '../src/doc-writer.ts';
 import { parseArchivedThreads } from '../src/archive.ts';
 import { parseDoc } from '../src/markdown.ts';
 
@@ -462,4 +462,51 @@ test('removeAllArchivedBlocks rewrites a doc with no archives unchanged in conte
   const after = readFileSync(path, 'utf8');
   assert.match(after, /Just prose, no threads\./);
   assert.equal(parseArchivedThreads(after).length, 0);
+});
+
+test('appendThreadDetails archives thread onto a task list whose checkbox was toggled', () => {
+  const original = '- [ ] First item\n- [ ] Second item\n';
+  const blockId = parseDoc(original).blocks[0]!.id;
+  const path = makeDoc(original);
+  updateTaskCheckbox(path, blockId, 0, true);
+
+  appendThreadDetails(path, {
+    blockId,
+    transcript: [{ role: 'user', text: 'question' }],
+    conclusion: 'answer',
+    date: '2026-09-02',
+  });
+  const after = readFileSync(path, 'utf8');
+  assert.match(after, /💬 Thread/);
+});
+
+test('appendThreadDetails appends to end of document when blockId and quote are missing', () => {
+  const original = '# Title\n\nParagraph one.\n';
+  const path = makeDoc(original);
+
+  appendThreadDetails(path, {
+    blockId: 'non-existent-block-id',
+    quote: 'non-existent quote text',
+    transcript: [{ role: 'user', text: 'question' }],
+    conclusion: 'answer',
+    date: '2026-09-02',
+  });
+  const after = readFileSync(path, 'utf8');
+  assert.match(after, /💬 Thread/);
+  assert.equal(parseArchivedThreads(after).length, 1);
+});
+
+test('appendThreadDetails handles completely empty document gracefully', () => {
+  const path = makeDoc('');
+
+  appendThreadDetails(path, {
+    blockId: 'missing-id',
+    transcript: [{ role: 'user', text: 'note text' }],
+    conclusion: 'note text',
+    date: '2026-09-02',
+    kind: 'note',
+  });
+  const after = readFileSync(path, 'utf8');
+  assert.match(after, /📝 Note/);
+  assert.equal(parseArchivedThreads(after).length, 1);
 });

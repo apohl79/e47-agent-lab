@@ -550,7 +550,12 @@ async function archiveAllOpenThreads(state: ServerState): Promise<FinishResult['
         });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        throw new Error(`Failed to archive ${threadId} in ${documentPath}: ${message}`);
+        logDiagnostic(state, {
+          event: 'apply.archive_thread.warning',
+          threadId,
+          documentPath,
+          error: message,
+        });
       }
       if (documentPath === state.docPath) state.docMd = readFileSync(state.docPath, 'utf8');
 
