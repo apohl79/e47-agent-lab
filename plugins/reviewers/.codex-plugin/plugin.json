@@ -1,7 +1,7 @@
 {
   "name": "reviewers",
-  "version": "0.7.7",
-  "description": "PR finalization, reviewer-team, and Slack review-request workflows for Claude Code and Codex.",
+  "version": "0.8.0",
+  "description": "Incremental implementation review, PR finalization, reviewer-team, and Slack review-request workflows for Claude Code and Codex.",
   "author": {
     "name": "apohl79"
   },
@@ -18,8 +18,8 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Reviewers",
-    "shortDescription": "Run reviewers, finalize PRs, and request review.",
-    "longDescription": "Reviewers adds skills for parallel reviewer-team runs, focused fallback security review, getting pull requests into a ready or merged state, and sending concise PR review requests to configured Slack channels.",
+    "shortDescription": "Review checkpoints and finalize pull requests.",
+    "longDescription": "Reviewers adds lightweight implementation checkpoints, evidence-based learning from valid bugs, optional parallel reviewer-team runs, pull-request finalization, and concise Slack review requests.",
     "developerName": "apohl79",
     "category": "Productivity",
     "capabilities": [
@@ -29,6 +29,7 @@
     ],
     "brandColor": "#2563EB",
     "defaultPrompt": [
+      "Review the current implementation checkpoint.",
       "Finalize this PR with reviewers.",
       "Run the reviewers team on this change.",
       "Check this PR for review and quality-gate issues.",

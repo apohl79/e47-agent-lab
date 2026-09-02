@@ -9,7 +9,7 @@
   "plugins": [
     {
       "name": "reviewers",
-      "description": "PR finalization, reviewer-team, and Slack review-request workflows for Claude Code and Codex.",
+      "description": "Incremental implementation review, PR finalization, reviewer-team, and Slack review-request workflows for Claude Code and Codex.",
       "source": "./plugins/reviewers",
       "category": "workflow"
     },

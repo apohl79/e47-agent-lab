@@ -1,12 +1,14 @@
 # Reviewers
 
-`reviewers` gives an agent a disciplined way to review and finish pull
-requests. It exists to turn review from a single, broad opinion into
-evidence-backed coverage across correctness, security, architecture,
-observability, integration, and test quality.
+`reviewers` gives an agent a disciplined way to review implementation
+checkpoints and finish pull requests. It combines cheap feedback during
+implementation with evidence-backed PR triage and optional broad review.
 
 ## What it provides
 
+- A lightweight, single-reviewer checkpoint loop that reviews one implementation
+  slice, returns valid bugs to the implementing agent, verifies the repair, and
+  captures an evidence-based root-cause lesson.
 - A reviewer team that prepares a review target, runs the project’s
   verification commands, and coordinates host-native, cross-provider, Gemini,
   and security reviewers in parallel when available.
@@ -16,24 +18,30 @@ observability, integration, and test quality.
   introduced-versus-pre-existing classification.
 - A lightweight OWASP and secure-coding fallback when a dedicated security
   skill is unavailable.
-- PR finalization that can move a draft to ready, synchronize it with the base
-  branch, resolve review threads, monitor checks, and merge only with explicit
+- PR finalization that inventories human and bot findings, learns from valid
+  introduced bugs, moves a draft to ready, synchronizes it with the base branch,
+  resolves review threads, monitors checks, and merges only with explicit
   approval.
 - Slack review-request tools for managing approved channels and sending either
   a single-PR or stacked-PR request.
 
 ## Why it exists
 
-PRs often fail in the gaps between individual review habits: a functional
-review can miss a security flaw, and a security review can miss an untested
-integration boundary. This plugin makes those viewpoints explicit, keeps
-findings reproducible, and helps teams bring an existing PR to a reliably
-mergeable state.
+Late PR review makes every defect more expensive to understand because the
+implementation context has gone cold. This plugin adds a small review loop
+during implementation, keeps findings reproducible, and reserves broad
+multi-reviewer coverage for changes that justify it.
 
 ## When to use it
 
-- Request a reviewer team for a change, branch, PR, or stack.
-- Ask an agent to prepare an existing PR for review or merge.
+- During every source, test, or configuration implementation task, review at
+  least one checkpoint before declaring the code ready.
+- During larger implementation tasks, review each complete behavior slice
+  before building the next slice.
+- When an implementation has an open PR, finalize it and address human, bot,
+  check, and quality-gate findings before declaring the task complete.
+- Request the full reviewer team explicitly when broad independent coverage is
+  worth its cost.
 - Send a review request to Slack after the PR or stack is ready.
 
 The plugin supports Codex and Claude Code. Install it through the

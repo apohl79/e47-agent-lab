@@ -1,6 +1,6 @@
 ---
 name: pr-finalize
-description: Get an existing GitHub pull request into a mergeable ready state by moving drafts to ready, syncing with the base branch, addressing review comments and quality gates, waiting for checks, resolving threads, and optionally merging only when explicitly requested.
+description: "Use automatically before declaring an implementation task complete whenever it has an open GitHub pull request. Finalize the PR by moving drafts to ready, syncing with the base branch, addressing human, Cubic, Cursor Bugbot, CI, and other review findings, learning from valid introduced bugs, waiting for checks, resolving threads, and optionally merging only when explicitly requested."
 ---
 
 # PR Finalizer
@@ -80,16 +80,32 @@ Collect every open item before fixing:
 
 For Sonar issues, first look for a Sonar-capable MCP server or tool in the current session. Use it to fetch issue details, rule metadata, severity, file/line, and status when available. If no Sonar-capable MCP is available, use SonarCloud/SonarQube PR comments, check summaries, artifacts, or linked logs from GitHub.
 
+For every inventory item, retain its source (`human`, named bot, check, or
+quality gate), stable GitHub reference when available, head SHA, and cited
+path/line. Keep the original wording as evidence; do not treat it as verified
+merely because a bot or reviewer reported it.
+
 ### 5. Triage Everything
 
 For each item, classify it:
 
-- `FIX_REQUIRED`: real issue caused by or exposed by this PR.
+- `FIX_REQUIRED`: real, in-scope issue that this PR must fix.
 - `REJECTED`: false positive, incorrect review, duplicate, or unrelated to the PR, with evidence.
 - `DEFERRED`: real issue intentionally left outside this PR, with a concrete reason.
 - `BLOCKED`: cannot be resolved without missing access, external service recovery, or a human decision.
 
 Only use `REJECTED` or `DEFERRED` when you can explain the evidence in a PR reply. If an issue is unrelated, prove it by comparing changed files, base-branch behavior, logs, or ownership.
+
+Independently assign every finding one origin:
+
+- `INTRODUCED`: the PR creates the bug, activates a latent bug, or materially
+  worsens its impact.
+- `PRE_EXISTING`: the same bug demonstrably exists on the PR base and the PR
+  neither activates nor worsens it.
+
+Compare the issue-bearing behavior with the base branch. Do not infer origin
+only from whether the cited line changed. Do not attribute a `PRE_EXISTING`
+finding to the current implementation approach.
 
 Assess verified findings by both realistic likelihood and impact. A real issue may be
 `DEFERRED` when evidence shows that it is extremely unlikely and low impact, so its
@@ -103,19 +119,53 @@ or ticket; do not silently downgrade a finding because it is difficult to reprod
 
 For each `FIX_REQUIRED` item:
 
-1. Make the smallest relevant code, test, config, or documentation change.
-2. Run focused verification first.
-3. Run the repository's standard checks when discoverable.
-4. Commit with a clear conventional message.
-5. Push the branch.
+1. Reproduce or otherwise prove the failure mechanism.
+2. State the violated invariant.
+3. Make the smallest complete code, test, config, or documentation change.
+4. Add or strengthen a regression test when the finding concerns executable
+   behavior.
+5. Add the earliest reasonable prevention supported by evidence: prefer a safe
+   API, type, validator, static check, or reusable test before a prompt reminder.
+6. Run focused verification first.
+7. Run the repository's standard checks when discoverable.
+8. Commit with a clear conventional message.
+9. Push the branch.
 
 If multiple comments describe one root cause, fix them in one commit and mention every affected thread in the reply.
+
+For every verified `INTRODUCED` bug, record this concise learning closure.
+Summarize observable evidence; never claim access to hidden chain-of-thought:
+
+```text
+SOURCE:
+SOURCE_REFERENCE:
+ORIGIN: INTRODUCED
+FAILURE_MECHANISM:
+VIOLATED_INVARIANT:
+FAILED_ASSUMPTION:
+ASSUMPTION_EVIDENCE: <OBSERVED|INFERRED>
+ESCAPE_REASON:
+ERROR_CATEGORY:
+EARLIEST_PREVENTION_POINT:
+PREVENTION_APPLIED:
+VERIFICATION:
+CONTEXT_CANDIDATE:
+RETRIEVAL_CUES:
+```
+
+Treat `CONTEXT_CANDIDATE` as a candidate only. When Project Context Curator is
+active, let its admission gate decide whether to search, consolidate, and store
+the generalized rule. Do not store an active PR's bug report or implementation
+detail. Admit behavior learned from the change only after it is complete and
+verified on a long-lived branch, unless the user explicitly confirms it as a
+durable decision or invariant.
 
 ### 7. Reply and Resolve Threads
 
 For every review thread and bot comment:
 
-- Reply with what changed, or why the finding is `REJECTED` or `DEFERRED`.
+- Reply with what changed, the root-cause category and prevention for an
+  introduced bug, or why the finding is `REJECTED` or `DEFERRED`.
 - Resolve the thread after replying.
 - Verify the thread is resolved through GraphQL.
 
@@ -152,5 +202,9 @@ Report:
 - How the branch was synced with the base branch.
 - Checks and quality gates addressed.
 - Comment threads replied to and resolved.
+- Finding source and introduced-versus-pre-existing origin.
+- Root-cause learning closures for valid introduced bugs.
+- Pending durable-context candidates, without storing unmerged implementation
+  behavior.
 - Remaining blockers, if any, with exact owner/action needed.
 - Merge result, only when a merge flag was passed.

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Review Implementation Checkpoint"
+  short_description: "Review one implementation slice and learn from bugs"
+  default_prompt: "Use $review-implementation-checkpoint to review the current implementation slice before I continue."

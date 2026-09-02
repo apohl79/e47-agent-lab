@@ -1,6 +1,6 @@
 ---
 name: run-reviewer-team
-description: Use when a single parallel reviewer-team run is needed — prepares the review (resolves the target, runs the project's verification commands, selects reviewers), launches the host-aware Claude/Codex + Gemini + Security reviewer set (the security reviewer loads the installed security review skills directly; reviewers:lite-security-reviewer as fallback) plus conditional Architecture (hexagonal-architecture + cloud-portability recipes), Observability (observability recipes), and Integration reviewers when relevant, has each reviewer read the codebase directly, triages findings with introduced-vs-pre-existing origin, and returns a structured review report.
+description: "Use only when the user requests broad multi-reviewer coverage or explicitly approves escalation from a lightweight implementation checkpoint or PR finding; do not use for routine implementation checkpoints. Run one comprehensive parallel reviewer-team pass with host-aware Claude/Codex, Gemini, Security, and relevant Architecture, Observability, or Integration reviewers, then triage findings with introduced-versus-pre-existing origin."
 ---
 
 # Run Reviewer Team
