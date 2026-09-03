@@ -1,4 +1,4 @@
 interface:
-  display_name: Maintain Project Context
-  short_description: Capture durable project context.
-  default_prompt: "Maintain project context for this repository while working: proactively store durable repo/user-confirmed insights, ask concise questions when meaning is unclear, and update docs/context files."
+  display_name: "Maintain Project Context"
+  short_description: "Capture durable project and domain context."
+  default_prompt: "Use $maintain-project-context to capture durable context and, when setting up a domain, ask whether membership is explicit or root-based."

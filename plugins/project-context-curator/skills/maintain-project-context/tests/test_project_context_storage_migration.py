@@ -207,10 +207,13 @@ def test_storage_migration_round_trip_preserves_records_and_private_context(
     env = isolated_environment(tmp_path / "xdg")
     workspace = tmp_path / "workspace"
     repo = workspace / "service"
+    outside = tmp_path / "outside"
     store = tmp_path / "context-store"
     git_init(repo)
+    git_init(outside)
     initialize_git_store(store)
     initialized = run_context("init", "--visibility", "local", repo=repo, env=env)
+    run_context("init", repo=outside, env=env)
     run_context(
         "add-pattern",
         "--name",
@@ -224,8 +227,8 @@ def test_storage_migration_round_trip_preserves_records_and_private_context(
         "domain-set",
         "--domain",
         "payments",
-        "--project",
-        str(repo),
+        "--root",
+        str(tmp_path),
         repo=repo,
         env=env,
     )
@@ -247,6 +250,7 @@ def test_storage_migration_round_trip_preserves_records_and_private_context(
         )
     original = project_context(repo)
     migrate_to_git_store(repo, env, store, workspace)
+    migrated_manifest = read_json(store / "project-context-store.json")
     preview = run_context(
         "storage-migrate",
         "--target",
@@ -296,6 +300,7 @@ def test_storage_migration_round_trip_preserves_records_and_private_context(
             "term"
         ],
         read_json(private_paths[0])["terms"][0]["term"],
+        migrated_manifest["domains"]["payments"],
         (store / "project-context-store.json").exists(),
         tuple(store.glob("projects/*/context.json")),
         "git_store" in config,
@@ -310,6 +315,7 @@ def test_storage_migration_round_trip_preserves_records_and_private_context(
         "Settlement",
         "UTC",
         "Preferred shell",
+        [original["store_id"]],
         False,
         (),
         False,

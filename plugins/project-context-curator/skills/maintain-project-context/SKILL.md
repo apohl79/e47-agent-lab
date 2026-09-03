@@ -1,6 +1,6 @@
 ---
 name: maintain-project-context
-description: Maintain durable project domain context while working in a repository. Use when implementing features, researching a project, reviewing code, planning architecture, or encountering unknown abbreviations, domain terms, component names, service names, events, APIs, ownership boundaries, or architecture patterns that should be clarified and stored for future Codex or Claude Code sessions.
+description: Maintain durable project domain context while working in a repository. Use when implementing features, researching a project, reviewing code, planning architecture, setting up or changing a context domain, or encountering unknown abbreviations, domain terms, component names, service names, events, APIs, ownership boundaries, or architecture patterns that should be clarified and stored for future Codex or Claude Code sessions.
 ---
 
 # Maintain Project Context
@@ -28,7 +28,7 @@ XDG. Local mode's saved project visibility is `local` (Git-excluded) or
 - Domain, universal, and shareable composite facts: `<git-store>/scopes/`.
 - User, machine, and every composite containing either remain private in XDG.
 - `<git-store>/project-context-store.json` persists stable project IDs and
-  domain membership. Absolute checkout bindings stay in XDG configuration.
+  domain membership. Absolute checkout bindings and domain roots stay in XDG.
 - Project checkouts retain generated Markdown views, not a writable JSON mirror.
 - The updater serializes Git-store mutations, synchronizes the configured
   remote's `main` before writing, and creates and pushes one Conventional Commit
@@ -66,7 +66,7 @@ python3 <skill-dir>/scripts/project_context.py global-enroll --repo .
 python3 <skill-dir>/scripts/project_context.py global-enroll --repo . --defer-current
 python3 <skill-dir>/scripts/project_context.py domain-set --repo . \
   --domain billing --project ../billing-api --project ../billing-worker \
-  --remote git@github.com:acme/billing-reports.git
+  --remote git@github.com:acme/billing-reports.git --root ~/workspace/billing
 python3 <skill-dir>/scripts/project_context.py move --repo . \
   --type pattern --value "Signed commits" --applicability universal
 python3 <skill-dir>/scripts/project_context.py storage-status --repo .
@@ -267,10 +267,11 @@ remain private in XDG.
   verified.
 - Classify as domain only from user confirmation, authoritative domain
   documentation, or corroborating evidence in multiple registered domain
-  projects. Register exact membership with `domain-set`, as checkout paths
-  (`--project`) and/or Git remote URLs (`--remote`) for repositories that may
-  not be cloned; never infer a domain from directory names, repository names,
-  or a single implementation.
+  projects. Before setting up a domain, ask whether membership stays explicit
+  or automatically includes initialized/bound projects beneath local roots; ask
+  for exact roots when chosen. Use `domain-set` with `--project`, `--remote`,
+  and/or `--root`. Never infer membership or a root from names or one
+  implementation.
 - Workspace applicability is legacy and read-only; reclassify existing records
   with `move`. Use user or machine only for the current identity or environment;
   use universal only for context-independent facts.
@@ -419,15 +420,18 @@ python3 <skill-dir>/scripts/project_context.py add-pattern --repo . \
   --name "Signed commits" --summary "..." --applicability universal
 ```
 
-Configure exact domain membership before storing domain facts. `--project`
-members are checkout paths; `--remote` members are Git remote URLs, so a
-checkout whose `origin` matches joins the domain as soon as it is initialized
-or bound, even if it was not cloned when the domain was declared:
+Before configuring a domain, use the host user-input tool to ask:
+“Should membership stay explicit, or should initialized/bound projects beneath
+a local root join automatically?” Ask for the exact root when automatic
+membership is selected. `--project` accepts checkout paths, `--remote` accepts
+Git remote URLs, and `--root` accepts machine-local directory roots. Root rules
+add current and future initialized/bound projects without removing members when
+a checkout disappears:
 
 ```bash
 python3 <skill-dir>/scripts/project_context.py domain-set --repo . \
   --domain billing --project ../billing-api --project ../billing-worker \
-  --remote git@github.com:acme/billing-reports.git
+  --remote git@github.com:acme/billing-reports.git --root ~/workspace/billing
 python3 <skill-dir>/scripts/project_context.py add-term --repo ../billing-api \
   --term "Ledger" --definition "..." --applicability domain:billing
 ```

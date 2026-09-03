@@ -23,8 +23,10 @@ decisions while keeping private context private.
 - A context audit for stale, duplicated, divergent, dead-path, time-bound, and
   oversized records.
 - Explicit snapshot enrollment for optional cross-project retrieval. New
-  projects are never silently added; a rejected current-project prompt can be
-  deferred privately with `global-enroll --defer-current`.
+  projects are never silently added to that index; a rejected current-project
+  prompt can be deferred privately with `global-enroll --defer-current`.
+- User-confirmed domain roots that automatically add current and future
+  initialized or bound repositories while keeping local paths private.
 - Read-only graph exports in text, JSON, Mermaid, DOT, and self-contained HTML
   for inspecting project relationships, domains, record shadows, and
   divergences.

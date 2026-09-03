@@ -79,9 +79,9 @@ Selectors are typed objects:
 - `self` resolves while indexing to the owning project or current user.
 - `machine` is local to the active XDG data directory, so it has no host or
   other machine identifier.
-- `domain` requires an explicit validated domain ID and exact membership in the
-  user configuration, declared as checkout paths and/or normalized Git remote
-  URLs; `domain:self` is invalid.
+- `domain` requires an explicit validated domain ID and membership in the user
+  configuration, declared as checkout paths, normalized Git remote URLs, and/or
+  machine-local directory roots; `domain:self` is invalid.
 - `universal` has no selector and denotes knowledge that is independent of
   those boundaries.
 - Multiple selectors are an intersection: every selector must be active for a
@@ -113,11 +113,19 @@ promotion or reclassification.
 
 ## Storage Runtime Configuration
 
-XDG configuration schema version 5 records the user-confirmed runtime decision:
+XDG configuration schema version 6 records the user-confirmed runtime decision
+and optional machine-local domain roots:
 
 ```json
 {
-  "schema_version": 5,
+  "schema_version": 6,
+  "domains": {
+    "software-engineering": {
+      "projects": [],
+      "remotes": [],
+      "roots": ["/home/example/workspace/code"]
+    }
+  },
   "storage_runtime": {
     "mode": "local",
     "project_visibility": "versioned",
@@ -148,14 +156,17 @@ reported as `unconfigured` while retaining local compatibility. An older valid
 
 Selector keys and composite hashes are deterministic. Domain IDs are lowercase,
 1–64 characters, and may contain letters, digits, dots, underscores, or hyphens.
-Domain membership is stored in XDG configuration as
-`{"projects": [<absolute paths>], "remotes": [<normalized remote URLs>]}`; a
-legacy plain path list is still read as `projects`. A checkout belongs to a
-domain when its path is listed or when its normalized Git remote (see
-`remote_url` below) is listed, so remote members need not be cloned. A Git store
-persists path members as stable project store IDs in `domains` and remote
-members verbatim in `domain_remotes`; absolute checkout bindings remain local
-in XDG configuration.
+Domain membership is stored in XDG configuration as `projects`, `remotes`, and
+optional `roots`; a legacy plain path list is still read as `projects`. A
+checkout belongs when its path is listed, its normalized Git remote is listed,
+or it is at or beneath a configured root. Root paths are machine-local and are
+never copied to the Git store. `domain-set --root` enrolls initialized local
+contexts and Git-store bindings already beneath the root. Later `init`,
+`git-store-bind`, and `update` calls materialize a matching checkout path in XDG
+and add its stable project ID to the Git-store `domains` catalog. This automatic
+enrollment is additive: a missing or moved checkout does not remove a canonical
+member. An explicit root-free `domain-set` replaces canonical membership when
+removal is intended. Remote members need not be cloned.
 
 A scope root has no `storage_policy`; that policy applies only to a project
 store. Its additional metadata is:
@@ -217,7 +228,8 @@ registered and points to `git-store-bind --match-remote`.
 
 `domain_remotes` lists each domain's remote-declared members. `init` and
 `git-store-bind` restore a domain into local XDG configuration when the
-checkout's project ID is in `domains` or its remote is in `domain_remotes`.
+checkout's project ID is in `domains` or its remote is in `domain_remotes`;
+restoration preserves any roots configured on that machine.
 
 XDG configuration records the runtime decision, store checkout path, store
 identity, and absolute checkout-to-project-ID bindings. `storage-migrate

@@ -44,7 +44,7 @@ APPLICABILITY_KINDS = {
 LEGACY_APPLICABILITY_KINDS = {"workspace"}
 SHAREABLE_APPLICABILITY_KINDS = frozenset({"domain", "universal"})
 DEFAULT_APPLICABILITY = [{"kind": "project", "selector": "self"}]
-GLOBAL_CONFIG_SCHEMA_VERSION = 5
+GLOBAL_CONFIG_SCHEMA_VERSION = 6
 GLOBAL_CONFIG_FILE = "config.json"
 GLOBAL_RUNTIME_FILE = "runtime.json"
 GLOBAL_CATALOG_FILE = "catalog.json"
@@ -184,12 +184,16 @@ class GitUpstream:
 class DomainMembers:
     projects: tuple[Path, ...] = ()
     remotes: tuple[str, ...] = ()
+    roots: tuple[Path, ...] = ()
 
     def to_config(self) -> dict[str, list[str]]:
-        return {
+        value = {
             "projects": [str(project) for project in self.projects],
             "remotes": list(self.remotes),
         }
+        if self.roots:
+            value["roots"] = [str(root) for root in self.roots]
+        return value
 
 
 SEARCH_SPECS: tuple[SearchSpec, ...] = (
@@ -422,6 +426,7 @@ def configured_domains(config: dict[str, Any]) -> dict[str, DomainMembers]:
             continue
         raw_projects = raw_members.get("projects", [])
         raw_remotes = raw_members.get("remotes", [])
+        raw_roots = raw_members.get("roots", [])
         domains[name] = DomainMembers(
             projects=tuple(
                 Path(project).expanduser().resolve()
@@ -432,6 +437,11 @@ def configured_domains(config: dict[str, Any]) -> dict[str, DomainMembers]:
                 remote
                 for remote in (raw_remotes if isinstance(raw_remotes, list) else [])
                 if isinstance(remote, str) and normalize_remote_url(remote) == remote
+            ),
+            roots=tuple(
+                Path(root).expanduser().resolve()
+                for root in (raw_roots if isinstance(raw_roots, list) else [])
+                if isinstance(root, str) and root
             ),
         )
     return domains
@@ -453,6 +463,7 @@ def member_domains(repo: Path, domains: dict[str, DomainMembers]) -> tuple[str, 
             for domain_id, members in domains.items()
             if repo in members.projects
             or (remote_url is not None and remote_url in members.remotes)
+            or containing_workspace(repo, members.roots) is not None
         )
     )
 
@@ -460,6 +471,44 @@ def member_domains(repo: Path, domains: dict[str, DomainMembers]) -> tuple[str, 
 def containing_workspace(repo: Path, roots: tuple[Path, ...]) -> Path | None:
     matches = tuple(root for root in roots if repo == root or root in repo.parents)
     return max(matches, key=lambda path: len(path.parts), default=None)
+
+
+def initialized_projects_in_domain_roots(
+    roots: tuple[Path, ...],
+    config: dict[str, Any],
+) -> tuple[Path, ...]:
+    projects: set[Path] = set()
+    store = configured_git_store(config)
+    if store is not None:
+        for raw_project in store["project_bindings"]:
+            project = Path(raw_project)
+            if project.is_dir() and containing_workspace(project, roots) is not None:
+                projects.add(project)
+        return tuple(sorted(projects, key=str))
+    for root in roots:
+        for directory, names, files in os.walk(root, followlinks=False):
+            names[:] = sorted(
+                name for name in names if name not in DISCOVERY_SKIPPED_DIRECTORIES
+            )
+            current = Path(directory)
+            if (
+                current.name != "context"
+                or current.parent.name != "docs"
+                or "context.json" not in files
+            ):
+                continue
+            candidate = current / "context.json"
+            if candidate.is_symlink():
+                names[:] = []
+                continue
+            project = candidate.resolve().parents[2]
+            if (
+                containing_workspace(project, roots) is not None
+                and not (project / IGNORE_MARKER).exists()
+            ):
+                projects.add(project)
+            names[:] = []
+    return tuple(sorted(projects, key=str))
 
 
 def resolve_applicability(
@@ -890,12 +939,18 @@ def persist_git_store_domain(
                 "Git-backed domains require every member project to be initialized or "
                 "bound first: " + ", ".join(str(project) for project in missing)
             )
-        domains[domain_id] = sorted(
-            {
-                configured["project_bindings"][str(project.resolve())]
-                for project in members.projects
-            }
+        project_ids = {
+            configured["project_bindings"][str(project.resolve())]
+            for project in members.projects
+        }
+        project_ids.update(
+            project_id
+            for raw_project, project_id in configured["project_bindings"].items()
+            if containing_workspace(Path(raw_project), members.roots) is not None
         )
+        if members.roots:
+            project_ids.update(domains.get(domain_id, ()))
+        domains[domain_id] = sorted(project_ids)
         if members.remotes:
             domain_remotes[domain_id] = list(members.remotes)
         else:
@@ -904,11 +959,75 @@ def persist_git_store_domain(
     write_git_json(root, git_store_manifest_path(root), manifest)
 
 
+def enroll_repo_in_domain_roots(repo: Path) -> None:
+    config = global_config()
+    domains = configured_domains(config)
+    matching = tuple(
+        domain_id
+        for domain_id, members in sorted(domains.items())
+        if containing_workspace(repo, members.roots) is not None
+    )
+    if not matching:
+        return
+    changed = False
+    for domain_id in matching:
+        members = domains[domain_id]
+        if repo in members.projects:
+            continue
+        domains[domain_id] = replace(
+            members,
+            projects=tuple(sorted({*members.projects, repo}, key=str)),
+        )
+        changed = True
+    if changed:
+        config["domains"] = domains_config(domains)
+        write_global_config(config)
+
+    store = configured_git_store(config)
+    if store is None:
+        return
+    project_id = store["project_bindings"].get(str(repo.resolve()))
+    if project_id is None:
+        return
+    root = validate_git_store_root(Path(store["path"]))
+    manifest = load_git_store_manifest(root)
+    manifest_changed = False
+    for domain_id in matching:
+        member_ids = set(manifest["domains"].get(domain_id, ()))
+        if project_id in member_ids:
+            continue
+        member_ids.add(project_id)
+        manifest["domains"][domain_id] = sorted(member_ids)
+        manifest_changed = True
+    if manifest_changed:
+        manifest["updated_at"] = now_iso()
+        write_git_json(root, git_store_manifest_path(root), manifest)
+
+
 def domain_set(args: argparse.Namespace) -> None:
     domain_id = validate_domain_id(args.domain)
-    if not args.project and not args.remote:
-        raise SystemExit("Domain membership requires at least one --project or --remote.")
-    projects = tuple(dict.fromkeys(context_repo(path) for path in args.project or ()))
+    if not args.project and not args.remote and not args.root:
+        raise SystemExit(
+            "Domain membership requires at least one --project, --remote, or --root."
+        )
+    roots = tuple(
+        dict.fromkeys(path.expanduser().resolve() for path in args.root or ())
+    )
+    missing_roots = tuple(root for root in roots if not root.is_dir())
+    if missing_roots:
+        raise SystemExit(
+            "Domain root is not a directory: "
+            + ", ".join(str(root) for root in missing_roots)
+        )
+    config = global_config()
+    projects = tuple(
+        dict.fromkeys(
+            (
+                *(context_repo(path) for path in args.project or ()),
+                *initialized_projects_in_domain_roots(roots, config),
+            )
+        )
+    )
     missing = tuple(project for project in projects if not project.is_dir())
     if missing:
         raise SystemExit(
@@ -921,17 +1040,23 @@ def domain_set(args: argparse.Namespace) -> None:
         if remote_url is None:
             raise SystemExit(f"Domain remote is not a Git remote URL: {raw!r}")
         remotes[remote_url] = None
-    members = DomainMembers(projects=projects, remotes=tuple(sorted(remotes)))
-    config = global_config()
+    members = DomainMembers(
+        projects=projects,
+        remotes=tuple(sorted(remotes)),
+        roots=roots,
+    )
     domains = configured_domains(config)
     domains[domain_id] = members
     persist_git_store_domain(domain_id, members)
     config["domains"] = domains_config(domains)
     write_global_config(config)
-    print(
+    detail = (
         f"Configured domain {domain_id}: {len(projects)} projects, "
         f"{len(members.remotes)} remotes"
     )
+    if roots:
+        detail += f", {len(roots)} roots"
+    print(detail)
 
 
 def domain_remove(args: argparse.Namespace) -> None:
@@ -953,7 +1078,11 @@ def domain_list(args: argparse.Namespace) -> None:
         print("No project domains configured.")
         return
     for domain_id, members in sorted(domains.items()):
-        entries = [*(str(project) for project in members.projects), *members.remotes]
+        entries = [
+            *(str(project) for project in members.projects),
+            *members.remotes,
+            *(f"root:{root}" for root in members.roots),
+        ]
         print(f"{domain_id}: " + ", ".join(entries))
 
 
@@ -3565,6 +3694,7 @@ def restore_git_store_domains(
         domains[domain_id] = DomainMembers(
             projects=tuple(sorted(projects, key=str)),
             remotes=tuple(sorted({*current.remotes, *remotes})),
+            roots=current.roots,
         )
     config["domains"] = domains_config(domains)
     write_global_config(config)
@@ -3627,11 +3757,22 @@ def apply_git_store_migration(root: Path, plan: dict[str, Any]) -> None:
             metadata["updated_at"] = now_iso()
         write_git_json(root, item["target"], data)
     for domain_id, members in configured_domains(config).items():
-        member_ids = tuple(
+        explicit_ids = tuple(
             bindings.get(str(member.resolve())) for member in members.projects
         )
-        if member_ids and all(member_ids):
-            manifest["domains"][domain_id] = sorted(set(member_ids))
+        if not explicit_ids or all(explicit_ids):
+            member_ids = {project_id for project_id in explicit_ids if project_id}
+        else:
+            member_ids = set()
+        member_ids.update(
+            project_id
+            for raw_project, project_id in bindings.items()
+            if containing_workspace(Path(raw_project), members.roots) is not None
+        )
+        if members.roots:
+            member_ids.update(manifest["domains"].get(domain_id, ()))
+        if member_ids:
+            manifest["domains"][domain_id] = sorted(member_ids)
         if members.remotes:
             manifest["domain_remotes"][domain_id] = list(members.remotes)
     write_git_json(root, git_store_manifest_path(root), manifest)
@@ -3870,6 +4011,7 @@ def git_store_bind(args: argparse.Namespace) -> None:
     configure_git_store(root, manifest, bindings)
     restore_git_store_domains(repo, project_id, manifest)
     refresh_git_store_project_metadata(repo, project_id, root, manifest)
+    enroll_repo_in_domain_roots(repo)
     context_dir = repo / CONTEXT_DIR
     context_dir.mkdir(parents=True, exist_ok=True)
     ensure_context_gitignore(context_dir)
@@ -4006,6 +4148,7 @@ def init_context(args: argparse.Namespace) -> None:
     if record_local_runtime:
         set_storage_runtime(config, "local", visibility)
         write_global_config(config)
+    enroll_repo_in_domain_roots(repo)
     location_label = "local context" if visibility != "git-store" else "project context"
     print(f"Initialized {location_label}: {repo / CONTEXT_DIR}")
     print(f"Context visibility: {visibility}")
@@ -4051,6 +4194,7 @@ def update_context(args: argparse.Namespace) -> None:
     data, migrations = load_context_with_migrations(repo)
     save_context(repo, data)
     refresh_bound_git_store_project_metadata(repo)
+    enroll_repo_in_domain_roots(repo)
     scope_migrations = migrate_private_scope_contexts()
     applied = ", ".join(migrations) if migrations else "none"
     print(f"Updated project context: {repo / CONTEXT_DIR}")
@@ -5301,6 +5445,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--remote",
         action="append",
         help="Domain member Git remote URL (matched against checkouts' origin); repeatable",
+    )
+    domain_set_parser.add_argument(
+        "--root",
+        action="append",
+        type=Path,
+        help=(
+            "Machine-local root whose initialized or bound projects join the domain; "
+            "repeatable"
+        ),
     )
     domain_set_parser.set_defaults(func=domain_set)
 

@@ -123,7 +123,7 @@ def test_domain_set_rejects_missing_members_and_non_remote_values(
 
     assert (
         empty.returncode,
-        "at least one --project or --remote" in empty.stderr,
+        "at least one --project, --remote, or --root" in empty.stderr,
         local_path.returncode,
         "not a Git remote URL" in local_path.stderr,
         config_domains(env),
