@@ -29,7 +29,11 @@ reason.
 
 `schema_version` is a non-negative integer. The updater owns an ordered migration registry keyed by the source version; every migration must produce exactly the next version. Missing `schema_version` is legacy version `0`.
 
-`project_context.py update --repo <repo>` applies all pending migrations and regenerates every Markdown view. The session-start hook runs this command automatically for initialized contexts. A malformed version, missing migration step, or context written by a newer schema is rejected before canonical JSON is rewritten.
+`project_context.py update --repo <repo>` applies all pending migrations,
+synchronizes a configured canonical Git store, and regenerates every Markdown
+view. The read-only session-start hook does not run this command automatically.
+A malformed version, missing migration step, or context written by a newer
+schema is rejected before canonical JSON is rewritten.
 
 When changing the canonical schema:
 

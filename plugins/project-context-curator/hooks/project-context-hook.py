@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import os
 import subprocess
@@ -180,36 +181,6 @@ def log_message(message: str) -> None:
         pass
 
 
-def update_existing_context(repo: Path, script: Path) -> str:
-    try:
-        proc = subprocess.run(
-            [
-                sys.executable,
-                str(script),
-                "update",
-                "--if-initialized",
-                "--repo",
-                str(repo),
-            ],
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=10,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        detail = str(exc)
-    else:
-        if proc.returncode == 0:
-            return ""
-        detail = " ".join((proc.stderr or proc.stdout).split()) or (
-            f"updater exited with status {proc.returncode}"
-        )
-    warning = f"Automatic project context update failed: {detail}"
-    log_message(warning)
-    return warning
-
-
 def project_context_status(repo: Path, script: Path) -> str:
     try:
         proc = subprocess.run(
@@ -299,6 +270,20 @@ def context_audit_status(repo: Path, script: Path) -> str:
     return proc.stdout.strip() if proc.returncode == 0 else ""
 
 
+def read_only_statuses(repo: Path, script: Path) -> tuple[str, str, str, str]:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        global_status = executor.submit(global_context_status, repo, script)
+        storage_status = executor.submit(storage_runtime_status, repo, script)
+        context_status = executor.submit(project_context_status, repo, script)
+        audit_status = executor.submit(context_audit_status, repo, script)
+        return (
+            global_status.result(),
+            storage_status.result(),
+            context_status.result(),
+            audit_status.result(),
+        )
+
+
 ADMISSION_GATE = (
     "Before any add-* write, search existing context and apply the context admission gate. "
     "Admit a candidate only if it is expected to outlive the current task or branch, benefit "
@@ -337,13 +322,14 @@ def session_start(payload: dict[str, Any]) -> None:
         return
 
     script = updater_script()
-    update_warning = update_existing_context(repo, script)
-    global_status = global_context_status(repo, script)
-    storage_status = storage_runtime_status(repo, script)
-    context_status = project_context_status(repo, script)
-    audit_status = context_audit_status(repo, script)
+    global_status, storage_status, context_status, audit_status = read_only_statuses(
+        repo, script
+    )
     index = repo / CONTEXT_INDEX
     git_initialized = is_git_initialized(repo)
+    context_initialized = not context_status.startswith(
+        "No docs/context/context.json exists yet."
+    )
 
     lines = [
         "Project Context Curator is active for this session.",
@@ -392,13 +378,15 @@ def session_start(payload: dict[str, Any]) -> None:
         f"Updater script: python3 {script} <command> --repo {repo}",
         f"Update command: python3 {script} update --repo {repo}",
         (
+            "SessionStart is read-only. Run the update command explicitly to apply schema "
+            "migrations, synchronize the canonical Git store, or refresh generated views."
+        ),
+        (
             f"Search command: python3 {script} search --repo {repo} "
             '--query "<task term>" [--query "<another term>"]'
         ),
         "Do not guess definitions. Do not store secrets or transient debugging details.",
     ]
-    if update_warning:
-        lines.insert(2, update_warning)
     if global_status:
         lines.insert(2, global_status)
     if storage_status:
@@ -441,6 +429,11 @@ def session_start(payload: dict[str, Any]) -> None:
         )
     if index.exists():
         lines.append(f"Context index: {index}")
+    elif context_initialized:
+        lines.append(
+            "Context is initialized but its generated index is missing. Run the update command "
+            "explicitly before relying on generated views; SessionStart will not modify them."
+        )
     else:
         lines.append(
             "Context index is missing. Before acting on the first feature, research, planning, "

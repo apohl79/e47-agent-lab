@@ -79,7 +79,11 @@ python3 <skill-dir>/scripts/project_context.py git-store-bind --repo . \
 python3 <skill-dir>/scripts/project_context.py git-store-status --repo .
 ```
 
-For initialized repositories, the session-start hook runs `update` before loading context. The command applies each registered schema migration in order and regenerates all Markdown views. Update failures do not block session start; the hook reports the failure and writes it to its log.
+The session-start hook is read-only: it loads project, storage, global-runtime,
+and audit status without synchronizing the canonical Git store or regenerating
+views. Run `update` explicitly to apply registered schema migrations,
+synchronize the Git store, and regenerate all Markdown views. Every canonical
+updater write also regenerates the affected views.
 
 Use `python3 <skill-dir>/scripts/project_context.py --help` and
 `python3 <skill-dir>/scripts/project_context.py <command> --help` for current command syntax.

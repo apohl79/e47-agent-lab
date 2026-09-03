@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib.util
 import json
 import os
 import runpy
@@ -22,15 +21,6 @@ PLUGIN_CONTEXT_CONDITION_SHELL = (
     '&& case "$common" in */.git) root="${common%/.git}" ;; esac '
     '&& test ! -e "$root/.no-project-context"'
 )
-
-
-def load_hook_module():
-    spec = importlib.util.spec_from_file_location("project_context_hook", HOOK)
-    assert spec is not None
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
-    return module
 
 
 def run_hook_process(
@@ -387,6 +377,11 @@ def test_session_start_reads_git_backed_canonical_project_context(
         "PROJECT_CONTEXT_CURATOR_CACHE_DIR": str(tmp_path / "cache"),
         "PROJECT_CONTEXT_CURATOR_DATA_DIR": str(data_dir),
     }
+    subprocess.run(
+        ["git", "remote", "set-url", "origin", str(tmp_path / "missing-remote.git")],
+        cwd=store,
+        check=True,
+    )
 
     output = run_hook_process("session-start", {"cwd": str(repo)}, env)
     text = json.loads(output.stdout)["hookSpecificOutput"]["additionalContext"]
@@ -397,8 +392,12 @@ def test_session_start_reads_git_backed_canonical_project_context(
         "Storage runtime mode: git-store" in text,
         "Storage runtime selection required" in text,
         (repo / "docs/context/index.md").exists(),
+        "SessionStart is read-only" in text,
+        "Automatic project context update failed" in text,
+        "Context is initialized but its generated index is missing" in text,
+        "ask whether this project should use Project Context Curator" in text,
         "Global context enrollment update required" in text,
-    ) == (True, True, True, False, True, True)
+    ) == (True, True, True, False, False, True, False, True, False, True)
 
 
 def test_context_admission_policy_is_aligned_across_agent_surfaces(
@@ -466,34 +465,25 @@ def test_session_start_uses_main_repo_context_from_linked_worktree(tmp_path: Pat
     assert str(linked.resolve() / "docs" / "context") not in text
 
 
-def test_session_start_migrates_context_and_refreshes_views(tmp_path: Path) -> None:
+def test_session_start_preserves_context_and_generated_views(tmp_path: Path) -> None:
     write_context(tmp_path)
+    context_path = tmp_path / "docs/context/context.json"
+    index_path = tmp_path / "docs/context/index.md"
+    original_context = context_path.read_text(encoding="utf-8")
+    original_index = index_path.read_text(encoding="utf-8")
 
-    run_hook("session-start", {"cwd": str(tmp_path)})
-    data = json.loads(
-        (tmp_path / "docs/context/context.json").read_text(encoding="utf-8")
-    )
-    index = (tmp_path / "docs/context/index.md").read_text(encoding="utf-8")
-
-    assert (data["schema_version"], "## Topical Index" in index, "ACS" in index) == (
-        4,
-        True,
-        True,
-    )
-
-
-def test_context_update_failure_is_non_blocking_and_logged(tmp_path: Path) -> None:
-    module = load_hook_module()
-    write_context(tmp_path)
-    module.LOG_PATH = tmp_path / "hook.log"
-
-    warning = module.update_existing_context(tmp_path, tmp_path / "missing-updater.py")
+    output = run_hook("session-start", {"cwd": str(tmp_path)})
+    text = output["hookSpecificOutput"]["additionalContext"]
 
     assert (
-        warning.startswith("Automatic project context update failed:"),
-        "Automatic project context update failed:"
-        in module.LOG_PATH.read_text(encoding="utf-8"),
-    ) == (True, True)
+        context_path.read_text(encoding="utf-8"),
+        index_path.read_text(encoding="utf-8"),
+        "SessionStart is read-only" in text,
+    ) == (
+        original_context,
+        original_index,
+        True,
+    )
 
 
 def test_session_start_reports_audit_findings_only_when_present(tmp_path: Path) -> None:
