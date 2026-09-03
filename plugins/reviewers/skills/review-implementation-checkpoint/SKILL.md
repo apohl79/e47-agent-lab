@@ -1,6 +1,6 @@
 ---
 name: review-implementation-checkpoint
-description: "Use automatically during every source, test, or configuration implementation task: run a lightweight, single-reviewer checkpoint before declaring code ready and after each complete behavior slice or risky boundary change in larger tasks. Review the smallest immutable delta, return valid bugs to the implementing agent for focused repair and root-cause learning, and leave broad multi-reviewer coverage to reviewers:run-reviewer-team. Use its learning closure also whenever a committed or deployed implementation mistake is discovered, even outside a scheduled checkpoint, to identify the earliest practical control that could catch the whole error category."
+description: "Use automatically during every source, test, or configuration implementation task: run a lightweight, single-reviewer checkpoint before declaring code ready and after each complete behavior slice or risky boundary change in larger tasks. Review the smallest immutable delta, return valid bugs to the implementing agent for focused repair, and invoke reviewers:review-learning-closure before accepting an introduced finding's fix. Leave broad multi-reviewer coverage to reviewers:run-reviewer-team. Use the same closure whenever a committed or deployed implementation mistake is discovered, even outside a scheduled checkpoint, to identify the earliest practical control that could catch the whole error category."
 ---
 
 # Review Implementation Checkpoint
@@ -102,6 +102,7 @@ Tell the reviewer to:
 Require either exactly `STATUS: OK` or one block per finding:
 
 ```text
+FINDING_ID: <stable source-specific ID>
 CATEGORY: <FIX_REQUIRED|VERIFIED_FIX|REJECTED|DEFERRED>
 SEVERITY: <critical|major|minor|nit>
 ORIGIN: <INTRODUCED|PRE_EXISTING>
@@ -131,27 +132,9 @@ accept a finding only because the reviewer asserted it.
   implemented the checkpoint. If the current agent implemented it, close the
   finding directly.
 
-For each returned bug, require this concise learning record. Record observable
-reasoning summaries, never hidden chain-of-thought:
-
-```text
-FINDING_ID:
-FAILURE_MECHANISM:
-VIOLATED_INVARIANT:
-FAILED_ASSUMPTION:
-ASSUMPTION_EVIDENCE: <OBSERVED|INFERRED>
-ESCAPE_REASON:
-ERROR_CATEGORY:
-EARLIEST_PREVENTION_POINT:
-PREVENTION_APPLIED:
-VERIFICATION:
-CONTEXT_CANDIDATE:
-RETRIEVAL_CUES:
-```
-
 If the current task does not authorize implementing a fix, stop after the
-learning record and report the proposed prevention without changing files.
-Otherwise:
+`CLOSURE_STATUS: PROPOSED` record from `$reviewers:review-learning-closure`
+and report the proposed prevention without changing files. Otherwise:
 
 1. Reproduce or otherwise prove the bug.
 2. Apply the smallest complete fix.
@@ -161,25 +144,17 @@ Otherwise:
    prevention supported by evidence: prefer a safe API, type, validator, static
    check, or reusable test before a prompt reminder.
 5. Run focused verification.
-6. Send the fix and learning record to the same reviewer when reuse is
-   available; otherwise run one narrow verification pass.
-7. Accept the checkpoint only when the reviewer verifies the fix and the
-   prevention claim is supported.
+6. Invoke `$reviewers:review-learning-closure` with the `FINDING_ID`, review
+   snapshot, origin evidence, fix, prevention, and verification. Keep its
+   `CLOSURE_STATUS: COMPLETE` record with the checkpoint evidence.
+7. Send the fix and closure to the same reviewer when reuse is available;
+   otherwise run one narrow verification pass.
+8. Accept the checkpoint only when the reviewer verifies the fix, the
+   prevention claim is supported, and every verified introduced finding has a
+   complete shared closure. Do not accept `STATUS: OK` alone.
 
 After two failed fix-and-verify cycles for the same cause, stop automatic
 retries and report the evidence and escalation need.
-
-## Context Admission
-
-Treat `CONTEXT_CANDIDATE` as a candidate, not a write instruction. Project
-Context Curator owns search, consolidation, applicability, and admission when
-it is active.
-
-Do not store an active branch's bug report or implementation detail. After the
-work is complete and verified on a long-lived branch, admit only a non-obvious
-invariant or reusable implementation rule that benefits unrelated future work.
-Prefer the implemented code, test, type, validator, or skill when it already
-makes the lesson readily recoverable.
 
 ## Escalation
 
@@ -204,7 +179,7 @@ Report:
 - reviewer used or why no independent reviewer was available;
 - accepted, rejected, and deferred findings;
 - fixes and focused verification;
-- learning records for introduced bugs;
+- complete or proposed shared closures for introduced bugs;
 - the next verified checkpoint base as an immutable snapshot identifier, or
   `none (final working-tree checkpoint)`; and
 - any recommended escalation or pending context candidate.

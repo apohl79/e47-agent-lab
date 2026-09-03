@@ -17,6 +17,8 @@ Ready means all of the following are true:
 - All checks are passing or explicitly non-blocking with evidence.
 - All review comments and review threads are addressed, replied to, and resolved.
 - No open comments remain that request a change.
+- Every verified `INTRODUCED` `FIX_REQUIRED` finding has a complete
+  `$reviewers:review-learning-closure` record.
 
 ## Guardrails
 
@@ -82,8 +84,9 @@ For Sonar issues, first look for a Sonar-capable MCP server or tool in the curre
 
 For every inventory item, retain its source (`human`, named bot, check, or
 quality gate), stable GitHub reference when available, head SHA, and cited
-path/line. Keep the original wording as evidence; do not treat it as verified
-merely because a bot or reviewer reported it.
+path/line. Assign a stable `FINDING_ID`, preserving a source ID when one exists.
+Keep the original wording as evidence; do not treat it as verified merely
+because a bot or reviewer reported it.
 
 ### 5. Triage Everything
 
@@ -128,37 +131,19 @@ For each `FIX_REQUIRED` item:
    API, type, validator, static check, or reusable test before a prompt reminder.
 6. Run focused verification first.
 7. Run the repository's standard checks when discoverable.
-8. Commit with a clear conventional message.
-9. Push the branch.
+8. For a verified introduced finding, invoke
+   `$reviewers:review-learning-closure` with the `FINDING_ID`, source
+   reference, origin evidence, fix, prevention, and verification. Retain its
+   `CLOSURE_STATUS: COMPLETE` record before replying that the item is fixed.
+9. Commit with a clear conventional message.
+10. Push the branch.
 
 If multiple comments describe one root cause, fix them in one commit and mention every affected thread in the reply.
 
-For every verified `INTRODUCED` bug, record this concise learning closure.
-Summarize observable evidence; never claim access to hidden chain-of-thought:
-
-```text
-SOURCE:
-SOURCE_REFERENCE:
-ORIGIN: INTRODUCED
-FAILURE_MECHANISM:
-VIOLATED_INVARIANT:
-FAILED_ASSUMPTION:
-ASSUMPTION_EVIDENCE: <OBSERVED|INFERRED>
-ESCAPE_REASON:
-ERROR_CATEGORY:
-EARLIEST_PREVENTION_POINT:
-PREVENTION_APPLIED:
-VERIFICATION:
-CONTEXT_CANDIDATE:
-RETRIEVAL_CUES:
-```
-
-Treat `CONTEXT_CANDIDATE` as a candidate only. When Project Context Curator is
-active, let its admission gate decide whether to search, consolidate, and store
-the generalized rule. Do not store an active PR's bug report or implementation
-detail. Admit behavior learned from the change only after it is complete and
-verified on a long-lived branch, unless the user explicitly confirms it as a
-durable decision or invariant.
+For each verified introduced finding, do not reply that it is fixed, resolve its
+thread, or treat passing checks as PR readiness until the shared skill returns
+`CLOSURE_STATUS: COMPLETE`. When several findings share a root cause, give the
+skill every related `FINDING_ID` and cite each in the closure and reply.
 
 ### 7. Reply and Resolve Threads
 
@@ -203,7 +188,7 @@ Report:
 - Checks and quality gates addressed.
 - Comment threads replied to and resolved.
 - Finding source and introduced-versus-pre-existing origin.
-- Root-cause learning closures for valid introduced bugs.
+- Complete shared learning closures for valid introduced bugs.
 - Pending durable-context candidates, without storing unmerged implementation
   behavior.
 - Remaining blockers, if any, with exact owner/action needed.

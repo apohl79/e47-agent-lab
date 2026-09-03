@@ -1,6 +1,6 @@
 {
   "name": "reviewers",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Incremental implementation review, PR finalization, reviewer-team, and Slack review-request workflows for Claude Code and Codex.",
   "author": {
     "name": "apohl79"

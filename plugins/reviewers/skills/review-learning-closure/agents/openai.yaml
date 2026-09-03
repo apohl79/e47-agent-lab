@@ -1,0 +1,4 @@
+interface:
+  display_name: "Review Learning Closure"
+  short_description: "Close introduced review findings with evidence"
+  default_prompt: "Use $review-learning-closure to close this verified introduced review finding before accepting the fix."

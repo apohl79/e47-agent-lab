@@ -8,7 +8,8 @@ implementation with evidence-backed PR triage and optional broad review.
 
 - A lightweight, single-reviewer checkpoint loop that reviews one implementation
   slice, returns valid bugs to the implementing agent, verifies the repair, and
-  captures an evidence-based root-cause lesson.
+  requires the shared `review-learning-closure` evidence-based root-cause
+  closure before accepting it.
 - A reviewer team that prepares a review target, runs the project’s
   verification commands, and coordinates host-native, cross-provider, Gemini,
   and security reviewers in parallel when available.
@@ -19,9 +20,9 @@ implementation with evidence-backed PR triage and optional broad review.
 - A lightweight OWASP and secure-coding fallback when a dedicated security
   skill is unavailable.
 - PR finalization that inventories human and bot findings, learns from valid
-  introduced bugs, moves a draft to ready, synchronizes it with the base branch,
-  resolves review threads, monitors checks, and merges only with explicit
-  approval.
+  introduced bugs through the same closure workflow, moves a draft to ready,
+  synchronizes it with the base branch, resolves review threads, monitors
+  checks, and merges only with explicit approval.
 - Slack review-request tools for managing approved channels and sending either
   a single-PR or stacked-PR request.
 
