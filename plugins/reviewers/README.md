@@ -17,6 +17,9 @@ implementation with evidence-backed PR triage and optional broad review.
   the same findings.
 - Structured findings with severity, source locations, and
   introduced-versus-pre-existing classification.
+- An implementation preflight contract: coding rules are explicitly marked on
+  context patterns and must be searched and read before source, test, or
+  configuration edits.
 - A lightweight OWASP and secure-coding fallback when a dedicated security
   skill is unavailable.
 - PR finalization that inventories human and bot findings, learns from valid

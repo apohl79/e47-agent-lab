@@ -69,6 +69,14 @@ python3 <skill-dir>/scripts/project_context.py domain-set --repo . \
   --remote git@github.com:acme/billing-reports.git --root ~/workspace/billing
 python3 <skill-dir>/scripts/project_context.py move --repo . \
   --type pattern --value "Signed commits" --applicability universal
+python3 <skill-dir>/scripts/project_context.py pattern-category list --repo .
+python3 <skill-dir>/scripts/project_context.py pattern-category rename --repo . \
+  --from-category architecture --to-category implementation
+python3 <skill-dir>/scripts/project_context.py pattern-category merge --repo . \
+  --from-category testing --from-category contract-testing \
+  --to-category implementation
+python3 <skill-dir>/scripts/project_context.py pattern-category delete --repo . \
+  --category obsolete
 python3 <skill-dir>/scripts/project_context.py storage-status --repo .
 python3 <skill-dir>/scripts/project_context.py storage-migrate --repo . \
   --target git-store --store ~/context-knowledge --workspace-root ~/workspace
@@ -312,6 +320,12 @@ canonical store; it only makes those facts inapplicable to the removed project.
       fall back to `rg -n -i '<term1>|<term2>' <canonical-context.json>
       docs/context/*.md`.
    7. Load an entire large generated view only when the task itself is broad enough to require it.
+   8. For source, test, or configuration implementation, complete the
+      implementation preflight before the first edit: search the task terms,
+      read every matching pattern, prioritizing those categorized
+      `implementation` or `both`; unclassified legacy patterns remain eligible
+      until classified. Record `CONTEXT_PREFLIGHT: COMPLETE` with the searched
+      terms (or `CONTEXT_PREFLIGHT: NONE` when no pattern matches).
 3. If `.no-project-context` exists at the repository root, do not initialize context and do not ask again.
 4. If `docs/context/index.md` does not exist, ask one concise question before executing ordinary feature, research, planning, or review work: whether Project Context Curator should be initialized for this project.
    - If the user says no, run `scripts/project_context.py ignore --repo <repo>` and continue without project context.

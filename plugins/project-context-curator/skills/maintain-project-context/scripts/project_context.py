@@ -2863,6 +2863,7 @@ def add_pattern(args: argparse.Namespace) -> None:
         data["patterns"].append(record)
 
     record["summary"] = args.summary
+    set_if_present(record, "category", args.category)
     set_if_present(record, "applies_to", split_values(args.applies_to))
     set_if_present(record, "notes", args.notes)
     set_applicability(record, applicability)
@@ -2870,6 +2871,78 @@ def add_pattern(args: argparse.Namespace) -> None:
     save_context_target(repo, path, data, project_target)
     print(f"Updated pattern: {args.name}")
     print(f"Canonical context: {path}")
+
+
+def pattern_category_data(args: argparse.Namespace) -> tuple[Path, dict[str, Any], bool]:
+    repo = context_repo(args.repo)
+    path, data, applicability, project_target = context_write_target(
+        repo, args.applicability
+    )
+    if applicability is None and not context_path(repo).exists():
+        raise SystemExit("No project context exists.")
+    return path, data, project_target
+
+
+def pattern_category_list(args: argparse.Namespace) -> None:
+    _, data, _ = pattern_category_data(args)
+    counts: dict[str, int] = {}
+    for pattern in data["patterns"]:
+        category = pattern.get("category")
+        if category:
+            counts[category] = counts.get(category, 0) + 1
+    for category in sorted(counts, key=str.casefold):
+        print(f"{category}\t{counts[category]}")
+
+
+def pattern_category_update(args: argparse.Namespace) -> None:
+    path, data, project_target = pattern_category_data(args)
+    repo = context_repo(args.repo)
+    old = args.from_category
+    new = args.to_category
+    if not old.strip() or not new.strip():
+        raise SystemExit("Category names must not be empty.")
+    matches = [pattern for pattern in data["patterns"] if pattern.get("category") == old]
+    if not matches:
+        raise SystemExit(f"No patterns found in category {old!r}.")
+    for pattern in matches:
+        pattern["category"] = new
+        add_provenance(pattern, repo, args.source, "category-updated")
+    save_context_target(repo, path, data, project_target)
+    print(f"Updated category {old!r} to {new!r} on {len(matches)} pattern(s).")
+
+
+def pattern_category_delete(args: argparse.Namespace) -> None:
+    path, data, project_target = pattern_category_data(args)
+    repo = context_repo(args.repo)
+    matches = [pattern for pattern in data["patterns"] if pattern.get("category") == args.category]
+    if not matches:
+        raise SystemExit(f"No patterns found in category {args.category!r}.")
+    for pattern in matches:
+        pattern.pop("category", None)
+        add_provenance(pattern, repo, args.source, "category-removed")
+    save_context_target(repo, path, data, project_target)
+    print(f"Removed category {args.category!r} from {len(matches)} pattern(s).")
+
+
+def pattern_category_merge(args: argparse.Namespace) -> None:
+    path, data, project_target = pattern_category_data(args)
+    repo = context_repo(args.repo)
+    target = args.to_category
+    sources = set(args.from_category)
+    if not target.strip() or not sources or any(not value.strip() for value in sources):
+        raise SystemExit("Category names must not be empty.")
+    matches = [
+        pattern
+        for pattern in data["patterns"]
+        if pattern.get("category") in sources
+    ]
+    if not matches:
+        raise SystemExit("No patterns found in the source categories.")
+    for pattern in matches:
+        pattern["category"] = target
+        add_provenance(pattern, repo, args.source, "category-merged")
+    save_context_target(repo, path, data, project_target)
+    print(f"Merged {len(sources)} category(ies) into {target!r} on {len(matches)} pattern(s).")
 
 
 def add_question(args: argparse.Namespace) -> None:
@@ -4937,9 +5010,12 @@ def render_topical_index(data: dict[str, Any]) -> list[str]:
     if data["patterns"]:
         for pattern in data["patterns"]:
             name = one_line(pattern.get("name"))
+            category = pattern.get("category")
+            category_suffix = f"; category: {one_line(category)}" if category else ""
             lines.append(
                 f"- [{name}](architecture.md#{markdown_anchor(name)}) — "
-                f"{compact_summary(pattern.get('summary'))}{topical_applicability(pattern)}"
+                f"{compact_summary(pattern.get('summary'))}{category_suffix}"
+                f"{topical_applicability(pattern)}"
             )
     else:
         lines.append("- None recorded.")
@@ -5156,6 +5232,8 @@ def render_architecture(data: dict[str, Any]) -> str:
                 "",
             ]
         )
+        if pattern.get("category"):
+            lines.extend([f"Category: {pattern['category']}", ""])
         if pattern.get("applies_to"):
             lines.extend(["Applies to:", ""])
             lines.extend(f"- `{item}`" for item in pattern["applies_to"])
@@ -5505,11 +5583,58 @@ def build_parser() -> argparse.ArgumentParser:
     add_repo(pattern_parser)
     pattern_parser.add_argument("--name", required=True)
     pattern_parser.add_argument("--summary", required=True)
+    pattern_parser.add_argument(
+        "--category",
+        help=(
+            "Open-vocabulary pattern category (for example architecture, "
+            "implementation, testing, or operations)"
+        ),
+    )
     pattern_parser.add_argument("--applies-to", nargs="*")
     pattern_parser.add_argument("--notes")
     pattern_parser.add_argument("--source", default="user-confirmed")
     add_applicability(pattern_parser)
     pattern_parser.set_defaults(func=add_pattern)
+
+    category_parser = subparsers.add_parser(
+        "pattern-category", help="Manage pattern categories"
+    )
+    category_subparsers = category_parser.add_subparsers(dest="category_action", required=True)
+    category_list_parser = category_subparsers.add_parser("list", help="List categories and pattern counts")
+    add_repo(category_list_parser)
+    add_applicability(category_list_parser)
+    category_list_parser.set_defaults(func=pattern_category_list)
+
+    for action, help_text in (
+        ("rename", "Rename one pattern category"),
+        ("move", "Move all patterns from one category to another"),
+    ):
+        action_parser = category_subparsers.add_parser(action, help=help_text)
+        add_repo(action_parser)
+        action_parser.add_argument("--from-category", required=True)
+        action_parser.add_argument("--to-category", required=True)
+        action_parser.add_argument("--source", default="user-confirmed")
+        add_applicability(action_parser)
+        action_parser.set_defaults(func=pattern_category_update)
+
+    category_delete_parser = category_subparsers.add_parser(
+        "delete", help="Remove a category assignment from all matching patterns"
+    )
+    add_repo(category_delete_parser)
+    category_delete_parser.add_argument("--category", required=True)
+    category_delete_parser.add_argument("--source", default="user-confirmed")
+    add_applicability(category_delete_parser)
+    category_delete_parser.set_defaults(func=pattern_category_delete)
+
+    category_merge_parser = category_subparsers.add_parser(
+        "merge", help="Merge multiple categories into a new category"
+    )
+    add_repo(category_merge_parser)
+    category_merge_parser.add_argument("--from-category", action="append", required=True)
+    category_merge_parser.add_argument("--to-category", required=True)
+    category_merge_parser.add_argument("--source", default="user-confirmed")
+    add_applicability(category_merge_parser)
+    category_merge_parser.set_defaults(func=pattern_category_merge)
 
     question_parser = subparsers.add_parser(
         "add-question", help="Record an unresolved question"

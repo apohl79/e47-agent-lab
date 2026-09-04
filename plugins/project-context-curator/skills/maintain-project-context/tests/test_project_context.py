@@ -422,6 +422,86 @@ def test_add_pattern_stores_typed_applicability(tmp_path: Path):
     ) == ([], 1, ["machine", "user"])
 
 
+def test_add_pattern_stores_implementation_category_and_renders_it(tmp_path: Path):
+    assert init_context(tmp_path).returncode == 0
+
+    proc = run_context(
+        "add-pattern",
+        "--name",
+        "Immutable DTOs",
+        "--summary",
+        "Keep DTOs immutable across service boundaries",
+        "--category",
+        "implementation",
+        repo=tmp_path,
+    )
+
+    assert proc.returncode == 0
+    context = read_context(tmp_path)
+    architecture = (tmp_path / "docs" / "context" / "architecture.md").read_text(
+        encoding="utf-8"
+    )
+    index = (tmp_path / "docs" / "context" / "index.md").read_text(encoding="utf-8")
+    assert context["patterns"][0]["category"] == "implementation"
+    assert "Category: implementation" in architecture
+    assert "category: implementation" in index
+
+
+def test_add_pattern_accepts_new_open_vocabulary_category(tmp_path: Path):
+    assert init_context(tmp_path).returncode == 0
+
+    proc = run_context(
+        "add-pattern",
+        "--name",
+        "Contract test fixtures",
+        "--summary",
+        "Keep boundary fixtures representative of the wire contract",
+        "--category",
+        "contract-testing",
+        repo=tmp_path,
+    )
+
+    assert proc.returncode == 0
+    assert read_context(tmp_path)["patterns"][0]["category"] == "contract-testing"
+
+
+def test_pattern_category_management_operations(tmp_path: Path):
+    assert init_context(tmp_path).returncode == 0
+    for name, category in (("One", "old"), ("Two", "old"), ("Three", "other")):
+        assert (
+            run_context(
+                "add-pattern",
+                "--name", name,
+                "--summary", f"Summary for {name}",
+                "--category", category,
+                repo=tmp_path,
+            ).returncode
+            == 0
+        )
+    original_ids = {
+        pattern["name"]: pattern["id"] for pattern in read_context(tmp_path)["patterns"]
+    }
+
+    assert run_context(
+        "pattern-category", "rename",
+        "--from-category", "old", "--to-category", "renamed",
+        repo=tmp_path,
+    ).returncode == 0
+    assert run_context(
+        "pattern-category", "merge",
+        "--from-category", "renamed",
+        "--from-category", "other",
+        "--to-category", "combined",
+        repo=tmp_path,
+    ).returncode == 0
+    assert run_context(
+        "pattern-category", "delete", "--category", "combined", repo=tmp_path
+    ).returncode == 0
+    patterns = read_context(tmp_path)["patterns"]
+    assert all("category" not in pattern for pattern in patterns)
+    assert {pattern["name"]: pattern["id"] for pattern in patterns} == original_ids
+
+
 def test_init_rejects_non_project_default_applicability(tmp_path: Path):
     proc = run_context(
         "init",

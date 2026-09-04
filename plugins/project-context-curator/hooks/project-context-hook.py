@@ -349,6 +349,14 @@ def session_start(payload: dict[str, Any]) -> None:
             "when the task itself is broad."
         ),
         (
+            "Implementation preflight: before creating or modifying source, test, or "
+            "configuration files, search the task terms and read every matching pattern. "
+            "Prioritize patterns categorized implementation or both; unclassified legacy "
+            "patterns remain eligible until classified. State CONTEXT_PREFLIGHT: COMPLETE "
+            "with the searched terms before the first edit; if no patterns match, state "
+            "CONTEXT_PREFLIGHT: NONE."
+        ),
+        (
             "Domain and universal records are not in the docs/context views: the status lines "
             "above list their counts and canonical paths, and they are only reachable through "
             "the search command or their canonical context.json. On conflict, a project record "

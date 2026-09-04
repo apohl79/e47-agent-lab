@@ -36,6 +36,14 @@ Resolve omitted inputs from the task plan and repository:
 - `prior_findings`: earlier checkpoint findings and their dispositions.
 - `risk_lens`: optional risk named by the plan or changed behavior.
 
+Before the first implementation edit, the implementing agent must complete
+the Project Context Curator implementation preflight: search one to three
+distinctive task terms, read matching patterns (prioritizing
+`implementation`/`both` and retaining unclassified legacy patterns), and
+record `CONTEXT_PREFLIGHT: COMPLETE` (or `CONTEXT_PREFLIGHT: NONE` when none
+match). A checkpoint report must include that line; a missing line means the
+implementation was not context-preflighted and must not be accepted as ready.
+
 Missing optional context is not a blocker. Derive it from repository evidence
 or state the neutral default in the report.
 

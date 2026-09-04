@@ -352,6 +352,11 @@ Required fields:
 
 Optional fields:
 
+- `category`: an open-vocabulary, non-empty label such as `architecture`,
+  `implementation`, `testing`, or `operations`. The labels `implementation`
+  and `both` have preflight semantics: agents prioritize them before source,
+  test, or configuration edits. New labels can be introduced without a schema
+  change.
 - `applies_to`: paths, components, or layers
 - `notes`: examples, exceptions, or pitfalls
 - `applicability`: typed applicability selectors overriding the collection default
