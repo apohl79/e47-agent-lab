@@ -24,7 +24,7 @@ export interface AgentFactoryOptions {
 }
 
 export interface ToolApprovalRequest {
-  provider: 'claude' | 'codex';
+  provider: 'claude' | AppServerHarness;
   toolKey: string;
   toolName: string;
   input: Record<string, unknown>;
@@ -42,6 +42,20 @@ const PROJECT_CONTEXT_CURATOR_DISABLED_ENV = 'PROJECT_CONTEXT_CURATOR_DISABLED';
 
 export function discussionAgentEnvironment(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   return { ...env, [PROJECT_CONTEXT_CURATOR_DISABLED_ENV]: '1' };
+}
+
+export function appServerDiscussionAgentEnvironment(
+  harness: AppServerHarness,
+  env: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const childEnvironment = discussionAgentEnvironment(env);
+  delete childEnvironment.CODEX_INLINE_DISCUSSION_CHILD;
+  delete childEnvironment.XEDOC_INLINE_DISCUSSION_CHILD;
+  return {
+    ...childEnvironment,
+    HARNESS: harness,
+    [`${harness.toUpperCase()}_INLINE_DISCUSSION_CHILD`]: '1',
+  };
 }
 
 export const THREAD_AGENT_BASE_INSTRUCTIONS = [
@@ -116,18 +130,23 @@ export interface CodexAgentFactoryConfig {
   command?: string;
   cwd?: string;
   args?: string[];
+  harness?: AppServerHarness;
 }
 
+export type AppServerHarness = 'codex' | 'xedoc';
+
 export function codexAgentFactory(config: CodexAgentFactoryConfig = {}): AgentFactory {
+  const harness = config.harness ?? 'codex';
   return ({ systemPreamble, turnContext, inferenceSettings, requestToolApproval }) => {
     const messages: ThreadMessage[] = [];
     const client = new CodexAppServerClient({
-      command: config.command ?? 'codex',
+      command: config.command ?? harness,
       args: config.args ?? ['app-server'],
       cwd: config.cwd ?? process.cwd(),
       developerInstructions: buildCodexDeveloperInstructions(systemPreamble),
       inferenceSettings,
       requestToolApproval,
+      harness,
     });
 
     async function* runOnce(userText: string, kind: 'message' | 'conclusion'): AsyncIterable<StreamChunk> {
@@ -153,12 +172,16 @@ export function codexAgentFactory(config: CodexAgentFactoryConfig = {}): AgentFa
       steer: (t) => client.steer(appendTurnContext(t, turnContext)),
       proposeConclusion: () => runOnce('', 'conclusion'),
       snapshot: () => [...messages],
-      provider: 'codex',
+      provider: harness,
       setInferenceSettings: (settings) => client.setInferenceSettings(settings),
       interrupt: () => client.interrupt(),
       close: () => client.close(),
     } satisfies ThreadAgent;
   };
+}
+
+export function xedocAgentFactory(config: CodexAgentFactoryConfig = {}): AgentFactory {
+  return codexAgentFactory({ ...config, harness: 'xedoc' });
 }
 
 function buildCodexDeveloperInstructions(systemPreamble: string): string {
@@ -183,6 +206,7 @@ interface CodexAppServerOptions {
   args: string[];
   cwd: string;
   developerInstructions: string;
+  harness: AppServerHarness;
   inferenceSettings?: InferenceSettings;
   requestToolApproval?: (request: ToolApprovalRequest) => Promise<ToolApprovalDecision>;
 }
@@ -266,7 +290,7 @@ class CodexAppServerClient {
     const threadId = this.threadId!;
     this.notifications = [];
     logDiagnostic('codex.turn.start.request', {
-      provider: 'codex',
+      provider: this.opts.harness,
       threadId,
       inputLength: input.length,
       modelProvider: this.inferenceSettings?.provider,
@@ -294,11 +318,11 @@ class CodexAppServerClient {
           },
         } : {}),
       });
-      logDiagnostic('codex.turn.start.response', { provider: 'codex', threadId });
+      logDiagnostic('codex.turn.start.response', { provider: this.opts.harness, threadId });
     } catch (error) {
       this.rejectPendingSteers(error instanceof Error ? error : new Error(String(error)));
       logDiagnostic('codex.turn.start.error', {
-        provider: 'codex',
+        provider: this.opts.harness,
         threadId,
         elapsedMs: Date.now() - startedAt,
         error: error instanceof Error ? error.message : String(error),
@@ -309,7 +333,7 @@ class CodexAppServerClient {
       yield* this.consumeTurn(threadId);
     } catch (error) {
       logDiagnostic('codex.turn.error', {
-        provider: 'codex',
+        provider: this.opts.harness,
         threadId,
         elapsedMs: Date.now() - startedAt,
         error: error instanceof Error ? error.message : String(error),
@@ -340,7 +364,7 @@ class CodexAppServerClient {
   async interrupt(): Promise<void> {
     this.interruptRequested = true;
     logDiagnostic('codex.turn.interrupt.request', {
-      provider: 'codex',
+      provider: this.opts.harness,
       threadId: this.threadId,
       turnId: this.activeTurnId,
       deferred: !this.activeTurnId,
@@ -349,7 +373,7 @@ class CodexAppServerClient {
     try {
       await this.request('turn/interrupt', { threadId: this.threadId, turnId: this.activeTurnId });
       logDiagnostic('codex.turn.interrupt.response', {
-        provider: 'codex',
+        provider: this.opts.harness,
         threadId: this.threadId,
         turnId: this.activeTurnId,
       });
@@ -361,7 +385,7 @@ class CodexAppServerClient {
   async steer(input: string): Promise<void> {
     if (!this.threadId || !this.activeTurnId) {
       logDiagnostic('codex.turn.steer.deferred', {
-        provider: 'codex',
+        provider: this.opts.harness,
         threadId: this.threadId ?? undefined,
         inputLength: input.length,
       });
@@ -375,7 +399,7 @@ class CodexAppServerClient {
 
   private async sendSteer(input: string, threadId: string, turnId: string): Promise<void> {
     logDiagnostic('codex.turn.steer.request', {
-      provider: 'codex',
+      provider: this.opts.harness,
       threadId,
       turnId,
       inputLength: input.length,
@@ -385,7 +409,7 @@ class CodexAppServerClient {
       input: [{ type: 'text', text: input, text_elements: [] }],
       expectedTurnId: turnId,
     });
-    logDiagnostic('codex.turn.steer.response', { provider: 'codex', threadId, turnId });
+    logDiagnostic('codex.turn.steer.response', { provider: this.opts.harness, threadId, turnId });
   }
 
   private async ensureThread(): Promise<void> {
@@ -462,7 +486,7 @@ class CodexAppServerClient {
     if (this.child) return;
     const child = spawn(this.opts.command, this.opts.args, {
       cwd: this.opts.cwd,
-      env: { ...discussionAgentEnvironment(), CODEX_INLINE_DISCUSSION_CHILD: '1' },
+      env: appServerDiscussionAgentEnvironment(this.opts.harness),
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     this.child = child;
@@ -474,14 +498,14 @@ class CodexAppServerClient {
     });
     child.on('error', (err) => {
       const error = err instanceof Error ? err : new Error(String(err));
-      logDiagnostic('codex.process.error', { provider: 'codex', error: error.message });
+      logDiagnostic('codex.process.error', { provider: this.opts.harness, error: error.message });
       this.failAll(error);
     });
     child.on('close', (code, signal) => {
       const detail = signal ? `signal ${signal}` : `exit ${code ?? 1}`;
       const stderr = this.stderr.trim();
       logDiagnostic('codex.process.close', {
-        provider: 'codex',
+        provider: this.opts.harness,
         code,
         signal,
         stderr: stderr || undefined,
@@ -495,7 +519,7 @@ class CodexAppServerClient {
     this.start();
     const id = this.nextId++;
     const startedAt = Date.now();
-    logDiagnostic('codex.rpc.request', { provider: 'codex', id, method });
+    logDiagnostic('codex.rpc.request', { provider: this.opts.harness, id, method });
     this.write({ method, id, params });
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject, method, startedAt });
@@ -569,7 +593,7 @@ class CodexAppServerClient {
     if (!pending) return;
     this.pending.delete(response.id);
     logDiagnostic('codex.rpc.response', {
-      provider: 'codex',
+      provider: this.opts.harness,
       id: response.id,
       method: pending.method,
       elapsedMs: Date.now() - pending.startedAt,
@@ -626,13 +650,13 @@ class CodexAppServerClient {
         ?? 'tool';
       const toolKey = `mcp__${serverName}__${rawToolName}`;
       logDiagnostic('codex.mcp.approval.request', {
-        provider: 'codex',
+        provider: this.opts.harness,
         serverName,
         toolName: rawToolName,
       });
       const decision = this.opts.requestToolApproval
         ? await this.opts.requestToolApproval({
-            provider: 'codex',
+            provider: this.opts.harness,
             toolKey,
             toolName: rawToolName,
             input,
@@ -652,7 +676,7 @@ class CodexAppServerClient {
           };
       this.write({ id: request.id, result });
       logDiagnostic('codex.mcp.approval.response', {
-        provider: 'codex',
+        provider: this.opts.harness,
         serverName,
         toolName: rawToolName,
         approved: decision.approved,
@@ -728,7 +752,7 @@ class CodexAppServerClient {
         notification.method === 'error';
       if (lifecycleNotification || notificationCount % 100 === 0) {
         logDiagnostic('codex.turn.notification', {
-          provider: 'codex',
+          provider: this.opts.harness,
           threadId,
           turnId,
           method: notification.method,
@@ -742,7 +766,7 @@ class CodexAppServerClient {
         if (id) {
           turnId = id;
           this.activeTurnId = id;
-          logDiagnostic('codex.turn.started', { provider: 'codex', threadId, turnId: id });
+          logDiagnostic('codex.turn.started', { provider: this.opts.harness, threadId, turnId: id });
           if (this.interruptRequested) {
             this.interruptRequested = false;
             await this.request('turn/interrupt', { threadId, turnId: id });
@@ -859,7 +883,7 @@ class CodexAppServerClient {
           pending.reject(new Error('codex turn completed before steering was accepted'));
         }
         logDiagnostic('codex.turn.completed', {
-          provider: 'codex',
+          provider: this.opts.harness,
           threadId,
           turnId,
           status,
@@ -874,7 +898,7 @@ class CodexAppServerClient {
         const details = stringField(error, 'additionalDetails');
         const willRetry = params['willRetry'] === true;
         logDiagnostic(willRetry ? 'codex.turn.retry' : 'codex.turn.provider-error', {
-          provider: 'codex',
+          provider: this.opts.harness,
           threadId,
           turnId,
           error: message,
@@ -928,18 +952,20 @@ function parseInferenceModels(result: unknown): InferenceModelOption[] {
   });
 }
 
-export async function discoverCodexInferenceCatalog(
+export async function discoverAppServerInferenceCatalog(
   config: CodexAgentFactoryConfig = {},
 ): Promise<InferenceCatalog> {
+  const harness = config.harness ?? 'codex';
   const client = new CodexAppServerClient({
-    command: config.command ?? 'codex',
+    command: config.command ?? harness,
     args: config.args ?? ['app-server'],
     cwd: config.cwd ?? process.cwd(),
     developerInstructions: '',
+    harness,
   });
   try {
     const catalog = await client.discoverInferenceCatalog();
-    logDiagnostic('codex.inference.catalog', {
+    logDiagnostic(`${harness}.inference.catalog`, {
       provider: catalog.defaultSettings.provider,
       model: catalog.defaultSettings.model,
       reasoningEffort: catalog.defaultSettings.reasoningEffort,
@@ -949,6 +975,18 @@ export async function discoverCodexInferenceCatalog(
   } finally {
     await client.close();
   }
+}
+
+export async function discoverCodexInferenceCatalog(
+  config: CodexAgentFactoryConfig = {},
+): Promise<InferenceCatalog> {
+  return discoverAppServerInferenceCatalog(config);
+}
+
+export async function discoverXedocInferenceCatalog(
+  config: CodexAgentFactoryConfig = {},
+): Promise<InferenceCatalog> {
+  return discoverAppServerInferenceCatalog({ ...config, harness: 'xedoc' });
 }
 
 type CodexMessagePhase = 'commentary' | 'final_answer' | null;

@@ -1,6 +1,5 @@
 {
   "name": "inline-discussion",
-  "version": "2.0.0",
   "description": "Inline-discussion browser UI for markdown docs with threaded AI conversations.",
   "author": {
     "name": "apohl79"
@@ -29,5 +28,6 @@
       "Discuss the previous response inline.",
       "Open docs/architecture.md in inline discussion."
     ]
-  }
+  },
+  "version": "2.0.0"
 }

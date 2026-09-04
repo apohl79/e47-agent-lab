@@ -29,6 +29,7 @@ import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 writeFileSync(join(process.env.IND_SESSION_DIR, 'agent.txt'), process.env.IND_AGENT ?? '');
 writeFileSync(join(process.env.IND_SESSION_DIR, 'main-session.txt'), process.env.IND_MAIN_SESSION_ID ?? '');
+writeFileSync(join(process.env.IND_SESSION_DIR, 'main-session-harness.txt'), process.env.IND_MAIN_SESSION_HARNESS ?? '');
 const server = createServer((req, res) => {
   if (req.method === 'POST' && req.url === '/api/finish') {
     const result = { ok: true, finishedAt: new Date().toISOString() };
@@ -83,7 +84,7 @@ function runStart(
   return { stdout: r.stdout ?? '', stderr: r.stderr ?? '', status: r.status };
 }
 
-function writeFakeCli(s: ReturnType<typeof scratch>, name: 'claude' | 'codex', output: string): string {
+function writeFakeCli(s: ReturnType<typeof scratch>, name: 'claude' | 'codex' | 'xedoc', output: string): string {
   const binDir = join(s.root, 'bin');
   mkdirSync(binDir, { recursive: true });
   const cliPath = join(binDir, name);
@@ -155,7 +156,7 @@ test('launch.sh start rejects --agent gpt', () => {
   const s = scratch();
   const r = runStart(s, ['--agent', 'gpt']);
   assert.equal(r.status, 2);
-  assert.match(r.stderr, /--agent must be claude or codex/);
+  assert.match(r.stderr, /--agent must be claude, codex, or xedoc/);
 });
 
 test('launch.sh start forwards the main-session bridge id', () => {
@@ -163,6 +164,18 @@ test('launch.sh start forwards the main-session bridge id', () => {
   const r = runStart(s, ['--main-session-id', 'thread-main']);
   assert.equal(r.status, 0, `start failed: ${r.stderr}`);
   assert.equal(readFileSync(join(s.sessionDir, 'main-session.txt'), 'utf8'), 'thread-main');
+  const pid = parseInt(readFileSync(join(s.sessionDir, 'server.pid'), 'utf8').trim(), 10);
+  try { process.kill(pid); } catch { /* ignore */ }
+});
+
+test('launch.sh start forwards Xedoc as the app-server harness', () => {
+  const s = scratch();
+  const xedocDir = writeFakeCli(s, 'xedoc', '');
+  const r = runStart(s, ['--agent', 'xedoc', '--main-session-id', 'thread-main'], {
+    PATH: `${xedocDir}:${process.env.PATH ?? ''}`,
+  });
+  assert.equal(r.status, 0, `start failed: ${r.stderr}`);
+  assert.equal(readFileSync(join(s.sessionDir, 'main-session-harness.txt'), 'utf8'), 'xedoc');
   const pid = parseInt(readFileSync(join(s.sessionDir, 'server.pid'), 'utf8').trim(), 10);
   try { process.kill(pid); } catch { /* ignore */ }
 });
@@ -365,6 +378,16 @@ test('launch.sh quick -a claude uses the Claude main-agent shortcut', () => {
   assert.match(prompt, /do not invoke any further tools/);
 });
 
+test('launch.sh quick -a xedoc uses the Xedoc app-server-compatible shortcut', () => {
+  const s = scratch();
+  const binDir = writeFakeCli(s, 'xedoc', '{"type":"item.completed","item":{"type":"agent_message","text":"xedoc done"}}');
+  const r = runQuickWithFakeCli(s, ['-a', 'xedoc', s.docPath], binDir);
+  assert.equal(r.status, 0, `xedoc shortcut failed: ${r.stderr}`);
+  assert.match(r.stderr, /Invoking Xedoc agent/);
+  assert.match(r.stdout, /xedoc done/);
+  assert.deepEqual(r.argv.slice(0, 2), ['exec', '--json']);
+});
+
 test('launch.sh quick --agent=claude uses the Claude main-agent shortcut', () => {
   const s = scratch();
   const binDir = writeFakeCli(s, 'claude', 'claude done');
@@ -378,7 +401,7 @@ test('launch.sh quick rejects invalid --agent values', () => {
   const s = scratch();
   const r = spawnSync('bash', [LAUNCHER, '--agent=gpt', s.docPath], { encoding: 'utf8' });
   assert.equal(r.status, 2);
-  assert.match(r.stderr, /--agent must be claude or codex/);
+  assert.match(r.stderr, /--agent must be claude, codex, or xedoc/);
 });
 
 test('launch.sh wait returns the apply-1.json path when only that file exists', async (t) => {

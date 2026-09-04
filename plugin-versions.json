@@ -18,10 +18,11 @@
       ]
     },
     "inline-discussion": {
-      "version": "1.12.4",
+      "version": "2.0.0",
       "hosts": [
         "codex",
-        "claude"
+        "claude",
+        "xedoc"
       ]
     },
     "project-context-curator": {

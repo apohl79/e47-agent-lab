@@ -24,20 +24,23 @@ npm run build
 
 # Quick mode with a bootstrapped Claude agent driving the skill:
 ./bin/inline-discussion -a claude ../../README.md
+
+# Quick mode with a bootstrapped Xedoc agent driving the skill:
+./bin/inline-discussion -a xedoc ../../README.md
 ```
 
 ## CLI
 
 ```
-inline-discussion [-a [codex|claude]|--agent[=codex|claude]] <doc>
+inline-discussion [-a [codex|claude|xedoc]|--agent[=codex|claude|xedoc]] <doc>
 inline-discussion start --doc <path> [--main-jsonl <path>] [--main-session-id <id>] \
                         [--main-session-socket <path>] --session-dir <path> \
-                        [--agent claude|codex] [--cwd <path>] [--hold]
-inline-discussion sessions [--socket <path>]
+                        [--agent claude|codex|xedoc] [--cwd <path>] [--hold]
+inline-discussion sessions [--harness codex|xedoc] [--socket <path>]
 inline-discussion wait  --session-dir <path> [--idle-exit-seconds <seconds>]
 ```
 
-### Quick shortcut `inline-discussion [-a [codex|claude]|--agent[=codex|claude]] <doc>`
+### Quick shortcut `inline-discussion [-a [codex|claude|xedoc]|--agent[=codex|claude|xedoc]] <doc>`
 
 - Equivalent to `start --doc <doc> --session-dir <TMPDIR>/inline-discussion/<slug>
   --agent codex --cwd "$PWD" --hold`.
@@ -51,36 +54,41 @@ inline-discussion wait  --session-dir <path> [--idle-exit-seconds <seconds>]
   `codex exec /inline-discussion:discuss <abs_doc>`.
 - Pass `-a claude <doc>` or `--agent=claude <doc>` to use Claude Code via
   `claude -p /inline-discussion:discuss <abs_doc>` instead. Pass
-  `-a codex <doc>` or `--agent=codex <doc>` to select Codex explicitly.
+  `-a codex <doc>` or `--agent=codex <doc>` to select Codex explicitly, or
+  `-a xedoc <doc>` / `--agent=xedoc <doc>` to select Xedoc.
 - The selected host CLI and the `inline-discussion` plugin must be installed.
   In legacy mode, Finish returns and the host agent exits alongside the
-  browser session. In Codex app-server handoff mode, Finish sends the result
-  back into the running main session instead.
+  browser session. In Codex or Xedoc app-server handoff mode, Finish sends the
+  result back into the running main session instead.
 
 ### `start` / `wait`
 
 - `start` boots the server detached, prints the URL on stdout, writes
   `url.txt` and `server.pid` into `--session-dir`, and exits. With `--hold`
   it stays in the foreground until the server exits (used by the plugin
-  skill on Codex).
+  skill on Codex or Xedoc).
 - `wait` blocks until the session dir contains either `result.json`
   (Finish) or `apply-N.json` (Apply) and prints that path on stdout.
   `--idle-exit-seconds` exits 124 without stopping the server when no signal
-  has arrived yet; Codex uses this heartbeat mode to avoid host command
-  timeouts while keeping the browser session open indefinitely.
+  has arrived yet; Codex and Xedoc use this heartbeat mode to avoid host
+  command timeouts while keeping the browser session open indefinitely.
 - `--main-jsonl` is optional. When omitted (or pointing at a non-existent
   file), the main-agent transcript preamble is empty and the browser hides
   Apply.
 - `--main-session-id` enables app-server handoff mode. Apply and Finish send
-  prompts into that running Codex session through the generic local
-  app-server protocol; `--main-session-socket` overrides the default Codex
-  control socket path.
-- `sessions` lists the running Codex sessions exposed by the local app-server.
-  It uses the same protocol as handoff mode and works with the original Codex
-  app-server; `--socket` overrides the default control socket path.
-- Codex thread inference is explicit. A host-launched discussion initializes
+  prompts into that running Codex or Xedoc session through the generic local
+  app-server protocol; `--main-session-socket` overrides that harness's
+  default control socket path.
+- `sessions --harness codex|xedoc` lists the running sessions exposed by the
+  selected local app-server; `--socket` overrides the selected harness's
+  default control socket path.
+- Xedoc host detection and app-server lookup use only `XEDOC_*` variables:
+  `XEDOC_THREAD_ID`, `XEDOC_SESSION_JSONL`, `XEDOC_HOME`, and
+  `XEDOC_APP_SERVER_SOCKET`. Xedoc app-server children receive
+  `HARNESS=xedoc` and `XEDOC_INLINE_DISCUSSION_CHILD=1`.
+- Codex and Xedoc thread inference are explicit. A host-launched discussion initializes
   its page defaults from the latest main-session model and reasoning effort,
-  resolving the provider from the Codex app-server model catalog; standalone
+  resolving the provider from the selected app-server model catalog; standalone
   CLI use initializes them from the app-server defaults. The combined
   provider/model and reasoning selectors in the header affect only threads
   created afterward. Each thread snapshots its own settings and its selectors
@@ -157,7 +165,7 @@ The user can deny the call, allow it once, approve that MCP tool for the running
 discussion server, or approve it permanently for the current project. Session
 and project grants apply to the tool name, not just the displayed arguments.
 
-Codex uses its app-server MCP approval elicitations. Claude MCP is disabled
+Codex and Xedoc use their app-server MCP approval elicitations. Claude MCP is disabled
 unless `IND_MCP_URL` is set; the connected server's tools are then available for
 approval. `IND_MCP_TOOLS` can optionally restrict exposure to a comma-separated
 set. `IND_MCP_READONLY_TOOLS` remains a backwards-compatible alias. For the

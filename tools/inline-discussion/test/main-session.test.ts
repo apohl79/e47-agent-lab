@@ -5,7 +5,22 @@ import { createServer, type Socket } from 'node:net';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { listAppServerSessions } from '../src/main-session.ts';
+import { appServerSocketPath, listAppServerSessions } from '../src/main-session.ts';
+
+test('appServerSocketPath isolates Xedoc from Codex environment variables', () => {
+  assert.equal(
+    appServerSocketPath('xedoc', { XEDOC_HOME: '/tmp/xedoc-home', CODEX_APP_SERVER_SOCKET: '/tmp/codex.sock' }, '/tmp/home'),
+    '/tmp/xedoc-home/app-server-control/app-server-control.sock',
+  );
+  assert.equal(
+    appServerSocketPath('xedoc', { XEDOC_APP_SERVER_SOCKET: '/tmp/xedoc.sock' }, '/tmp/home'),
+    '/tmp/xedoc.sock',
+  );
+  assert.equal(
+    appServerSocketPath('xedoc', {}, '/tmp/home'),
+    '/tmp/home/.xedoc/app-server-control/app-server-control.sock',
+  );
+});
 
 test('listAppServerSessions discovers sessions through the app-server websocket protocol', async () => {
   const socketPath = join(mkdtempSync(join(tmpdir(), 'ind-app-server-')), 'control.sock');

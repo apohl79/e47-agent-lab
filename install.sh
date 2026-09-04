@@ -24,6 +24,10 @@ CODEX_PLUGIN_REGISTRY=(
     "project-context-curator|Durable repository domain context"
 )
 
+XEDOC_PLUGIN_REGISTRY=(
+    "inline-discussion|Inline-discussion browser UI"
+)
+
 CLAUDE_PLUGIN_REGISTRY=(
     "reviewers|PR finalization and reviewer-team workflows"
     "auto-compaction|Claude Code auto-compaction gate"
@@ -43,7 +47,7 @@ CLEANUP_PLUGIN_REGISTRY=(
 # Standalone CLI tools shipped from tools/. Each entry is
 # "name|relative-launcher-path|description". Installed as symlinks into the
 # user's bin dir (~/bin if it exists, otherwise ~/.local/bin) and removed on
-# uninstall. They are host-agnostic — no claude/codex dependency.
+# uninstall. They are host-agnostic — no Claude/Codex/Xedoc dependency.
 CLI_TOOL_REGISTRY=(
     "inline-discussion|tools/inline-discussion/bin/inline-discussion|Standalone inline-discussion server (markdown preview + AI threads + Apply/Finish)"
 )
@@ -67,15 +71,16 @@ error() { printf "Error: %s\n" "$1" >&2; exit 1; }
 
 usage() {
     cat <<EOF
-Usage: ./install.sh [install|uninstall] [--all|--claude|--codex] [--source SOURCE] [--with-context-runtime]
+Usage: ./install.sh [install|uninstall] [--all|--claude|--codex|--xedoc] [--source SOURCE] [--with-context-runtime]
 
 Without a target flag, installs host-appropriate plugins into each available CLI:
-Claude Code and/or Codex.
+Claude Code, Codex, and/or Xedoc.
 
 Options:
-  --all            Install into both Claude Code and Codex; fail if either CLI is missing.
+  --all            Install into Claude Code, Codex, and Xedoc; fail if any CLI is missing.
   --claude         Install into Claude Code only.
   --codex          Install into Codex only.
+  --xedoc          Install into Xedoc only.
   --source SOURCE  Marketplace source path or GitHub slug. Defaults to the local
                    checkout when run from this repo, otherwise ${REPO_SLUG}.
   --with-context-runtime
@@ -98,6 +103,9 @@ parse_args() {
                 ;;
             --codex)
                 TARGET_MODE="codex"
+                ;;
+            --xedoc)
+                TARGET_MODE="xedoc"
                 ;;
             --source)
                 shift
@@ -131,10 +139,14 @@ require_codex() {
     command_exists codex || error "codex CLI not found. Install Codex first."
 }
 
+require_xedoc() {
+    command_exists xedoc || error "xedoc CLI not found. Install Xedoc first."
+}
+
 should_install_claude() {
     case "$TARGET_MODE" in
         all|claude) return 0 ;;
-        codex) return 1 ;;
+        codex|xedoc) return 1 ;;
         auto) command_exists claude ;;
     esac
 }
@@ -142,8 +154,16 @@ should_install_claude() {
 should_install_codex() {
     case "$TARGET_MODE" in
         all|codex) return 0 ;;
-        claude) return 1 ;;
+        claude|xedoc) return 1 ;;
         auto) command_exists codex ;;
+    esac
+}
+
+should_install_xedoc() {
+    case "$TARGET_MODE" in
+        all|xedoc) return 0 ;;
+        claude|codex) return 1 ;;
+        auto) command_exists xedoc ;;
     esac
 }
 
@@ -224,6 +244,20 @@ clear_codex_plugin_cache() {
     local marketplace_name
     for marketplace_name in "${ALL_MARKETPLACE_NAMES[@]}"; do
         clear_codex_plugin_cache_for "$marketplace_name"
+    done
+}
+
+clear_xedoc_plugin_cache_for() {
+    local marketplace_name="$1"
+    local base="$HOME/.xedoc/plugins"
+    rm -rf "${base}/cache/${marketplace_name}" 2>/dev/null || true
+    rm -rf "${base}/marketplaces/${marketplace_name}" 2>/dev/null || true
+}
+
+clear_xedoc_plugin_cache() {
+    local marketplace_name
+    for marketplace_name in "${ALL_MARKETPLACE_NAMES[@]}"; do
+        clear_xedoc_plugin_cache_for "$marketplace_name"
     done
 }
 
@@ -316,6 +350,22 @@ remove_codex_plugins() {
     ok "Codex marketplace clean."
 }
 
+remove_xedoc_plugins() {
+    require_xedoc
+
+    info "Removing existing Xedoc plugins..."
+    local entry plugin_name marketplace_name
+    for marketplace_name in "${ALL_MARKETPLACE_NAMES[@]}"; do
+        for entry in "${XEDOC_PLUGIN_REGISTRY[@]}"; do
+            IFS="|" read -r plugin_name _description <<< "$entry"
+            xedoc plugin remove "${plugin_name}@${marketplace_name}" >/dev/null 2>&1 || true
+        done
+        xedoc plugin marketplace remove "${marketplace_name}" >/dev/null 2>&1 || true
+    done
+    clear_xedoc_plugin_cache
+    ok "Xedoc marketplace clean."
+}
+
 install_claude_plugins() {
     local source="$1"
     require_claude
@@ -349,6 +399,24 @@ install_codex_plugins() {
         info "Installing Codex plugin ${plugin_name}@${MARKETPLACE_NAME}..."
         codex plugin add "${plugin_name}@${MARKETPLACE_NAME}" >/dev/null
         ok "Codex plugin installed: ${plugin_name}@${MARKETPLACE_NAME}"
+    done
+}
+
+install_xedoc_plugins() {
+    local source="$1"
+    require_xedoc
+    remove_xedoc_plugins
+
+    info "Adding Xedoc marketplace '${MARKETPLACE_NAME}' from ${source}..."
+    xedoc plugin marketplace add "$source" >/dev/null
+    ok "Xedoc marketplace added."
+
+    local entry plugin_name
+    for entry in "${XEDOC_PLUGIN_REGISTRY[@]}"; do
+        IFS="|" read -r plugin_name _description <<< "$entry"
+        info "Installing Xedoc plugin ${plugin_name}@${MARKETPLACE_NAME}..."
+        xedoc plugin add "${plugin_name}@${MARKETPLACE_NAME}" >/dev/null
+        ok "Xedoc plugin installed: ${plugin_name}@${MARKETPLACE_NAME}"
     done
 }
 
@@ -659,6 +727,15 @@ run_for_selected_targets() {
         ran_plugin_target=true
     fi
 
+    if should_install_xedoc; then
+        if [ "$action" = "install" ]; then
+            install_xedoc_plugins "$source"
+        else
+            remove_xedoc_plugins
+        fi
+        ran_plugin_target=true
+    fi
+
     # CLI tools are host-agnostic — install/remove them regardless of which
     # host CLIs are present, but only fail loudly when the user explicitly
     # asked for a plugin target and neither CLI was available.
@@ -670,7 +747,7 @@ run_for_selected_targets() {
     fi
 
     if [ "$ran_plugin_target" = false ] && [ "$TARGET_MODE" != "auto" ]; then
-        error "neither claude nor codex CLI found. Install one CLI or pass --claude/--codex explicitly."
+        error "none of the Claude Code, Codex, or Xedoc CLIs were found. Install one CLI or pass --claude/--codex/--xedoc explicitly."
     fi
 }
 
@@ -687,10 +764,13 @@ case "$ACTION:$TARGET_MODE" in
     install:codex)
         ok "Done. Start a new Codex thread to apply changes."
         ;;
+    install:xedoc)
+        ok "Done. Start a new Xedoc thread to apply changes."
+        ;;
     install:*)
-        ok "Done. Restart Claude Code or start a new Codex thread to apply changes."
+        ok "Done. Restart Claude Code or start a new Codex or Xedoc thread to apply changes."
         ;;
     uninstall:*)
-        ok "Done. Restart Claude Code or start a new Codex thread to apply changes."
+        ok "Done. Restart Claude Code or start a new Codex or Xedoc thread to apply changes."
         ;;
 esac

@@ -119,9 +119,9 @@ PYEOF
 usage() {
   cat >&2 <<'EOF'
 Usage:
-  inline-discussion [-a [codex|claude]|--agent[=codex|claude]] <doc>                     # quick: launch a discussion on <doc>, hold until Finish
-  inline-discussion start --doc <path> [--main-jsonl <path>] [--main-session-id <id>] [--main-session-socket <path>] --session-dir <path> [--agent claude|codex] [--cwd <path>] [--hold]
-  inline-discussion sessions [--socket <path>]
+  inline-discussion [-a [codex|claude|xedoc]|--agent[=codex|claude|xedoc]] <doc>        # quick: launch a discussion on <doc>, hold until Finish
+  inline-discussion start --doc <path> [--main-jsonl <path>] [--main-session-id <id>] [--main-session-socket <path>] --session-dir <path> [--agent claude|codex|xedoc] [--cwd <path>] [--hold]
+  inline-discussion sessions [--harness codex|xedoc] [--socket <path>]
   inline-discussion wait  --session-dir <path> [--idle-exit-seconds <seconds>]
   inline-discussion watch --session-dir <path> --codex-thread-id <id> --doc <path> [--cwd <path>]
 
@@ -130,19 +130,20 @@ Usage:
              --agent codex --cwd "$PWD" --hold
          No main-session JSONL is passed — the agent runs with an empty
          main-transcript preamble, appropriate when the CLI is invoked
-         outside a host (Codex/Claude) session.
+         outside a host (Codex/Claude Code/Xedoc) session.
 
   -a, --agent  Bootstrap a main-agent session and let the inline-discussion
                plugin's /inline-discussion:discuss skill drive the launcher
                from inside that session. Defaults to Codex for backwards
                compatibility; pass `-a claude` or `--agent=claude` to use
-               Claude. Requires the selected host CLI and the
+               Claude Code, or `-a xedoc` / `--agent=xedoc` to use Xedoc.
+               Requires the selected host CLI and the
                inline-discussion plugin installed.
   start  Boot the server detached, print the URL on stdout, exit 0.
          Writes url.txt and server.pid into --session-dir.
          With --hold, print the URL and keep the launcher alive until the server exits.
          With --main-session-id, Apply and Finish hand control back through the
-         running Codex app-server session instead of the active host turn.
+         running Codex- or Xedoc-compatible app-server session instead of the active host turn.
   wait   Block until Apply, Pause, or Finish writes a signal file. Exits 0 and prints
          the signal file path. With --idle-exit-seconds, exits 124 if no
          signal has arrived yet and the server is still alive.
@@ -202,12 +203,12 @@ for (const ch of path) {
   fi
 }
 
-run_codex_agent_shortcut() {
-  local abs_doc="$1"
-  command -v codex >/dev/null 2>&1 \
-    || { echo "codex CLI required for --agent codex" >&2; exit 5; }
+run_app_server_agent_shortcut() {
+  local agent="$1" display_name="$2" abs_doc="$3"
+  command -v "$agent" >/dev/null 2>&1 \
+    || { echo "$agent CLI required for --agent $agent" >&2; exit 5; }
   command -v python3 >/dev/null 2>&1 \
-    || { echo "python3 required for --agent codex (event filter)" >&2; exit 5; }
+    || { echo "python3 required for --agent $agent (event filter)" >&2; exit 5; }
 
   # codex exec runs non-interactively: it boots a one-shot agent, hands it
   # the prompt, and exits when the agent's turn returns. Inside that turn,
@@ -233,20 +234,28 @@ run_codex_agent_shortcut() {
   #
   # Everything else (event envelopes, reasoning, token counters, the
   # initial skill-description-truncation notice) is swallowed.
-  echo "Invoking Codex agent..." >&2
+  echo "Invoking $display_name agent..." >&2
   set -o pipefail
   if [[ "${INLINE_DISCUSSION_UNSAFE_AGENT_MODE:-}" == "1" ]]; then
     echo "WARNING: unsafe agent mode enabled; approvals and sandbox are bypassed" >&2
-    codex --dangerously-bypass-approvals-and-sandbox exec --json \
+    "$agent" --dangerously-bypass-approvals-and-sandbox exec --json \
       "$(agent_shortcut_prompt "$abs_doc")" \
       2> >(grep -v '^Reading additional input from stdin' >&2) \
       | python3 -u -c "$INLINE_DISCUSSION_AGENT_FILTER"
     return
   fi
-  codex exec --json \
+  "$agent" exec --json \
     "$(agent_shortcut_prompt "$abs_doc")" \
     2> >(grep -v '^Reading additional input from stdin' >&2) \
     | python3 -u -c "$INLINE_DISCUSSION_AGENT_FILTER"
+}
+
+run_codex_agent_shortcut() {
+  run_app_server_agent_shortcut codex Codex "$1"
+}
+
+run_xedoc_agent_shortcut() {
+  run_app_server_agent_shortcut xedoc Xedoc "$1"
 }
 
 run_claude_agent_shortcut() {
@@ -294,16 +303,16 @@ do_start() {
   if [[ -n "$main_jsonl" ]]; then
     [[ -f "$main_jsonl" ]] || { echo "main-jsonl missing at $main_jsonl" >&2; exit 3; }
   fi
-  [[ "$agent" == "claude" || "$agent" == "codex" ]] || { echo "--agent must be claude or codex" >&2; exit 2; }
+  [[ "$agent" == "claude" || "$agent" == "codex" || "$agent" == "xedoc" ]] || { echo "--agent must be claude, codex, or xedoc" >&2; exit 2; }
   [[ -d "$agent_cwd" ]] || { echo "--cwd directory missing at $agent_cwd" >&2; exit 2; }
   local real_agent_cwd
   real_agent_cwd="$(cd "$agent_cwd" && pwd -P)"
 
   node -v | awk -F. '{gsub(/[^0-9]/, "", $1); exit ($1+0 >= 20) ? 0 : 1}' \
     || { echo "Node >= 20 required (got $(node -v))" >&2; exit 5; }
-  if [[ "$agent" == "codex" ]]; then
-    command -v codex >/dev/null 2>&1 \
-      || { echo "codex CLI required for --agent $agent" >&2; exit 5; }
+  if [[ "$agent" == "codex" || "$agent" == "xedoc" ]]; then
+    command -v "$agent" >/dev/null 2>&1 \
+      || { echo "$agent CLI required for --agent $agent" >&2; exit 5; }
   fi
 
   ensure_runtime_build
@@ -342,6 +351,11 @@ do_start() {
     export IND_MAIN_SESSION_SOCKET="$main_session_socket"
   else
     unset IND_MAIN_SESSION_SOCKET
+  fi
+  if [[ "$agent" == "codex" || "$agent" == "xedoc" ]]; then
+    export IND_MAIN_SESSION_HARNESS="$agent"
+  else
+    unset IND_MAIN_SESSION_HARNESS
   fi
   export IND_SESSION_DIR="$session_dir"
   export IND_STATIC_DIR="$SERVER_DIR/dist"
@@ -397,22 +411,27 @@ do_start() {
 }
 
 do_sessions() {
-  local socket=""
+  local socket="" harness="codex"
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --socket) socket="$2"; shift 2;;
+      --harness)
+        harness="$2"
+        shift 2
+        ;;
       *) echo "unknown arg: $1" >&2; exit 1;;
     esac
   done
 
+  [[ "$harness" == "codex" || "$harness" == "xedoc" ]] || { echo "--harness must be codex or xedoc" >&2; exit 2; }
   command -v node >/dev/null 2>&1 || { echo "node required" >&2; exit 5; }
   ensure_runtime_build
   local session_control_js="${IND_SESSION_CONTROL_JS:-$SERVER_DIR/dist/session-control.js}"
   [[ -f "$session_control_js" ]] || { echo "session-control bundle missing at $session_control_js" >&2; exit 5; }
   if [[ -n "$socket" ]]; then
-    IND_MAIN_SESSION_SOCKET="$socket" node "$session_control_js"
+    IND_MAIN_SESSION_HARNESS="$harness" IND_MAIN_SESSION_SOCKET="$socket" node "$session_control_js"
   else
-    node "$session_control_js"
+    IND_MAIN_SESSION_HARNESS="$harness" node "$session_control_js"
   fi
 }
 
@@ -606,17 +625,17 @@ do_quick() {
       -a|--agent)
         main_agent="codex"
         shift
-        if [[ $# -gt 0 && ( "$1" == "codex" || "$1" == "claude" ) ]]; then
+        if [[ $# -gt 0 && ( "$1" == "codex" || "$1" == "claude" || "$1" == "xedoc" ) ]]; then
           main_agent="$1"
           shift
         fi
         ;;
-      --agent=codex|--agent=claude)
+      --agent=codex|--agent=claude|--agent=xedoc)
         main_agent="${1#--agent=}"
         shift
         ;;
       --agent=*)
-        echo "--agent must be claude or codex" >&2
+        echo "--agent must be claude, codex, or xedoc" >&2
         exit 2
         ;;
       --)
@@ -651,11 +670,11 @@ do_quick() {
     # the cleanest guard since these characters are not legitimate in
     # discussion document filenames.
     validate_agent_shortcut_doc_path "$abs_doc"
-    if [[ "$main_agent" == "claude" ]]; then
-      run_claude_agent_shortcut "$abs_doc"
-    else
-      run_codex_agent_shortcut "$abs_doc"
-    fi
+    case "$main_agent" in
+      claude) run_claude_agent_shortcut "$abs_doc" ;;
+      codex) run_codex_agent_shortcut "$abs_doc" ;;
+      xedoc) run_xedoc_agent_shortcut "$abs_doc" ;;
+    esac
     exit $?
   fi
 

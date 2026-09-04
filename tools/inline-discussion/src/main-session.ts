@@ -16,6 +16,7 @@ export interface AppServerSessionBridgeOptions {
   threadId: string;
   socketPath?: string;
   timeoutMs?: number;
+  harness?: AppServerHarness;
 }
 
 export interface AppServerSession {
@@ -28,7 +29,10 @@ export interface AppServerSession {
 export interface AppServerSessionListOptions {
   socketPath?: string;
   timeoutMs?: number;
+  harness?: AppServerHarness;
 }
+
+export type AppServerHarness = 'codex' | 'xedoc';
 
 export function createAppServerSessionBridge(options: AppServerSessionBridgeOptions): MainSessionBridge {
   return new AppServerSessionBridge(options);
@@ -38,7 +42,7 @@ export async function listAppServerSessions(
   options: AppServerSessionListOptions = {},
 ): Promise<AppServerSession[]> {
   const client = new AppServerRpcClient(
-    options.socketPath ?? defaultSocketPath(),
+    options.socketPath ?? appServerSocketPath(options.harness),
     options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
   );
   try {
@@ -75,7 +79,7 @@ class AppServerSessionBridge implements MainSessionBridge {
 
   async send(prompt: string): Promise<void> {
     const client = new AppServerRpcClient(
-      this.options.socketPath ?? defaultSocketPath(),
+      this.options.socketPath ?? appServerSocketPath(this.options.harness),
       this.options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
     );
     try {
@@ -275,9 +279,14 @@ class AppServerRpcClient {
   }
 }
 
-function defaultSocketPath(): string {
-  const codexHome = process.env.CODEX_HOME || join(homedir(), '.codex');
-  return process.env.CODEX_APP_SERVER_SOCKET || join(codexHome, 'app-server-control', 'app-server-control.sock');
+export function appServerSocketPath(
+  harness: AppServerHarness = 'codex',
+  env: NodeJS.ProcessEnv = process.env,
+  homeDirectory = homedir(),
+): string {
+  const prefix = harness.toUpperCase();
+  const harnessHome = env[`${prefix}_HOME`] || join(homeDirectory, `.${harness}`);
+  return env[`${prefix}_APP_SERVER_SOCKET`] || join(harnessHome, 'app-server-control', 'app-server-control.sock');
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {

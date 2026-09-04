@@ -7,15 +7,20 @@ description: Inline-discussion browser UI — turn a document or recent response
 
 ## Flow
 
-Codex supports two runtime modes. The legacy mode keeps this turn alive and
-handles signal files directly. When the current Codex app-server exposes the
-running main session, use the handoff mode below: the discussion server stays
-alive in a detached `screen` session, and its Apply/Finish events send prompts
-back into that same main session through the generic app-server protocol.
+Codex and Xedoc support two runtime modes. The legacy mode keeps this turn
+alive and handles signal files directly. When the current app-server exposes
+the running main session, use the handoff mode below: the discussion server
+stays alive in a detached `screen` session, and its Apply/Finish events send
+prompts back into that same main session through the generic app-server
+protocol.
 
 1. **Resolve the host.**
-   - If `$CODEX_THREAD_ID` or `$CODEX_SESSION_JSONL` is set, set `<HOST> = codex`.
-   - Otherwise set `<HOST> = claude`.
+   - Prefer `$HARNESS` when it is `xedoc`, `codex`, or `claude`.
+   - If it is unset or unrecognized, use `xedoc` when `$XEDOC_THREAD_ID` or
+     `$XEDOC_SESSION_JSONL` is set; otherwise use `codex` when
+     `$CODEX_THREAD_ID` or `$CODEX_SESSION_JSONL` is set; otherwise use
+     `claude`.
+   - Xedoc-specific environment variables must use the `XEDOC_` prefix.
 
 2. **Resolve the argument.** The invocation may look like `/inline-discussion:discuss` (no arg), `/inline-discussion:discuss my-title`, `/inline-discussion:discuss docs/some-file.md`, or `/inline-discussion:discuss docs/some-file.pdf`.
    - If the arg is an existing markdown file (`.md` or `.markdown`) → use it as `<DOC_PATH>`; set `<SLUG>` = filename without extension; set `<SOURCE_PATH>` empty; **skip step 3a**. The file can live anywhere — the launcher does not require it under the project root.
@@ -40,29 +45,46 @@ back into that same main session through the generic app-server protocol.
    turn. This keeps speculative discussion separate from durable project memory.
 
 4. **Resolve the main-session JSONL path.**
-   - If `$CLAUDE_SESSION_JSONL` is set → use it as `<JSONL_PATH>`.
-   - Else if `$CLAUDE_SESSION_ID` is set → use `$(echo "$PWD" | sed 's|/|-|g' | sed 's|^-|-|')` to construct `~/.claude/projects/<encoded-cwd>/$CLAUDE_SESSION_ID.jsonl`.
-   - Else if `$CODEX_SESSION_JSONL` is set → use it as `<JSONL_PATH>`.
-   - Else if `$CODEX_THREAD_ID` is set → find the current Codex rollout file:
+   - When `<HOST> = xedoc`, use `$XEDOC_SESSION_JSONL` when set. Otherwise,
+     if `$XEDOC_THREAD_ID` is set, find the current Xedoc rollout file:
 
      ```bash
-     CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
-     JSONL_PATH="$(find "$CODEX_HOME/sessions" -type f -name "*${CODEX_THREAD_ID}.jsonl" -print 2>/dev/null | sort | tail -n1)"
+     XEDOC_RUNTIME_HOME="${XEDOC_HOME:-$HOME/.xedoc}"
+     JSONL_PATH="$(find "$XEDOC_RUNTIME_HOME/sessions" -type f -name "*${XEDOC_THREAD_ID}.jsonl" -print 2>/dev/null | sort | tail -n1)"
      ```
+
+   - When `<HOST> = codex`, use `$CODEX_SESSION_JSONL` when set. Otherwise,
+     if `$CODEX_THREAD_ID` is set, find the current Codex rollout file:
+
+     ```bash
+     CODEX_RUNTIME_HOME="${CODEX_HOME:-$HOME/.codex}"
+     JSONL_PATH="$(find "$CODEX_RUNTIME_HOME/sessions" -type f -name "*${CODEX_THREAD_ID}.jsonl" -print 2>/dev/null | sort | tail -n1)"
+     ```
+
+   - When `<HOST> = claude`, use `$CLAUDE_SESSION_JSONL` when set. Otherwise,
+     if `$CLAUDE_SESSION_ID` is set, use
+     `$(echo "$PWD" | sed 's|/|-|g' | sed 's|^-|-|')` to construct
+     `~/.claude/projects/<encoded-cwd>/$CLAUDE_SESSION_ID.jsonl`.
 
    - If no transcript path is found, create `<session-dir>/main-session.jsonl` with one JSONL line containing the user's current request and use that fallback. Do not fail the discussion just because transcript discovery is unavailable.
 
-4a. **Prefer Codex app-server handoff when the running main session is listed.**
-    This check is only for `<HOST> = codex`; Claude keeps the active-turn flow
-    below. `inline-discussion sessions` is the generic app-server discovery
-    command. It speaks directly to Codex's Unix-socket app-server protocol, so
-    no fork-specific `codex-session` helper is required.
+4a. **Prefer app-server handoff when the running main session is listed.**
+    This check is only for `<HOST> = codex` or `xedoc`; Claude keeps the
+    active-turn flow below. `inline-discussion sessions` is the generic
+    app-server discovery command. It uses the same protocol for Codex and
+    Xedoc, with each harness's own socket and `*_` environment variables.
 
     ```bash
-    CODEX_SESSION_BRIDGE=""
-    if [[ "$HOST" = codex ]] && command -v inline-discussion >/dev/null 2>&1 \
-      && [[ -n "${CODEX_THREAD_ID:-}" ]]; then
-      CODEX_SESSIONS_JSON="$(inline-discussion sessions 2>/dev/null || true)"
+    APP_SERVER_SESSION_BRIDGE=""
+    APP_SERVER_THREAD_ID=""
+    case "$HOST" in
+      codex) APP_SERVER_THREAD_ID="${CODEX_THREAD_ID:-}" ;;
+      xedoc) APP_SERVER_THREAD_ID="${XEDOC_THREAD_ID:-}" ;;
+    esac
+    if [[ ( "$HOST" = codex || "$HOST" = xedoc ) ]] \
+      && command -v inline-discussion >/dev/null 2>&1 \
+      && [[ -n "$APP_SERVER_THREAD_ID" ]]; then
+      APP_SERVER_SESSIONS_JSON="$(inline-discussion sessions --harness "$HOST" 2>/dev/null || true)"
       if python3 -c '
     import json, sys
     thread_id = sys.argv[1]
@@ -73,30 +95,30 @@ back into that same main session through the generic app-server protocol.
         and item.get("canAcceptDirectInput") is True
         for item in sessions
     ) else 1)
-      ' "$CODEX_THREAD_ID" <<<"$CODEX_SESSIONS_JSON"; then
-        CODEX_SESSION_BRIDGE="app-server"
+      ' "$APP_SERVER_THREAD_ID" <<<"$APP_SERVER_SESSIONS_JSON"; then
+        APP_SERVER_SESSION_BRIDGE="app-server"
       fi
     fi
-    if [[ "$CODEX_SESSION_BRIDGE" = app-server ]] && ! command -v screen >/dev/null 2>&1; then
-      echo 'Codex main session is listed, but screen is unavailable; using the active-turn fallback.' >&2
-      CODEX_SESSION_BRIDGE=""
+    if [[ "$APP_SERVER_SESSION_BRIDGE" = app-server ]] && ! command -v screen >/dev/null 2>&1; then
+      echo 'The app-server main session is listed, but screen is unavailable; using the active-turn fallback.' >&2
+      APP_SERVER_SESSION_BRIDGE=""
     fi
     ```
 
-    When `CODEX_SESSION_BRIDGE=app-server`, do not keep this turn open and do
+    When `APP_SERVER_SESSION_BRIDGE=app-server`, do not keep this turn open and do
     not start `inline-discussion wait`. Start the server in a detached screen
     session with the running main-session id:
 
     ```bash
     HANDOFF_SESSION_DIR="${TMPDIR:-/tmp}/inline-discussion/<SLUG>"
-    SCREEN_NAME="inline-discussion-<SLUG>-${CODEX_THREAD_ID:0:8}"
+    SCREEN_NAME="inline-discussion-<SLUG>-${APP_SERVER_THREAD_ID:0:8}"
     mkdir -p "$HANDOFF_SESSION_DIR"
     screen -dmS "$SCREEN_NAME" inline-discussion start \
       --doc "<DOC_PATH>" \
       --main-jsonl "<JSONL_PATH>" \
-      --main-session-id "$CODEX_THREAD_ID" \
+      --main-session-id "$APP_SERVER_THREAD_ID" \
       --session-dir "$HANDOFF_SESSION_DIR" \
-      --agent codex \
+      --agent "$HOST" \
       --cwd "$PWD" \
       --hold
     ```
@@ -106,18 +128,22 @@ back into that same main session through the generic app-server protocol.
     If the URL does not appear within 30 seconds, inspect `server.log` and
     report the startup failure. The server sends Apply and Finish prompts back
     into the listed main session, so the user can continue that session after
-    this turn ends. Do not start `codex exec`, `inline-discussion watch`, or a
-    second agent session.
+    this turn ends. Do not start another host CLI session,
+    `inline-discussion watch`, or a second agent session.
 
 5. **Start the server.**
 
-   If the Codex app-server handoff check below selected handoff mode, skip this
+   If the app-server handoff check above selected handoff mode, skip this
    section and the signal loop. The handoff block has already started the
    server, published the URL, and intentionally ends this turn.
 
    The `inline-discussion` CLI must be on `PATH`. It ships with this marketplace and is installed into `~/bin` (or `~/.local/bin`) by `install.sh`. If the command is missing, tell the user to run `./install.sh` from the marketplace checkout (or via the one-liner) and stop.
 
-   If `<HOST> = codex`, run this as a background command/session and leave it running. It prints the URL quickly, then `--hold` keeps the launcher process alive until the user clicks Pause or Finish. Do not wait for this command to exit before continuing to cmux/browser opening and the signal-file loop:
+   If `<HOST> = codex` or `xedoc`, run this as a background command/session
+   and leave it running. It prints the URL quickly, then `--hold` keeps the
+   launcher process alive until the user clicks Pause or Finish. Do not wait
+   for this command to exit before continuing to cmux/browser opening and the
+   signal-file loop:
 
    ```bash
    inline-discussion start \
@@ -142,7 +168,14 @@ back into that same main session through the generic app-server protocol.
 
    The command prints the browser URL (single line, `http://127.0.0.1:<port>/`) on stdout. Echo that URL to the user and tell them to open it. The URL is also written to `<session-dir>/url.txt` as a fallback.
 
-   **Codex active-session rule.** In legacy mode, keep this main Codex turn open after publishing the URL. The same turn owns the `inline-discussion wait` heartbeat loop, reads each signal, and handles Apply directly. Do not start `inline-discussion watch`, `codex exec`, or a second agent session for Apply. The `--hold` launcher must remain alive while the browser is open so the detached server is not reaped by the host shell. In app-server handoff mode, the `screen` session owns the launcher and this turn ends after the URL is published.
+   **App-server active-session rule.** In legacy mode, keep the main Codex or
+   Xedoc turn open after publishing the URL. The same turn owns the
+   `inline-discussion wait` heartbeat loop, reads each signal, and handles
+   Apply directly. Do not start `inline-discussion watch`, another host CLI
+   session, or a second agent session for Apply. The `--hold` launcher must
+   remain alive while the browser is open so the detached server is not reaped
+   by the host shell. In app-server handoff mode, the `screen` session owns the
+   launcher and this turn ends after the URL is published.
 
    **cmux integration.** When the environment indicates a cmux session (e.g. `$CMUX_WORKSPACE_ID` or `$CMUX_BUNDLE_ID` is set, or the `cmux` CLI is available and `cmux identify` succeeds), open the discussion URL in the workspace the user is actually looking at.
 
@@ -164,7 +197,9 @@ back into that same main session through the generic app-server protocol.
    Report the surface ref and the workspace it opened in. Do not close the browser tab automatically. If the command fails, fall back to echoing the URL and mention the failure briefly; do not retry with another cmux command.
 
 6. **Loop on signal files (legacy mode only).** Steps 6a–6d repeat until the user clicks Pause or Finish. App-server handoff mode has already returned control to the running main session and must not enter this loop.
-   For both Codex and Claude, continue with the loop below in the current main agent turn. Codex uses the bounded heartbeat form in step 6a; Claude may use the unbounded form.
+   For Codex, Xedoc, and Claude, continue with the loop below in the current
+   main agent turn. The app-server harnesses use the bounded heartbeat form in
+   step 6a; Claude may use the unbounded form.
    This loop is intentionally unbounded. The browser may sit idle for hours
    while the user reviews. Never conclude, report "blocked", stop the server,
    or clean up just because no Apply, Pause, or Finish signal has arrived yet. Only
@@ -173,7 +208,7 @@ back into that same main session through the generic app-server protocol.
 
    **Turn-continuation rule (non-negotiable).** While this loop is active you
    MUST NOT emit a final, turn-ending message. On hosts where `wait` runs in a
-   background command/session (Codex), the tool call can *yield* — return
+   background command/session (Codex or Xedoc), the tool call can *yield* — return
    control to you with no output — while the server is still alive and no signal
    has been written yet. An empty/early yield with no signal path is **not** a
    completion event and **not** a reason to stop: it is identical to the exit
@@ -204,9 +239,10 @@ back into that same main session through the generic app-server protocol.
         --session-dir "${TMPDIR:-/tmp}/inline-discussion/<SLUG>"
       ```
 
-      **Codex timeout guard.** Codex command sessions can time out while the
-      browser is correctly idle. When `<HOST> = codex`, do not use one
-      unbounded wait command. Instead run bounded heartbeat waits:
+      **App-server timeout guard.** Codex and Xedoc command sessions can time
+      out while the browser is correctly idle. When `<HOST> = codex` or
+      `xedoc`, do not use one unbounded wait command. Instead run bounded
+      heartbeat waits:
 
       ```bash
       inline-discussion wait \
@@ -277,7 +313,9 @@ Return in plain English:
 - Follow-up punch list extracted from threads/notes (empty list if nothing actionable).
 - The user's chosen next step from the follow-up prompt — omit when the punch list is empty and no prompt was shown.
 - During an in-session Apply, no user-visible report is produced — the browser is the user-facing surface. The follow-up list is processed silently and the loop resumes.
-- In Codex app-server handoff mode, report the URL and detached screen session, then end this turn after startup; the server prompts the same main session for later Apply and Finish actions.
+- In Codex or Xedoc app-server handoff mode, report the URL and detached screen
+  session, then end this turn after startup; the server prompts the same main
+  session for later Apply and Finish actions.
 
 ## Runtime state
 

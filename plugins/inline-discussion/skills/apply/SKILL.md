@@ -7,9 +7,18 @@ description: Handle one Apply event from an inline-discussion browser session. U
 
 The argument is the absolute path to one `apply-N.json` signal file. Handle exactly that signal, return control to the active discussion loop or the app-server handoff turn, and do not wait for later browser events.
 
-## Codex active-session guard
+## App-server active-session guard
 
-In legacy mode, Apply is owned by the active main-agent turn. Keep the `inline-discussion start --hold` command and the `inline-discussion wait --idle-exit-seconds 60` heartbeat loop in that same turn, then handle the signal directly. In app-server handoff mode, the discussion server has already kept the launcher alive in `screen` and sent this prompt into the current main session; handle only the supplied signal and return when it is complete. In both modes, do not start a watcher, `codex exec`, second server, or second agent session. The launcher detaches the server, but `--hold` keeps its parent command alive so host-shell child reaping cannot terminate the browser session while the user reviews.
+In legacy mode, Apply is owned by the active main-agent turn. Keep the
+`inline-discussion start --hold` command and the
+`inline-discussion wait --idle-exit-seconds 60` heartbeat loop in that same
+turn, then handle the signal directly. In Codex or Xedoc app-server handoff
+mode, the discussion server has already kept the launcher alive in `screen`
+and sent this prompt into the current main session; handle only the supplied
+signal and return when it is complete. In both modes, do not start a watcher,
+another host CLI session, second server, or second agent session. The launcher
+detaches the server, but `--hold` keeps its parent command alive so host-shell
+child reaping cannot terminate the browser session while the user reviews.
 
 1. Read the signal JSON and its containing session directory. Set `SIGNAL_PATH` to the supplied absolute `apply-N.json` path and `SESSION_DIR="$(dirname "$SIGNAL_PATH")"`; then read `<session-dir>/url.txt` for the browser URL. Read the signal's `documentPaths` array as the exact absolute paths to scan. It contains the main discussion document plus every Markdown subdocument changed by this Apply round; do not infer, glob, or replace these paths with only the triggering document. If the signal, URL, or `documentPaths` is missing, stop and report the error.
    If Project Context Curator is active, read `docs/context/index.md` from the

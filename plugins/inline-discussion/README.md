@@ -15,7 +15,7 @@ leaving the document view.
   while preserving extractable structure and content.
 - Focused threaded comments and notes anchored to selected text, quotes, or
   whole blocks, so side conversations stay attached to their evidence.
-- Per-thread Codex or Claude inference settings, with conversation history
+- Per-thread Codex, Claude, or Xedoc inference settings, with conversation history
   preserved for each review thread.
 - An explicit Apply/Finish handoff: focused side threads return agreed action
   items to the main agent, which amends the document while the discussion stays
@@ -47,7 +47,7 @@ Read the [example discussion document](assets/discussion-example.md).
 Use it to review a proposal, research report, incident note, Markdown document,
 or another source document that should be converted into Markdown for a local
 human-to-agent discussion. The standalone `inline-discussion` CLI is installed
-by `./install.sh`; the plugin supports Codex and Claude Code.
+by `./install.sh`; the plugin supports Codex, Claude Code, and Xedoc.
 
 See the [tool README](../../tools/inline-discussion/README.md) for launcher
 commands and the [marketplace README](../../README.md#install) for installation.

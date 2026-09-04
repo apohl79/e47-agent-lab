@@ -12,10 +12,11 @@ import { appendThreadDetails, removeAllArchivedBlocks, removeArchivedBlockByInde
 import type { AgentFactory, ThreadAgent, ToolApprovalRequest } from './agent.ts';
 import {
   codexAgentFactory,
-  discoverCodexInferenceCatalog,
+  discoverAppServerInferenceCatalog,
   sdkAgentFactory,
+  xedocAgentFactory,
 } from './agent.ts';
-import { createAppServerSessionBridge, type MainSessionBridge } from './main-session.ts';
+import { createAppServerSessionBridge, type AppServerHarness, type MainSessionBridge } from './main-session.ts';
 import { logDiagnostic } from './diagnostics.ts';
 import { resolvedInferenceSettings, validInferenceSettings } from './inference-settings.ts';
 import { formatDocumentAnnotations } from './document-annotations.ts';
@@ -74,6 +75,7 @@ export interface ServerOptions {
   mainSession?: MainSessionBridge;
   mainSessionId?: string;
   mainSessionSocket?: string;
+  mainSessionHarness?: AppServerHarness;
   agentFactory: AgentFactory;
   inferenceCatalog?: InferenceCatalog;
   initialInferenceSettings?: InferenceSettings;
@@ -99,7 +101,7 @@ interface ToolApprovalView {
   id: string;
   threadId: string;
   documentPath: string;
-  provider: 'claude' | 'codex';
+  provider: 'claude' | AppServerHarness;
   toolName: string;
   input: Record<string, unknown>;
   title?: string;
@@ -159,7 +161,11 @@ export async function createServer(opts: ServerOptions): Promise<ServerHandle> {
     existsSync(opts.mainJsonlPath);
   const mainSession = opts.mainSession ?? (
     opts.mainSessionId
-      ? createAppServerSessionBridge({ threadId: opts.mainSessionId, socketPath: opts.mainSessionSocket })
+      ? createAppServerSessionBridge({
+        threadId: opts.mainSessionId,
+        socketPath: opts.mainSessionSocket,
+        harness: opts.mainSessionHarness,
+      })
       : null
   );
   const mainTranscript = trimTranscript(readJsonl(opts.mainJsonlPath));
@@ -2582,10 +2588,10 @@ function isMainModule(metaUrl: string): boolean {
   }
 }
 
-type AgentMode = 'claude' | 'codex';
+type AgentMode = 'claude' | AppServerHarness;
 
 export function resolveAgentMode(requestedAgent: string | undefined): AgentMode {
-  return requestedAgent === 'codex' ? 'codex' : 'claude';
+  return requestedAgent === 'codex' || requestedAgent === 'xedoc' ? requestedAgent : 'claude';
 }
 
 if (isMainModule(import.meta.url)) {
@@ -2598,10 +2604,11 @@ if (isMainModule(import.meta.url)) {
   const staticDir = process.env.IND_STATIC_DIR;
   const agentMode = resolveAgentMode(process.env.IND_AGENT);
   const agentCwd = process.env.IND_AGENT_CWD || process.cwd();
-  const inferenceCatalog = agentMode === 'codex'
-    ? await discoverCodexInferenceCatalog({ cwd: agentCwd })
+  const appServerHarness = agentMode === 'codex' || agentMode === 'xedoc' ? agentMode : undefined;
+  const inferenceCatalog = appServerHarness
+    ? await discoverAppServerInferenceCatalog({ cwd: agentCwd, harness: appServerHarness })
     : undefined;
-  const inheritedInferenceSettings = agentMode === 'codex' && inferenceCatalog
+  const inheritedInferenceSettings = appServerHarness && inferenceCatalog
     ? readCodexSessionInferenceSettings(mainJsonl, inferenceCatalog)
     : undefined;
   const { port, close } = await createServer({
@@ -2609,6 +2616,7 @@ if (isMainModule(import.meta.url)) {
     mainJsonlPath: mainJsonl,
     mainSessionId: process.env.IND_MAIN_SESSION_ID,
     mainSessionSocket: process.env.IND_MAIN_SESSION_SOCKET,
+    mainSessionHarness: process.env.IND_MAIN_SESSION_HARNESS === 'xedoc' ? 'xedoc' : 'codex',
     sessionDir,
     staticDir,
     projectRoot: process.env.IND_AGENT_CWD,
@@ -2616,6 +2624,8 @@ if (isMainModule(import.meta.url)) {
     initialInferenceSettings: inheritedInferenceSettings,
     agentFactory: agentMode === 'codex'
       ? codexAgentFactory({ cwd: agentCwd })
+      : agentMode === 'xedoc'
+        ? xedocAgentFactory({ cwd: agentCwd })
       : sdkAgentFactory(),
   });
   const url = `http://127.0.0.1:${port}/`;

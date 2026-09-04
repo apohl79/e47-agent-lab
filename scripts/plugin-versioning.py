@@ -15,10 +15,12 @@ VERSION_FILE = "plugin-versions.json"
 HOST_MANIFESTS = {
     "codex": Path(".codex-plugin/plugin.json"),
     "claude": Path(".claude-plugin/plugin.json"),
+    "xedoc": Path(".xedoc-plugin/plugin.json"),
 }
 MARKETPLACE_MANIFESTS = {
     "codex": Path(".agents/plugins/marketplace.json"),
     "claude": Path(".claude-plugin/marketplace.json"),
+    "xedoc": Path(".agents/plugins/marketplace.json"),
 }
 SEMVER_RE = re.compile(
     r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
@@ -136,11 +138,16 @@ def collect_errors(root: Path, registry: dict[str, Any], check_versions: bool) -
     try:
         codex_marketplace = read_json(root / MARKETPLACE_MANIFESTS["codex"])
         claude_marketplace = read_json(root / MARKETPLACE_MANIFESTS["claude"])
+        xedoc_marketplace = read_json(root / MARKETPLACE_MANIFESTS["xedoc"])
     except FileNotFoundError as exc:
         errors.append(f"missing marketplace manifest: {exc.filename}")
         return errors
 
-    for host, manifest in (("codex", codex_marketplace), ("claude", claude_marketplace)):
+    for host, manifest in (
+        ("codex", codex_marketplace),
+        ("claude", claude_marketplace),
+        ("xedoc", xedoc_marketplace),
+    ):
         if manifest.get("name") != marketplace["name"]:
             errors.append(
                 f"{MARKETPLACE_MANIFESTS[host]} name is {manifest.get('name')!r}, "
@@ -158,8 +165,11 @@ def collect_errors(root: Path, registry: dict[str, Any], check_versions: bool) -
         actual = marketplace_plugin_names(root, host)
         for name in sorted(expected - actual):
             errors.append(f"{MARKETPLACE_MANIFESTS[host]} is missing plugin {name!r}")
-        for name in sorted(actual - expected):
-            errors.append(f"{MARKETPLACE_MANIFESTS[host]} lists unversioned plugin {name!r}")
+        # Codex and Xedoc share the .agents marketplace manifest. A plugin
+        # may be listed there for Codex before it gains an Xedoc manifest.
+        if host != "xedoc":
+            for name in sorted(actual - expected):
+                errors.append(f"{MARKETPLACE_MANIFESTS[host]} lists unversioned plugin {name!r}")
 
     for plugin_name, plugin in plugins.items():
         expected_hosts = set(plugin["hosts"])

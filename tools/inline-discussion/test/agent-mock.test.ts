@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   appendTurnContext,
+  appServerDiscussionAgentEnvironment,
   codexAgentFactory,
   discussionAgentEnvironment,
   discoverCodexInferenceCatalog,
@@ -15,6 +16,7 @@ import {
   THREAD_AGENT_BASE_INSTRUCTIONS,
   type DispatchState,
   type StreamChunk,
+  xedocAgentFactory,
 } from '../src/agent.ts';
 
 function chunkLabel(c: StreamChunk): string {
@@ -101,6 +103,22 @@ test('discussion agents disable project-context-curator while preserving their e
   );
 });
 
+test('Xedoc app-server children receive the Xedoc marker and harness only', () => {
+  assert.deepEqual(
+    appServerDiscussionAgentEnvironment('xedoc', {
+      KEEP_ME: 'yes',
+      CODEX_INLINE_DISCUSSION_CHILD: '1',
+      XEDOC_INLINE_DISCUSSION_CHILD: 'stale',
+    }),
+    {
+      KEEP_ME: 'yes',
+      PROJECT_CONTEXT_CURATOR_DISABLED: '1',
+      HARNESS: 'xedoc',
+      XEDOC_INLINE_DISCUSSION_CHILD: '1',
+    },
+  );
+});
+
 test('codexAgentFactory streams app-server deltas and records replies', async () => {
   const root = mkdtempSync(join(tmpdir(), 'ind-codex-agent-'));
   const fakeServer = join(root, 'fake-codex-app-server.mjs');
@@ -124,6 +142,21 @@ test('codexAgentFactory streams app-server deltas and records replies', async ()
     [['user', 'hello'], ['assistant', 'streamed codex reply']],
   );
   await agent.close?.();
+});
+
+test('xedocAgentFactory uses the compatible app-server protocol and identifies Xedoc as the host', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ind-xedoc-agent-'));
+  const fakeServer = join(root, 'fake-xedoc-app-server.mjs');
+  writeFileSync(fakeServer, fakeCodexAppServer());
+
+  const factory = xedocAgentFactory({ command: process.execPath, args: [fakeServer], cwd: root });
+  const agent = factory({ systemPreamble: 'preamble', tools: [] });
+  try {
+    assert.equal(agent.provider, 'xedoc');
+    assert.equal((await collectChunkLabels(agent.send('hello'))).at(-1), 'done:streamed codex reply');
+  } finally {
+    await agent.close?.();
+  }
 });
 
 test('codexAgentFactory separates Codex activity from final answer text', async () => {

@@ -169,8 +169,9 @@ test('computeDocTitle uses the filename (with extension), ignoring doc content',
   assert.equal(titleOf('', '/a/b/c/my-doc.md'), 'my-doc.md');
 });
 
-test('resolveAgentMode maps only codex to the Codex-backed agent', () => {
+test('resolveAgentMode maps Codex and Xedoc to the app-server-backed agent', () => {
   assert.equal(resolveAgentMode('codex'), 'codex');
+  assert.equal(resolveAgentMode('xedoc'), 'xedoc');
   assert.equal(resolveAgentMode('claude'), 'claude');
   assert.equal(resolveAgentMode('gpt'), 'claude');
   assert.equal(resolveAgentMode(undefined), 'claude');
