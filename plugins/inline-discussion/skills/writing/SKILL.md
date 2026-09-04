@@ -15,6 +15,10 @@ Use ordinary Markdown links whose target ends in one of these suffixes:
 
 Lines and characters are 1-based and inclusive. Prefer a path relative to the Markdown document because it remains portable when the project moves. Use an absolute filesystem path or a server-root path beginning with `/` only when a document-relative path is unsuitable. Do not hard-code the discussion server's host or port because it changes between launches.
 
+A slash-prefixed target keeps server-root behavior when a matching project file
+exists. Otherwise, a supported Markdown or source file at that absolute
+filesystem path opens in the discussion browser.
+
 ```markdown
 [Provisioning decision](./decision.md:40-45)
 [Exact setting](../infra/main.tf:18:3-18:31)

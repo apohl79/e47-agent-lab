@@ -2178,11 +2178,26 @@ function resolveSourceReference(state: ServerState, rawReference: string): { pat
   const { pathPart, range } = parseSourceReference(decoded);
   if (!pathPart) return null;
   const serveRoots = resolveServeRoots(state.docPath, state.projectRoot);
-  const candidates = pathPart.startsWith('/')
-    ? [pathPart, ...serveRoots.map((serveRoot) => resolve(serveRoot, pathPart.replace(/^\/+/, '')))]
-    : serveRoots.map((serveRoot) => resolve(serveRoot, pathPart.replace(/^\/+/, '')));
+  const isDirectAbsolutePath = pathPart.startsWith('/');
+  const relativePath = pathPart.replace(/^\/+/, '');
+  const candidates: Array<{ path: string; allowOutsideServeRoots: boolean }> = isDirectAbsolutePath
+    ? [
+      ...serveRoots.map((serveRoot) => ({
+        path: resolve(serveRoot, relativePath),
+        allowOutsideServeRoots: false,
+      })),
+      { path: pathPart, allowOutsideServeRoots: true },
+    ]
+    : serveRoots.map((serveRoot) => ({
+      path: resolve(serveRoot, relativePath),
+      allowOutsideServeRoots: false,
+    }));
   const target = candidates
-    .map((candidate) => resolveExistingRenderableFile(candidate, serveRoots))
+    .map((candidate) => resolveExistingRenderableFile(
+      candidate.path,
+      serveRoots,
+      candidate.allowOutsideServeRoots,
+    ))
     .find((candidate): candidate is string => candidate !== null);
   if (target === undefined) return null;
   return { path: displayPathForResolvedFile(state, target), range };
@@ -2204,7 +2219,11 @@ function displayPathForResolvedFile(state: ServerState, resolvedPath: string): s
   return resolvedPath;
 }
 
-function resolveExistingRenderableFile(path: string, serveRoots: string[]): string | null {
+function resolveExistingRenderableFile(
+  path: string,
+  serveRoots: string[],
+  allowOutsideServeRoots = false,
+): string | null {
   try {
     const realPath = realpathSync(path);
     const contained = serveRoots.some((serveRoot) => {
@@ -2215,7 +2234,11 @@ function resolveExistingRenderableFile(path: string, serveRoots: string[]): stri
         return false;
       }
     });
-    return contained && statSync(realPath).isFile() && (isSourceFile(realPath) || isMarkdownFile(realPath)) ? realPath : null;
+    return (
+      (allowOutsideServeRoots || contained)
+      && statSync(realPath).isFile()
+      && (isSourceFile(realPath) || isMarkdownFile(realPath))
+    ) ? realPath : null;
   } catch {
     return null;
   }

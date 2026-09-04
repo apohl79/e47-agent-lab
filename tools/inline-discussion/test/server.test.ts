@@ -3,7 +3,7 @@ import { mock, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { createServer, computeDocTitle, resolveAgentMode } from '../src/server.ts';
 import { parseDoc } from '../src/markdown.ts';
 import { mockAgentFactory, type AgentFactory, type ThreadAgent } from '../src/agent.ts';
@@ -98,10 +98,13 @@ test('rejects cross-origin mutations and non-JSON mutation bodies', async () => 
   await close();
 });
 
-test('does not expose files outside the project root or active repo content', async () => {
+test('opens explicit absolute source files outside the project while refusing active assets', async () => {
   const root = mkdtempSync(join(tmpdir(), 'ind-file-boundary-'));
   const outside = join(tmpdir(), `ind-outside-${Date.now()}.ts`);
+  const projectPath = join(root, outside.slice(1));
   writeFileSync(outside, 'export const secret = true;\n');
+  mkdirSync(dirname(projectPath), { recursive: true });
+  writeFileSync(projectPath, 'export const project = true;\n');
   writeFileSync(join(root, 'doc.md'), '# Discussion\n');
   writeFileSync(join(root, 'script.js'), 'alert(1);\n');
   const { port, close } = await createServer({
@@ -111,7 +114,13 @@ test('does not expose files outside the project root or active repo content', as
   });
   const outsideBoot = await fetch(`http://127.0.0.1:${port}/api/bootstrap?path=${encodeURIComponent(`${outside}:1`)}`);
   assert.equal(outsideBoot.status, 200);
-  assert.equal((await outsideBoot.json() as { sourceView: boolean }).sourceView, false);
+  const boot = await outsideBoot.json() as { sourceView: boolean; title: string; readOnly: boolean; html: string };
+  assert.deepEqual(
+    { sourceView: boot.sourceView, title: boot.title, readOnly: boot.readOnly },
+    { sourceView: true, title: basename(outside), readOnly: true },
+  );
+  assert.match(boot.html, /project/);
+  assert.doesNotMatch(boot.html, /secret/);
   assert.equal((await fetch(`http://127.0.0.1:${port}/script.js`)).status, 404);
   await close();
 });
@@ -263,6 +272,51 @@ test('GET absolute source path with a line number renders highlighted source and
   assert.equal((boot as { sourceView?: boolean }).sourceView, true);
   assert.match(boot.html, /data-block-id="line-2"/);
   assert.match(boot.html, /language-typescript/);
+  await close();
+});
+
+test('GET explicit absolute Markdown and source paths outside the project opens their browser views', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ind-source-root-'));
+  mkdirSync(join(root, '.git'));
+  const externalRoot = mkdtempSync(join(tmpdir(), 'ind-source-external-'));
+  const docPath = join(root, 'doc.md');
+  const sourcePath = join(externalRoot, 'outside.ts');
+  const markdownPath = join(externalRoot, 'outside.md');
+  writeFileSync(docPath, '# Discussion\n');
+  writeFileSync(sourcePath, 'export const first = 1;\nexport const target = 2;\n');
+  writeFileSync(markdownPath, '# External guide\n\nVisible content.\n');
+  const staticDir = join(root, 'static');
+  mkdirSync(staticDir);
+  writeFileSync(join(staticDir, 'index.html'), '<script src="/app.js"></script>');
+  const { port, close } = await createServer({
+    docPath, sessionDir: join(root, 'session'), prefsPath: join(root, 'prefs.json'),
+    staticDir, agentFactory: mockAgentFactory({ reply: 'r', conclusion: 'c' }), shutdownOnFinish: false,
+  });
+
+  const sourcePage = await fetch(`http://127.0.0.1:${port}${sourcePath}:2`);
+  const sourceBoot = await (await fetch(
+    `http://127.0.0.1:${port}/api/bootstrap?path=${encodeURIComponent(`${sourcePath}:2`)}`,
+  )).json() as { title: string; targetLine: number; readOnly: boolean; html: string };
+  const markdownBoot = await (await fetch(
+    `http://127.0.0.1:${port}/api/bootstrap?path=${encodeURIComponent(markdownPath)}`,
+  )).json() as { title: string; readOnly: boolean; html: string };
+
+  assert.deepEqual(
+    {
+      title: sourceBoot.title,
+      targetLine: sourceBoot.targetLine,
+      readOnly: sourceBoot.readOnly,
+    },
+    { title: 'outside.ts', targetLine: 2, readOnly: true },
+  );
+  assert.equal(sourcePage.status, 200);
+  assert.match(await sourcePage.text(), /app\.js/);
+  assert.match(sourceBoot.html, /data-block-id="line-2"/);
+  assert.deepEqual(
+    { title: markdownBoot.title, readOnly: markdownBoot.readOnly },
+    { title: 'outside.md', readOnly: false },
+  );
+  assert.match(markdownBoot.html, /External guide/);
   await close();
 });
 

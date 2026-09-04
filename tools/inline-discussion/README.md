@@ -144,7 +144,9 @@ inline-discussion wait  --session-dir <path> [--idle-exit-seconds <seconds>]
   Apply signals list every changed
   Markdown path in `documentPaths` for the host agent to scan. Apply
   availability is session-wide and stays synchronized across open document
-  views. Paths may be project-root-relative or absolute.
+  views. Paths may be project-root-relative or absolute; an explicit absolute
+  Markdown or supported source-file link may target a file outside the project
+  when it does not match an existing project-root path.
 - Mermaid diagrams follow the active theme: switching light/dark re-renders
   each diagram so its palette matches the page instead of keeping the baked
   light-mode colours. Clicking a rendered diagram (or any document image)
