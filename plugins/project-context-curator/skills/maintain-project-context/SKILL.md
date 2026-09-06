@@ -321,8 +321,10 @@ canonical store; it only makes those facts inapplicable to the removed project.
       docs/context/*.md`.
    7. Load an entire large generated view only when the task itself is broad enough to require it.
    8. For source, test, or configuration implementation, complete the
-      implementation preflight before the first edit: search the task terms,
-      read every matching pattern, prioritizing those categorized
+      implementation preflight before the first edit: detect the changed
+      component language, search the task terms plus the `implementation`
+      learning cue
+      cue and detected language, and read every matching pattern, prioritizing those categorized
       `implementation` or `both`; unclassified legacy patterns remain eligible
       until classified. Record `CONTEXT_PREFLIGHT: COMPLETE` with the searched
       terms (or `CONTEXT_PREFLIGHT: NONE` when no pattern matches).

@@ -37,8 +37,9 @@ Resolve omitted inputs from the task plan and repository:
 - `risk_lens`: optional risk named by the plan or changed behavior.
 
 Before the first implementation edit, the implementing agent must complete
-the Project Context Curator implementation preflight: search one to three
-distinctive task terms, read matching patterns (prioritizing
+the Project Context Curator implementation preflight: detect the changed
+component language, search one to three distinctive task terms plus the
+`implementation` learning cue and detected language, and read matching patterns (prioritizing
 `implementation`/`both` and retaining unclassified legacy patterns), and
 record `CONTEXT_PREFLIGHT: COMPLETE` (or `CONTEXT_PREFLIGHT: NONE` when none
 match). A checkpoint report must include that line; a missing line means the

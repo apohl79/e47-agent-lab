@@ -350,7 +350,9 @@ def session_start(payload: dict[str, Any]) -> None:
         ),
         (
             "Implementation preflight: before creating or modifying source, test, or "
-            "configuration files, search the task terms and read every matching pattern. "
+            "configuration files, detect the changed component language, search the task terms "
+            "plus the implementation learning cue and detected language, and read every "
+            "matching pattern. "
             "Prioritize patterns categorized implementation or both; unclassified legacy "
             "patterns remain eligible until classified. State CONTEXT_PREFLIGHT: COMPLETE "
             "with the searched terms before the first edit; if no patterns match, state "

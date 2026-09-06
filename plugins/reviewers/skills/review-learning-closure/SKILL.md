@@ -42,11 +42,12 @@ FAILED_ASSUMPTION: <incorrect belief or missing constraint>
 ASSUMPTION_EVIDENCE: <OBSERVED|INFERRED>
 ESCAPE_REASON: <why existing review, test, type, or control missed it>
 ERROR_CATEGORY: <reusable category, not an implementation label>
+LANGUAGE: <detected implementation language, or language-agnostic>
 EARLIEST_PREVENTION_POINT: <earliest practical control>
 PREVENTION_APPLIED: <control added, or why it cannot yet be applied>
 VERIFICATION: <commands, assertions, or reviewer recheck and outcome>
 CONTEXT_CANDIDATE: <none|concise durable invariant or rule>
-RETRIEVAL_CUES: <terms that would retrieve a durable candidate>
+RETRIEVAL_CUES: <language, error-category, and other terms that retrieve a durable candidate>
 ```
 
 Use `COMPLETE` only when the fix and its verification are evidenced. A
