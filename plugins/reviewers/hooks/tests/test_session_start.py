@@ -63,6 +63,28 @@ class SessionStartHostDetectionTest(unittest.TestCase):
 
         self.assertEqual(context, "HARNESS=claude")
 
+    def test_xedoc_markers_beat_inherited_claude_environment(self) -> None:
+        context = run_hook(
+            {
+                "CLAUDECODE": "1",
+                "XEDOC_THREAD_ID": "thread-1",
+                "XEDOC_PLUGIN_ROOT": "/home/example/.xedoc/plugins/e47/reviewers",
+                "PLUGIN_ROOT": "/home/example/.xedoc/plugins/e47/reviewers",
+            },
+        )
+
+        self.assertEqual(context, "HARNESS=xedoc")
+
+    def test_xedoc_plugin_path_wins_without_xedoc_environment(self) -> None:
+        context = run_hook(
+            {
+                "CLAUDECODE": "1",
+                "PLUGIN_ROOT": "/home/example/.xedoc/plugins/e47/reviewers",
+            },
+        )
+
+        self.assertEqual(context, "HARNESS=xedoc")
+
     def test_machine_host_env_does_not_force_reviewer_host(self) -> None:
         context = run_hook(
             {

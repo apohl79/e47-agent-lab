@@ -11,6 +11,7 @@ detect_host_from_process_tree() {
         case "$name" in
             codex*) echo "codex"; return 0 ;;
             claude*) echo "claude"; return 0 ;;
+            xedoc*) echo "xedoc"; return 0 ;;
         esac
 
         pid="$(ps -p "$pid" -o ppid= 2>/dev/null | tr -d '[:space:]' || true)"
@@ -55,6 +56,11 @@ detect_host() {
         return 0
     fi
 
+    if path_points_to_host "xedoc" "$0" "${PLUGIN_ROOT:-}" "${PLUGIN_DATA:-}" \
+       "${XEDOC_PLUGIN_ROOT:-}" "${XEDOC_PLUGIN_DATA:-}"; then
+        return 0
+    fi
+
     if path_points_to_host "claude" "$0" "${PLUGIN_ROOT:-}" "${PLUGIN_DATA:-}" \
        "${CLAUDE_PLUGIN_ROOT:-}" "${CLAUDE_PLUGIN_DATA:-}"; then
         return 0
@@ -66,6 +72,12 @@ detect_host() {
         return 0
     fi
 
+    if [ -n "${XEDOC_THREAD_ID:-}" ] || [ -n "${XEDOC_SESSION_JSONL:-}" ] ||
+       [ -n "${XEDOC_CI:-}" ]; then
+        echo "xedoc"
+        return 0
+    fi
+
     if [ -n "${CLAUDECODE:-}" ] || [ -n "${CLAUDE_CODE_ENTRYPOINT:-}" ] ||
        [ -n "${CLAUDE_CODE_SESSION_ID:-}" ] ||
        [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] || [ -n "${CLAUDE_PLUGIN_DATA:-}" ]; then
@@ -74,7 +86,7 @@ detect_host() {
     fi
 
     case "${HOST:-}" in
-        codex|claude) echo "$HOST"; return 0 ;;
+        codex|claude|xedoc) echo "$HOST"; return 0 ;;
     esac
 
     detect_host_from_process_tree
