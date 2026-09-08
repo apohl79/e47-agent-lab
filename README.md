@@ -6,26 +6,32 @@ Plugin marketplace for Codex, Claude Code, and Xedoc.
 
 | Plugin | Version | Description | Hosts |
 | --- | --- | --- | --- |
-| [Reviewers](plugins/reviewers/README.md) | `0.8.0` | Incremental implementation review, PR finalization, and broad reviewer-team workflows. | Codex, Claude Code |
+| [Reviewers](plugins/reviewers/README.md) | `0.11.0` | Incremental implementation review, PR finalization, and broad reviewer-team workflows. | Xedoc, Codex, Claude Code |
 | [Auto Compaction](plugins/auto-compaction/README.md) | `0.1.0` | Claude Code auto-compaction gate with setup skill and checkpoint hooks. | Claude Code |
-| [Inline Discussion](plugins/inline-discussion/README.md) | `2.1.0` | Keep document editing, focused AI side threads, and main-agent updates in one view. | Codex, Claude Code, Xedoc |
-| [Project Context Curator](plugins/project-context-curator/README.md) | `5.5.1` | Durable project knowledge with audit and graph-assisted retrieval. | Codex, Claude Code |
+| [Inline Discussion](plugins/inline-discussion/README.md) | `2.1.1` | Keep document editing, focused AI side threads, and main-agent updates in one view. | Xedoc, Codex, Claude Code |
+| [Project Context Curator](plugins/project-context-curator/README.md) | `5.7.0` | Durable project knowledge with audit and graph-assisted retrieval. | Xedoc, Codex, Claude Code |
 
 ## Install
 
-One-line installer:
+Install for Xedoc:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/apohl79/e47-agent-lab/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/apohl79/e47-agent-lab/main/install.sh | bash -s -- --xedoc
 ```
 
-From a local clone:
+Install for Claude Code:
 
 ```bash
-./install.sh
+curl -fsSL https://raw.githubusercontent.com/apohl79/e47-agent-lab/main/install.sh | bash -s -- --claude
 ```
 
-The installer detects available CLIs and installs host-appropriate plugins into
-Claude Code, Codex, Xedoc, or any combination. `auto-compaction` is Claude
-Code only. Use `./install.sh --claude`, `./install.sh --codex`, or
-`./install.sh --xedoc` to target one host.
+Install for Codex:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/apohl79/e47-agent-lab/main/install.sh | bash -s -- --codex
+```
+
+From a local clone, `./install.sh` installs for Xedoc. Pass `--xedoc`,
+`--claude`, or `--codex` to select one harness, or `--all` to require and
+install all three. Claude Code and Codex are never selected implicitly.
+`auto-compaction` remains Claude Code only.

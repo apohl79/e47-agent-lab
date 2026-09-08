@@ -48,6 +48,6 @@ multi-reviewer coverage for changes that justify it.
   worth its cost.
 - Send a review request to Slack after the PR or stack is ready.
 
-The plugin supports Codex and Claude Code. Install it through the
+The plugin supports Xedoc, Codex, and Claude Code. Install it through the
 [marketplace README](../../README.md#install), then invoke the relevant
 `reviewers:*` skill from your agent session.

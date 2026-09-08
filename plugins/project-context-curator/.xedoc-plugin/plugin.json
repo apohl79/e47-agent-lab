@@ -1,6 +1,5 @@
 {
   "name": "project-context-curator",
-  "version": "5.7.0",
   "description": "Maintains selectable local or Git-backed canonical context with graph-assisted hybrid retrieval.",
   "author": {
     "name": "Local developer"
@@ -27,5 +26,6 @@
       "hooks"
     ],
     "defaultPrompt": "Maintain project context while working in this repository."
-  }
+  },
+  "version": "5.7.0"
 }

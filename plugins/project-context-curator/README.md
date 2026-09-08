@@ -47,12 +47,12 @@ preserves their source and scope, and provides a review path when that
 knowledge becomes stale. Its explicit enrollment and private-scope boundaries
 avoid turning a convenience index into an unreviewed data-sharing mechanism.
 
-## Codex compatibility
+## Xedoc and Codex compatibility
 
-The plugin works best with the E47 Codex fork. Its fork-only `context.thread`
-extension inserts the curator's durable-knowledge guidance as a fixed context
-block for each active thread. Other supported hosts receive the normal skills
-and hooks, but cannot provide that persistent thread-level block.
+Xedoc and the E47 Codex fork support the `context.thread` extension, which
+inserts the curator's durable-knowledge guidance as a fixed context block for
+each active thread. Claude Code receives the normal skills and hooks without
+that persistent thread-level block.
 
 ## Knowledge graph
 
@@ -69,6 +69,6 @@ graph search, relationship filters, and node details.
 
 Use the curator when a repository needs persistent terminology, architecture
 decisions, component ownership, or cross-project context. It also fits context
-hygiene reviews and graph exploration. The plugin supports Codex and Claude
-Code; install it through the [marketplace README](../../README.md#install), then
+hygiene reviews and graph exploration. The plugin supports Xedoc, Codex, and
+Claude Code; install it through the [marketplace README](../../README.md#install), then
 invoke the relevant `project-context-curator:*` skill.

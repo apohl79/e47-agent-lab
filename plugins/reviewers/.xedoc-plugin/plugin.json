@@ -1,6 +1,5 @@
 {
   "name": "reviewers",
-  "version": "0.11.0",
   "description": "Incremental implementation review, PR finalization, reviewer-team, and Slack review-request workflows for Xedoc, Claude Code, and Codex.",
   "author": {
     "name": "apohl79"
@@ -31,10 +30,8 @@
     "defaultPrompt": [
       "Review the current implementation checkpoint.",
       "Finalize this PR with reviewers.",
-      "Run the reviewers team on this change.",
-      "Check this PR for review and quality-gate issues.",
-      "Send a PR review request to Slack.",
-      "Manage PR review Slack channels."
+      "Run the reviewers team on this change."
     ]
-  }
+  },
+  "version": "0.11.0"
 }

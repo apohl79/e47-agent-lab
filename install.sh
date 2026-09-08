@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Install script for the e47 marketplace.
 #
-# One-line install:
-#   curl -fsSL https://raw.githubusercontent.com/apohl79/e47-agent-lab/main/install.sh | bash
+# One-line Xedoc install:
+#   curl -fsSL https://raw.githubusercontent.com/apohl79/e47-agent-lab/main/install.sh | bash -s -- --xedoc
 
 set -euo pipefail
 
@@ -13,7 +13,7 @@ STANDALONE_MARKETPLACE_NAMES=("plan-executor" "plan-executor-plugin" "inline-dis
 ALL_MARKETPLACE_NAMES=("$MARKETPLACE_NAME" "${LEGACY_MARKETPLACE_NAMES[@]}" "${STANDALONE_MARKETPLACE_NAMES[@]}")
 CODEX_PLUGIN_CLEANUP_MARKETPLACE_NAMES=("personal" "${ALL_MARKETPLACE_NAMES[@]}")
 CODEX_PERSONAL_PLUGIN_CLEANUP_NAMES=("plan-executor" "inline-discussion" "project-context-curator" "my")
-TARGET_MODE="auto"
+TARGET_MODE="xedoc"
 ACTION="install"
 SOURCE_OVERRIDE="${E47_MARKETPLACE_SOURCE:-}"
 WITH_CONTEXT_RUNTIME=false
@@ -25,7 +25,9 @@ CODEX_PLUGIN_REGISTRY=(
 )
 
 XEDOC_PLUGIN_REGISTRY=(
+    "reviewers|PR finalization and reviewer-team workflows"
     "inline-discussion|Inline-discussion browser UI"
+    "project-context-curator|Durable repository domain context"
 )
 
 CLAUDE_PLUGIN_REGISTRY=(
@@ -73,8 +75,8 @@ usage() {
     cat <<EOF
 Usage: ./install.sh [install|uninstall] [--all|--claude|--codex|--xedoc] [--source SOURCE] [--with-context-runtime]
 
-Without a target flag, installs host-appropriate plugins into each available CLI:
-Claude Code, Codex, and/or Xedoc.
+Without a target flag, installs into Xedoc only. Claude Code and Codex are
+optional and must be selected with a target flag.
 
 Options:
   --all            Install into Claude Code, Codex, and Xedoc; fail if any CLI is missing.
@@ -147,7 +149,6 @@ should_install_claude() {
     case "$TARGET_MODE" in
         all|claude) return 0 ;;
         codex|xedoc) return 1 ;;
-        auto) command_exists claude ;;
     esac
 }
 
@@ -155,7 +156,6 @@ should_install_codex() {
     case "$TARGET_MODE" in
         all|codex) return 0 ;;
         claude|xedoc) return 1 ;;
-        auto) command_exists codex ;;
     esac
 }
 
@@ -163,7 +163,6 @@ should_install_xedoc() {
     case "$TARGET_MODE" in
         all|xedoc) return 0 ;;
         claude|codex) return 1 ;;
-        auto) command_exists xedoc ;;
     esac
 }
 
@@ -736,9 +735,8 @@ run_for_selected_targets() {
         ran_plugin_target=true
     fi
 
-    # CLI tools are host-agnostic — install/remove them regardless of which
-    # host CLIs are present, but only fail loudly when the user explicitly
-    # asked for a plugin target and neither CLI was available.
+    # CLI tools are host-agnostic — install/remove them regardless of the
+    # selected host.
     if [ "$action" = "install" ]; then
         install_cli_tools "$source"
         install_project_context_runtime "$source"
@@ -746,7 +744,7 @@ run_for_selected_targets() {
         remove_cli_tools
     fi
 
-    if [ "$ran_plugin_target" = false ] && [ "$TARGET_MODE" != "auto" ]; then
+    if [ "$ran_plugin_target" = false ]; then
         error "none of the Claude Code, Codex, or Xedoc CLIs were found. Install one CLI or pass --claude/--codex/--xedoc explicitly."
     fi
 }
