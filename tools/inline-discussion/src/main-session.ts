@@ -85,12 +85,8 @@ class AppServerSessionBridge implements MainSessionBridge {
     try {
       await client.connect();
       await initializeAppServerClient(client);
-      await client.request('thread/resume', { threadId: this.options.threadId });
-      const read = await client.request('thread/read', {
-        threadId: this.options.threadId,
-        includeTurns: true,
-      });
-      const thread = recordField(read, 'thread');
+      const resumed = await client.request('thread/resume', { threadId: this.options.threadId });
+      const thread = recordField(resumed, 'thread');
       const activeTurn = arrayField(thread, 'turns')
         .map(asRecord)
         .find((turn) => turn?.['status'] === 'inProgress');

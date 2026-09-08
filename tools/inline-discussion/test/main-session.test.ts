@@ -5,7 +5,11 @@ import { createServer, type Socket } from 'node:net';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { appServerSocketPath, listAppServerSessions } from '../src/main-session.ts';
+import {
+  appServerSocketPath,
+  createAppServerSessionBridge,
+  listAppServerSessions,
+} from '../src/main-session.ts';
 
 test('appServerSocketPath isolates Xedoc from Codex environment variables', () => {
   assert.equal(
@@ -41,7 +45,35 @@ test('listAppServerSessions discovers sessions through the app-server websocket 
   }
 });
 
-function serveAppServer(socket: Socket): void {
+test('app-server bridge steers an active paginated thread from resume data', async () => {
+  const socketPath = join(mkdtempSync(join(tmpdir(), 'ind-app-server-')), 'control.sock');
+  const requests: Record<string, unknown>[] = [];
+  const server = createServer((socket) => serveAppServer(socket, (request) => requests.push(request)));
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(socketPath, () => resolve());
+  });
+
+  try {
+    await createAppServerSessionBridge({ threadId: 'thread-1', socketPath, timeoutMs: 1_000 })
+      .send('Handle the Apply signal.');
+
+    assert.deepEqual(requests.map((request) => request['method']), [
+      'initialize',
+      'thread/resume',
+      'turn/steer',
+    ]);
+    assert.deepEqual(requests.at(-1)?.['params'], {
+      threadId: 'thread-1',
+      input: [{ type: 'text', text: 'Handle the Apply signal.' }],
+      expectedTurnId: 'turn-1',
+    });
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+function serveAppServer(socket: Socket, onRequest: (request: Record<string, unknown>) => void = () => undefined): void {
   let buffer = Buffer.alloc(0);
   let upgraded = false;
   socket.on('data', (chunk: Buffer) => {
@@ -64,7 +96,7 @@ function serveAppServer(socket: Socket): void {
     while (upgraded) {
       const message = readClientFrame();
       if (!message) return;
-      handleRequest(message, socket);
+      handleRequest(message, socket, onRequest);
     }
   });
   socket.on('error', () => undefined);
@@ -92,10 +124,15 @@ function serveAppServer(socket: Socket): void {
   }
 }
 
-function handleRequest(message: Record<string, unknown>, socket: Socket): void {
+function handleRequest(
+  message: Record<string, unknown>,
+  socket: Socket,
+  onRequest: (request: Record<string, unknown>) => void,
+): void {
   const id = message['id'];
   const method = message['method'];
   if (typeof id !== 'number') return;
+  onRequest(message);
   if (method === 'initialize') return send(socket, { id, result: {} });
   if (method === 'thread/loaded/list') return send(socket, { id, result: { data: ['thread-1', 'thread-2'] } });
   if (method === 'thread/read') {
@@ -105,6 +142,18 @@ function handleRequest(message: Record<string, unknown>, socket: Socket): void {
       : { id: threadId, status: { type: 'active' }, canAcceptDirectInput: false };
     return send(socket, { id, result: { thread } });
   }
+  if (method === 'thread/resume') {
+    return send(socket, {
+      id,
+      result: {
+        thread: {
+          id: 'thread-1',
+          turns: [{ id: 'turn-1', status: 'inProgress' }],
+        },
+      },
+    });
+  }
+  if (method === 'turn/steer') return send(socket, { id, result: {} });
   send(socket, { id, error: { message: `unexpected method: ${String(method)}` } });
 }
 
