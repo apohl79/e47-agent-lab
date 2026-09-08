@@ -25,6 +25,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
+from lexical_retrieval import lexical_query_matches
+
 
 SCHEMA_VERSION = 4
 CONTEXT_DIR = Path("docs/context")
@@ -170,7 +172,7 @@ REMOVE_TARGETS = {
 }
 
 SearchSpec = tuple[str, str, str, str, tuple[str, ...]]
-SearchResult = tuple[int, str, str, str, str, str, tuple[str, ...]]
+SearchResult = tuple[int, float, str, str, str, str, str, tuple[str, ...]]
 
 
 @dataclass(frozen=True)
@@ -4416,25 +4418,40 @@ def context_search_results(
             applicability = record.get("applicability", data["default_applicability"])
             if not applicability_matches(applicability, active):
                 continue
-            haystack = "\n".join(
-                one_line(record.get(field)) for field in fields
-            ).casefold()
-            matched = tuple(query for query in queries if query in haystack)
+            label = one_line(record.get(label_key))
+            summary = one_line(record.get(summary_key))
+            haystack = "\n".join(one_line(record.get(field)) for field in fields)
+            matches = tuple(
+                (query, score)
+                for query in queries
+                for is_match, score in (
+                    lexical_query_matches(
+                        query,
+                        label=label,
+                        summary=summary,
+                        text=haystack,
+                    ),
+                )
+                if is_match
+            )
+            matched = tuple(query for query, _ in matches)
             if not matched:
                 continue
             results.append(
                 (
                     len(matched),
+                    sum(score for _, score in matches),
                     kind,
-                    one_line(record.get(label_key)),
+                    label,
                     str(canonical_source) if scoped_store else SEARCH_FILES[kind],
                     str(canonical_source),
-                    one_line(record.get(summary_key)),
+                    summary,
                     matched,
                 )
             )
     return sorted(
-        results, key=lambda result: (-result[0], result[1], result[2].casefold())
+        results,
+        key=lambda result: (-result[0], -result[1], result[2], result[3].casefold()),
     )
 
 
@@ -4479,7 +4496,9 @@ def search_context(args: argparse.Namespace) -> None:
                 untrusted_diagnostic_line(f"invalid scope context {path}", exc),
                 file=sys.stderr,
             )
-    local_results.sort(key=lambda result: (-result[0], result[1], result[2].casefold()))
+    local_results.sort(
+        key=lambda result: (-result[0], -result[1], result[2], result[3].casefold())
+    )
     local_lines = [
         " | ".join(
             (
@@ -4491,7 +4510,7 @@ def search_context(args: argparse.Namespace) -> None:
                 + safe_display_field(", ".join(matched), LOCAL_SUMMARY_OUTPUT_LIMIT),
             )
         )
-        for _, kind, label, path, _, summary, matched in local_results
+        for _, _, kind, label, path, _, summary, matched in local_results
     ]
     local_identities = {
         (
@@ -4501,7 +4520,7 @@ def search_context(args: argparse.Namespace) -> None:
             safe_display_field(kind, GLOBAL_KIND_OUTPUT_LIMIT).casefold(),
             safe_display_field(label, GLOBAL_LABEL_OUTPUT_LIMIT).casefold(),
         )
-        for _, kind, label, _, source, _, _ in local_results
+        for _, _, kind, label, _, source, _, _ in local_results
     }
     remaining_global: list[str] = []
     for line in global_lines or ():

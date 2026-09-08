@@ -146,6 +146,48 @@ def test_search_without_matches_reports_empty_result(tmp_path: Path) -> None:
     )
 
 
+def test_search_matches_abbreviation_and_morphology_in_local_fallback(
+    tmp_path: Path,
+) -> None:
+    assert run_context("init", repo=tmp_path).returncode == 0
+    assert (
+        run_context(
+            "add-pattern",
+            "--name",
+            "PR creation delegation workflow",
+            "--summary",
+            (
+                "Push the branch and dispatch open-target-pr.yml instead of "
+                "creating the pull request directly"
+            ),
+            "--applies-to",
+            ".github/workflows/open-target-pr.yml",
+            repo=tmp_path,
+        ).returncode
+        == 0
+    )
+
+    proc = run_context(
+        "search",
+        "--query",
+        "delegated PR creation",
+        "--limit",
+        "5",
+        repo=tmp_path,
+    )
+
+    assert (proc.returncode, proc.stdout, proc.stderr) == (
+        0,
+        (
+            "pattern | PR creation delegation workflow | "
+            "docs/context/architecture.md | Push the branch and dispatch "
+            "open-target-pr.yml instead of creating the pull request directly | "
+            "matched: delegated pr creation\n"
+        ),
+        "",
+    )
+
+
 @pytest.mark.parametrize(
     ("arguments", "error"),
     [

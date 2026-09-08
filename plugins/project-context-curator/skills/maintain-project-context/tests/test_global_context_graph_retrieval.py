@@ -412,6 +412,166 @@ def test_search_keeps_broader_scope_applicability_strict(tmp_path: Path) -> None
     assert tuple(item["id"] for item in results) == ("universal",)
 
 
+def test_search_ranks_abbreviation_and_morphology_match_above_local_semantic_hits(
+    tmp_path: Path,
+) -> None:
+    module = load_backend_module()
+    current = tmp_path / "current"
+    target = {
+        **hit(
+            "delegated-workflow",
+            "domain:cpl",
+            None,
+            "PR creation delegation workflow",
+            0.02,
+            ({"kind": "domain", "selector": "cpl"},),
+        ),
+        "summary": (
+            "Push the branch and dispatch the pull request workflow instead of "
+            "creating the PR directly."
+        ),
+    }
+    local_hits = tuple(
+        hit(
+            f"local-{index}",
+            current.name,
+            current,
+            f"Current repository result {index}",
+            0.04 - (index / 1000),
+            ({"kind": "project", "selector": str(current)},),
+        )
+        for index in range(10)
+    )
+
+    results = search(
+        module,
+        tmp_path,
+        "delegated PR creation",
+        current,
+        catalog(module, (node(current.name, current),), ()),
+        (*local_hits, target),
+        frozenset(
+            {
+                ("project", str(current)),
+                ("domain", "cpl"),
+            }
+        ),
+        limit=5,
+    )
+
+    assert tuple(item["id"] for item in results) == (
+        "delegated-workflow",
+        "local-0",
+        "local-1",
+        "local-2",
+        "local-3",
+    )
+
+
+def test_search_boosts_exact_identifier_path_from_record_text(tmp_path: Path) -> None:
+    module = load_backend_module()
+    current = tmp_path / "current"
+    target = {
+        **hit(
+            "workflow-path",
+            "domain:cpl",
+            None,
+            "Delegated repository automation",
+            0.02,
+            ({"kind": "domain", "selector": "cpl"},),
+        ),
+        "text": (
+            "Dispatch parloa/cpl-claude-recipes/.github/workflows/"
+            "open-target-pr.yml on main."
+        ),
+    }
+    local = hit(
+        "local",
+        current.name,
+        current,
+        "Local automation",
+        0.04,
+        ({"kind": "project", "selector": str(current)},),
+    )
+
+    results = search(
+        module,
+        tmp_path,
+        "open-target-pr.yml",
+        current,
+        catalog(module, (node(current.name, current),), ()),
+        (local, target),
+        frozenset(
+            {
+                ("project", str(current)),
+                ("domain", "cpl"),
+            }
+        ),
+        limit=2,
+    )
+
+    assert tuple(item["id"] for item in results) == ("workflow-path", "local")
+
+
+def test_search_does_not_admit_unrelated_project_from_one_weak_token(
+    tmp_path: Path,
+) -> None:
+    module = load_backend_module()
+    current = tmp_path / "current"
+    unrelated = tmp_path / "unrelated"
+    weak = hit(
+        "weak",
+        unrelated.name,
+        unrelated,
+        "Release workflow",
+        0.99,
+        ({"kind": "project", "selector": str(unrelated)},),
+    )
+
+    results = search(
+        module,
+        tmp_path,
+        "workflow",
+        current,
+        catalog(
+            module,
+            (node(current.name, current), node(unrelated.name, unrelated)),
+            (),
+        ),
+        (weak,),
+        frozenset({("project", str(current))}),
+    )
+
+    assert results == ()
+
+
+def test_search_excludes_inactive_scope_despite_exact_lexical_match(
+    tmp_path: Path,
+) -> None:
+    module = load_backend_module()
+    current = tmp_path / "current"
+    inactive = hit(
+        "inactive",
+        "domain:billing",
+        None,
+        "PR creation delegation workflow",
+        0.99,
+        ({"kind": "domain", "selector": "billing"},),
+    )
+
+    results = search(
+        module,
+        tmp_path,
+        "delegated PR creation",
+        current,
+        catalog(module, (node(current.name, current),), ()),
+        (inactive,),
+        frozenset({("project", str(current)), ("domain", "cpl")}),
+    )
+
+    assert results == ()
+
+
 def test_search_returns_strong_exact_label_from_unrelated_repository(
     tmp_path: Path,
 ) -> None:

@@ -24,6 +24,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterator, Sequence
 
+from lexical_retrieval import lexical_evidence
+
 
 DENSE_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 SPARSE_MODEL = "Qdrant/bm25"
@@ -93,18 +95,6 @@ RELATIONSHIP_PATTERNS = (
         re.compile(r"\b(consumes?|subscribes?|reads?|uses?)\b", re.IGNORECASE),
         0.85,
     ),
-)
-DISTINCTIVE_QUERY_TOKEN = re.compile(r"[\w-]{5,}", re.UNICODE)
-STRONG_QUERY_STOP_TOKENS = frozenset(
-    {
-        "about",
-        "behavior",
-        "context",
-        "explain",
-        "integration",
-        "project",
-        "repository",
-    }
 )
 SKIPPED_DIRECTORIES = frozenset(
     {".git", ".my", ".venv", "build", "dist", "node_modules", "target"}
@@ -1740,22 +1730,22 @@ def hit_is_retrievable(
 def strong_query_match(
     hit: dict[str, Any],
     query: str,
-    best_score: float,
 ) -> bool:
-    normalized_query = one_line(query).casefold()
-    label = one_line(hit.get("label")).casefold()
-    if len(label) >= 5 and label in normalized_query:
-        return True
-    score = float(hit.get("score", 0.0))
-    if best_score <= 0.0 or score < best_score * 0.9:
-        return False
-    tokens = frozenset(
-        token.casefold()
-        for token in DISTINCTIVE_QUERY_TOKEN.findall(normalized_query)
-        if token.casefold() not in STRONG_QUERY_STOP_TOKENS
+    evidence = lexical_evidence(
+        query,
+        label=one_line(hit.get("label")),
+        summary=one_line(hit.get("summary")),
+        text=one_line(hit.get("text")),
+        path=one_line(hit.get("source_path")),
     )
-    haystack = " ".join((label, one_line(hit.get("summary")).casefold()))
-    return any(token in haystack for token in tokens)
+    return evidence.query_terms >= 2 and (
+        evidence.exact_label
+        or evidence.exact_identifier
+        or (
+            evidence.matched_terms >= 2
+            and evidence.matched_terms / evidence.query_terms >= 0.6
+        )
+    )
 
 
 def merge_hits(
@@ -1806,7 +1796,6 @@ def rerank_hits(
     limit: int,
 ) -> tuple[dict[str, Any], ...]:
     projects_by_path = {project.project_path: project for project in projects}
-    normalized_query = one_line(query).casefold()
 
     def score(hit: dict[str, Any]) -> tuple[float, str, str]:
         value = float(hit.get("score", 0.0))
@@ -1819,8 +1808,13 @@ def rerank_hits(
         elif project is not None and project.reason == "related":
             value += (0.35 / project.distance) * project.confidence
         label = one_line(hit.get("label"))
-        if label and label.casefold() in normalized_query:
-            value += 0.5
+        value += lexical_evidence(
+            query,
+            label=label,
+            summary=one_line(hit.get("summary")),
+            text=one_line(hit.get("text")),
+            path=one_line(hit.get("source_path")),
+        ).score
         return (
             -value,
             one_line(hit.get("project")).casefold(),
@@ -1909,7 +1903,6 @@ def search_index(
         finally:
             index.close()
     hits = merge_hits(candidate_hits, global_hits)
-    best_score = max((float(hit.get("score", 0.0)) for hit in hits), default=0.0)
     active = active_applicability or frozenset(
         {("project", str(current_repo.expanduser().resolve()))}
     )
@@ -1923,7 +1916,7 @@ def search_index(
         project_path = hit_project_path(hit)
         if (
             not project_path
-            or not strong_query_match(hit, query, best_score)
+            or not strong_query_match(hit, query)
             or not hit_is_retrievable(hit, active, project_paths | {project_path})
         ):
             continue

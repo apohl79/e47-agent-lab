@@ -19,7 +19,8 @@ decisions while keeping private context private.
 - Typed applicability for project, domain, user, machine, and universal facts;
   user and machine facts remain private in XDG storage.
 - Session-start retrieval guidance, generated human-readable views, and
-  search across relevant project and configured shared context.
+  hybrid search across relevant project and configured shared context, with
+  deterministic abbreviation, morphology, and identifier reranking.
 - A context audit for stale, duplicated, divergent, dead-path, time-bound, and
   oversized records.
 - Explicit snapshot enrollment for optional cross-project retrieval. New

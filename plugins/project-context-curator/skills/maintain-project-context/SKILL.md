@@ -215,7 +215,9 @@ explicit workspace-wide queries admit all enrolled repositories, and strongly
 matched otherwise unrelated records are eligible individually. Non-project
 applicability remains conjunctive and strict: every domain, user, machine, or
 universal selector must be active. Ranking combines hybrid
-relevance, graph distance and confidence, and per-project quotas.
+relevance, deterministic lexical evidence (including abbreviations, light
+morphology, and identifiers), graph distance and confidence, and per-project
+quotas.
 
 `global-update` refreshes only enrolled project sources and Git/XDG scope stores; it
 never discovers or enrolls a new project.
