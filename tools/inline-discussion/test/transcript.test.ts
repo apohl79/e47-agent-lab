@@ -76,6 +76,59 @@ test('trimTranscript always keeps first user prompt and last assistant', () => {
   assert.match(text, /Here's my analysis/);
 });
 
+test('trimTranscript hard cap truncates oversized first user safely', () => {
+  const text = trimTranscript([
+    { type: 'user', text: `😀${'ordinary prose '.repeat(100)}` },
+    { type: 'assistant', text: 'done' },
+  ], { maxBytes: 200 });
+  assert.ok(Buffer.byteLength(text) <= 200);
+  assert.match(text, /USER:/);
+  assert.match(text, /…/);
+  assert.match(text, /ASSISTANT: done/);
+});
+
+test('trimTranscript never exceeds tiny UTF-8 budgets', () => {
+  const text = trimTranscript([{ type: 'user', text: '😀😀' }], { maxBytes: 2 });
+  assert.ok(Buffer.byteLength(text) <= 2);
+});
+
+test('trimTranscript honors zero and one byte caps with two entries', () => {
+  for (const maxBytes of [0, 1]) {
+    const text = trimTranscript([
+      { type: 'user', text: 'first' },
+      { type: 'assistant', text: 'last' },
+    ], { maxBytes });
+    assert.ok(Buffer.byteLength(text) <= maxBytes);
+  }
+});
+
+test('trimTranscript hard cap truncates oversized last assistant safely', () => {
+  const text = trimTranscript([
+    { type: 'user', text: 'start' },
+    { type: 'assistant', text: `結果${'ordinary prose '.repeat(100)}` },
+  ], { maxBytes: 200 });
+  assert.ok(Buffer.byteLength(text) <= 200);
+  assert.match(text, /USER: start/);
+  assert.match(text, /ASSISTANT:/);
+  assert.match(text, /…/);
+});
+
+test('trimTranscript accounts for separators and redaction in combined cap', () => {
+  const input = [
+    { type: 'user', text: `secret sk-ant-SECRETKEY0123456789abcdef ${'u'.repeat(500)}` },
+    { type: 'tool_result', kind: 'x', text: 'middle' },
+    { type: 'assistant', text: `answer ${'🙂'.repeat(500)}` },
+  ];
+  const text = trimTranscript(input, { maxBytes: 200 });
+  assert.equal(text, trimTranscript(input, { maxBytes: 200 }));
+  assert.ok(Buffer.byteLength(text) <= 200);
+  assert.match(text, /USER:/);
+  assert.match(text, /ASSISTANT:/);
+  assert.match(text, /…/);
+  assert.match(text, /\[secret redacted:/);
+  assert.doesNotMatch(text, /SECRETKEY/);
+});
+
 import { redactSecrets } from '../src/transcript.ts';
 
 test('redactSecrets replaces anthropic-style keys', () => {

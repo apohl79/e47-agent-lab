@@ -78,7 +78,8 @@ export function trimTranscript(entries: JsonlEntry[], opts: TrimOptions = {}): s
 
   const rendered: string[] = entries.map((entry, idx) => renderEntry(entry, idx, elideBytes));
 
-  let total = rendered.reduce((n, s) => n + Buffer.byteLength(s), 0);
+  const separatorBytes = (count: number) => Math.max(0, count - 1) * Buffer.byteLength('\n\n');
+  let total = rendered.reduce((n, s) => n + Buffer.byteLength(s), 0) + separatorBytes(rendered.length);
   if (total <= maxBytes) return rendered.join('\n\n');
 
   // Drop tool results first (oldest), then oldest text messages.
@@ -89,7 +90,7 @@ export function trimTranscript(entries: JsonlEntry[], opts: TrimOptions = {}): s
   for (const c of dropCandidates) {
     if (total <= maxBytes) break;
     drop.add(c.i);
-    total -= Buffer.byteLength(rendered[c.i]!);
+    total -= Buffer.byteLength(rendered[c.i]!) + (rendered.length > 1 ? Buffer.byteLength('\n\n') : 0);
   }
   if (total > maxBytes) {
     const textCandidates = entries
@@ -102,10 +103,48 @@ export function trimTranscript(entries: JsonlEntry[], opts: TrimOptions = {}): s
     for (const c of textCandidates) {
       if (total <= maxBytes) break;
       drop.add(c.i);
-      total -= Buffer.byteLength(rendered[c.i]!);
+      total -= Buffer.byteLength(rendered[c.i]!) + (rendered.length > 1 ? Buffer.byteLength('\n\n') : 0);
     }
   }
-  return rendered.filter((_, i) => !drop.has(i)).join('\n\n');
+  const kept = rendered.filter((_, i) => !drop.has(i));
+  if (kept.length === 0) return '';
+  if (kept.reduce((n, s) => n + Buffer.byteLength(s), 0) + separatorBytes(kept.length) <= maxBytes) {
+    return kept.join('\n\n');
+  }
+
+  // The required first/last messages may themselves exceed the cap. Keep both
+  // labels and truncate their redacted text on UTF-8 boundaries.
+  const keptPairs = rendered
+    .map((value, index) => ({ value, index }))
+    .filter(({ index }) => !drop.has(index));
+  const essential = keptPairs
+    .filter(({ index }) => index === firstUserIdx || index === lastAssistantIdx)
+    .map(({ value }) => value);
+  const source = essential.length > 0 ? essential : kept;
+  const separator = separatorBytes(source.length);
+  if (maxBytes < separator) return source.length > 0 ? truncateUtf8(source[0]!, maxBytes) : '';
+  const available = Math.max(0, maxBytes - separator);
+  if (source.length === 1) return truncateUtf8(source[0]!, available);
+  const firstBudget = Math.ceil(available / 2);
+  const first = truncateUtf8(source[0]!, firstBudget);
+  const second = truncateUtf8(source[1]!, Math.max(0, available - Buffer.byteLength(first)));
+  return [first, second].join('\n\n');
+}
+
+function truncateUtf8(value: string, maxBytes: number): string {
+  if (Buffer.byteLength(value) <= maxBytes) return value;
+  if (maxBytes <= 0) return '';
+  const marker = '…';
+  const markerBytes = Buffer.byteLength(marker);
+  const bytes = Buffer.from(value);
+  if (maxBytes <= markerBytes) {
+    let end = Math.min(bytes.length, maxBytes);
+    while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end -= 1;
+    return bytes.subarray(0, end).toString('utf8');
+  }
+  let end = Math.min(bytes.length, maxBytes - markerBytes);
+  while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end -= 1;
+  return `${bytes.subarray(0, end).toString('utf8')}${marker}`;
 }
 
 function renderEntry(entry: JsonlEntry, _i: number, elideBytes: number): string {
