@@ -49,8 +49,20 @@ test('image viewer opens from document images and supports zoom, pan, reset, and
   dispatch(document, zoomIn, 'click');
   assert.equal(zoomLabel.textContent, '125%');
 
+  const viewport = backdrop.querySelector('.image-viewer-viewport');
+  assert.ok(viewport);
   const viewerImage = backdrop.querySelector<HTMLImageElement>('.image-viewer-image');
   assert.ok(viewerImage);
+  dispatch(document, viewport, 'wheel', { deltaY: -1 });
+  dispatch(document, viewport, 'wheel', { deltaY: -1 });
+  assert.equal(zoomLabel.textContent, '126%');
+  dispatch(document, viewport, 'wheel', { deltaY: -1, deltaMode: 1 });
+  assert.equal(zoomLabel.textContent, '130%');
+
+  const reset = backdrop.querySelector<HTMLButtonElement>('[aria-label="Reset image zoom and position"]');
+  assert.ok(reset);
+  dispatch(document, reset, 'click');
+  dispatch(document, zoomIn, 'click');
   dispatch(document, viewerImage, 'pointerdown', { clientX: 10, clientY: 20 });
   dispatch(document, viewerImage, 'pointermove', { clientX: 30, clientY: 35 });
   assert.equal(viewerImage.classList.contains('is-dragging'), true);
@@ -58,8 +70,6 @@ test('image viewer opens from document images and supports zoom, pan, reset, and
   dispatch(document, viewerImage, 'pointerup');
   assert.equal(viewerImage.classList.contains('is-dragging'), false);
 
-  const reset = backdrop.querySelector<HTMLButtonElement>('[aria-label="Reset image zoom and position"]');
-  assert.ok(reset);
   dispatch(document, reset, 'click');
   assert.equal(zoomLabel.textContent, '100%');
   assert.equal(viewerImage.style.transform, 'translate3d(0px, 0px, 0) scale(1)');

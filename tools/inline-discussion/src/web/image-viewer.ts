@@ -3,6 +3,9 @@ import { svgToDataUrl } from './svg-source.ts';
 const MIN_ZOOM = 0.5;
 const MAX_ZOOM = 5;
 const ZOOM_STEP = 0.25;
+const WHEEL_ZOOM_SENSITIVITY = 0.002;
+const WHEEL_LINE_HEIGHT = 16;
+const WHEEL_PAGE_HEIGHT = 800;
 
 export type ImageViewerController = Readonly<{
   close: () => void;
@@ -36,7 +39,7 @@ export function installImageViewer(root: HTMLElement): ImageViewerController {
   };
 
   const setZoom = (next: number): void => {
-    zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, Number(next.toFixed(2))));
+    zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, next));
     if (zoom <= 1) {
       panX = 0;
       panY = 0;
@@ -121,7 +124,12 @@ export function installImageViewer(root: HTMLElement): ImageViewerController {
     viewport.className = 'image-viewer-viewport';
     viewport.addEventListener('wheel', (event) => {
       event.preventDefault();
-      setZoom(zoom + (event.deltaY < 0 ? ZOOM_STEP : -ZOOM_STEP));
+      const delta = event.deltaMode === 1
+        ? event.deltaY * WHEEL_LINE_HEIGHT
+        : event.deltaMode === 2
+          ? event.deltaY * Math.max(viewport.clientHeight, WHEEL_PAGE_HEIGHT)
+          : event.deltaY;
+      setZoom(zoom * Math.exp(-delta * WHEEL_ZOOM_SENSITIVITY));
     }, { passive: false });
 
     viewerImage = doc.createElement('img');
