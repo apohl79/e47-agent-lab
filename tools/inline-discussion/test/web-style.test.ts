@@ -86,3 +86,14 @@ test('note header keeps actions in a compact row above the anchor quote', () => 
     quoteDisplay: 'block',
   });
 });
+
+test('image viewer uses a readable light surface and preserves its dark treatment', () => {
+  assert.match(stylesheet, /\.image-viewer-backdrop\s*\{[^}]*background: color-mix\(in srgb, var\(--bg-elev\) 94%, transparent\)/);
+  assert.match(stylesheet, /\.image-viewer-header\s*\{[^}]*color: var\(--fg\)/);
+  assert.match(stylesheet, /\.image-viewer-btn\s*\{[^}]*color: var\(--fg\)[\s\S]*?background: var\(--bg-elev\)[\s\S]*?border: 1px solid var\(--border\)/);
+  assert.match(stylesheet, /:root\[data-theme="dark"\] \.image-viewer-backdrop\s*\{[^}]*background: rgba\(0, 0, 0, 0\.88\)/);
+  assert.match(
+    stylesheet,
+    /:root\[data-theme="dark"\] \.image-viewer-header,\s*:root\[data-theme="dark"\] \.image-viewer-btn,\s*:root\[data-theme="dark"\] \.image-viewer-zoom-label\s*\{[^}]*color: #fff/,
+  );
+});
