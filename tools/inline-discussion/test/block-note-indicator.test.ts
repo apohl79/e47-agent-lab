@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
-import { updateBlockNoteIndicator } from '../src/web/block-note-indicator.ts';
+import { updateBlockNoteIndicator, updateWholeBlockNoteIndicators } from '../src/web/block-note-indicator.ts';
 
 function setupDom(): JSDOM {
   const dom = new JSDOM('<!doctype html><html><body></body></html>', {
@@ -32,5 +32,25 @@ test('whole-block note indicator stays visible and reveals its notes', () => {
   assert.equal(indicator.getAttribute('aria-label'), 'Show 2 notes for this block');
   updateBlockNoteIndicator(anchor, 0, () => undefined);
   assert.equal(anchor.querySelector('.block-note-indicator'), null);
+  dom.window.close();
+});
+
+test('whole-block notes leave Mermaid source untouched until it renders', () => {
+  const dom = setupDom();
+  const { document } = dom.window;
+  const root = document.createElement('main');
+  root.innerHTML = '<pre class="mermaid" data-block-id="diagram">flowchart LR\n  A --&gt; B</pre>';
+  document.body.appendChild(root);
+  const diagram = root.querySelector<HTMLElement>('.mermaid');
+  assert.ok(diagram);
+
+  updateWholeBlockNoteIndicators(root, new Map([['diagram', 1]]), () => undefined);
+  assert.equal(diagram.textContent, 'flowchart LR\n  A --> B');
+  assert.equal(diagram.querySelector('.block-note-indicator'), null);
+
+  diagram.setAttribute('data-processed', 'true');
+  diagram.innerHTML = '<svg></svg>';
+  updateWholeBlockNoteIndicators(root, new Map([['diagram', 1]]), () => undefined);
+  assert.ok(diagram.querySelector('.block-note-indicator'));
   dom.window.close();
 });

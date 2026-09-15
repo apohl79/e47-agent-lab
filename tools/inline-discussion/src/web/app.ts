@@ -24,7 +24,7 @@ import { installInDocumentNavigation, scrollToFragment } from './navigation.ts';
 import { calculateOverlayPlacement } from './overlay-position.ts';
 import { quoteOccurrence } from './quote-position.ts';
 import { appendQuoteToTextarea } from './quote-insertion.ts';
-import { updateBlockNoteIndicator } from './block-note-indicator.ts';
+import { updateWholeBlockNoteIndicators } from './block-note-indicator.ts';
 import { isArchivedThreadDuplicate } from './thread-dedup.ts';
 import { findThreadDetails } from './thread-details.ts';
 import { installImageViewer } from './image-viewer.ts';
@@ -32,6 +32,7 @@ import { blockPlusHost } from './block-plus-host.ts';
 import { bindTaskCheckboxes, type TaskCheckboxChange } from './task-checkboxes.ts';
 import {
   awaitsMermaidRender,
+  canAnnotateBlock,
   captureDiagramSource,
   mermaidThemeFor,
   pendingDiagrams,
@@ -94,6 +95,7 @@ function scheduleMermaidRender(): void {
         console.warn('Failed to render Mermaid diagram', error);
       } finally {
         installBlockPluses();
+        applyQuoteHighlights();
       }
     });
   });
@@ -990,7 +992,7 @@ function applyQuoteHighlights(): void {
     const block = document.querySelector<HTMLElement>(
       `[data-block-id="${t.anchor.blockId}"]`,
     );
-    if (!block) continue;
+    if (!block || !canAnnotateBlock(block)) continue;
     highlightNthOccurrence(block, t.anchor.quote, t.anchor.occurrence ?? 1, { kind: t.kind, threadId: t.id });
   }
   for (const h of state.highlights.values()) {
@@ -998,18 +1000,10 @@ function applyQuoteHighlights(): void {
     const block = document.querySelector<HTMLElement>(
       `[data-block-id="${h.anchor.blockId}"]`,
     );
-    if (!block) continue;
+    if (!block || !canAnnotateBlock(block)) continue;
     highlightNthOccurrence(block, h.anchor.quote, h.anchor.occurrence ?? 1, { kind: 'highlight', highlightId: h.id });
   }
-  for (const block of document.querySelectorAll<HTMLElement>('[data-block-id]')) {
-    const blockId = block.dataset.blockId;
-    if (!blockId || blockNoteCounts.has(blockId)) continue;
-    updateBlockNoteIndicator(block, 0, () => undefined);
-  }
-  for (const [blockId, count] of blockNoteCounts) {
-    const block = document.querySelector<HTMLElement>(`[data-block-id="${blockId}"]`);
-    if (block) updateBlockNoteIndicator(block, count, () => revealNoteOverlaysForBlock(blockId));
-  }
+  updateWholeBlockNoteIndicators(document, blockNoteCounts, revealNoteOverlaysForBlock);
   for (const card of document.querySelectorAll<HTMLElement>('.note-overlay')) {
     const blockId = card.dataset.noteAnchorBlockId;
     const anchor = blockId ? document.querySelector<HTMLElement>(`[data-block-id="${blockId}"]`) : null;

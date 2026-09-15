@@ -18,6 +18,10 @@ export function awaitsMermaidRender(element: HTMLElement): boolean {
   return element.classList.contains('mermaid') && !element.hasAttribute('data-processed');
 }
 
+export function canAnnotateBlock(element: HTMLElement): boolean {
+  return !awaitsMermaidRender(element);
+}
+
 export function renderedDiagrams(root: ParentNode): HTMLElement[] {
   return [...root.querySelectorAll<HTMLElement>('.mermaid[data-mermaid-source]')];
 }

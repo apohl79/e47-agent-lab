@@ -1,3 +1,5 @@
+import { canAnnotateBlock } from './mermaid-diagrams.ts';
+
 export function updateBlockNoteIndicator(
   anchor: HTMLElement,
   noteCount: number,
@@ -22,4 +24,23 @@ export function updateBlockNoteIndicator(
   };
   button.onfocus = reveal;
   if (!indicator) anchor.appendChild(button);
+}
+
+export function updateWholeBlockNoteIndicators(
+  root: ParentNode,
+  blockNoteCounts: ReadonlyMap<string, number>,
+  reveal: (blockId: string) => void,
+): void {
+  for (const block of root.querySelectorAll<HTMLElement>('[data-block-id]')) {
+    if (!canAnnotateBlock(block)) continue;
+    const blockId = block.dataset.blockId;
+    if (!blockId || blockNoteCounts.has(blockId)) continue;
+    updateBlockNoteIndicator(block, 0, () => undefined);
+  }
+  for (const [blockId, count] of blockNoteCounts) {
+    const block = root.querySelector<HTMLElement>(`[data-block-id="${blockId}"]`);
+    if (block && canAnnotateBlock(block)) {
+      updateBlockNoteIndicator(block, count, () => reveal(blockId));
+    }
+  }
 }

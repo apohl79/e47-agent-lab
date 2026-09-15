@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import {
   awaitsMermaidRender,
+  canAnnotateBlock,
   captureDiagramSource,
   mermaidThemeFor,
   pendingDiagrams,
@@ -76,4 +77,7 @@ test('unrendered diagrams are shielded from injected block UI', () => {
   assert.equal(awaitsMermaidRender(unrendered), true);
   assert.equal(awaitsMermaidRender(rendered), false);
   assert.equal(awaitsMermaidRender(paragraph), false);
+  assert.equal(canAnnotateBlock(unrendered), false);
+  assert.equal(canAnnotateBlock(rendered), true);
+  assert.equal(canAnnotateBlock(paragraph), true);
 });
