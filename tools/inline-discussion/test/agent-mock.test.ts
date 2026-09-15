@@ -317,7 +317,7 @@ rl.on('line', (line) => {
   if (msg.method === 'turn/start') {
     if (msg.params.approvalPolicy !== 'never') return fail(msg.id, 'turn approval policy missing');
     if (msg.params.sandboxPolicy?.type !== 'readOnly') return fail(msg.id, 'read-only turn sandbox missing');
-    if (msg.params.sandboxPolicy?.networkAccess !== false) return fail(msg.id, 'network access must be disabled');
+    if (msg.params.sandboxPolicy?.networkAccess !== true) return fail(msg.id, 'network access must be enabled');
     turnSeq += 1;
     const turnId = \`turn-\${turnSeq}\`;
     const text = msg.params.input?.[0]?.text ?? '';

@@ -650,6 +650,7 @@ button.primary:hover {
 .block-plus,
 .block-copy {
   --block-plus-hide-delay: 2s;
+  --block-plus-show-delay: 300ms;
   position: absolute;
   right: -44px;
   top: 2px;
@@ -697,7 +698,7 @@ button.primary:hover {
   opacity: 1;
   visibility: visible;
   pointer-events: auto;
-  transition-delay: 0s;
+  transition-delay: var(--block-plus-show-delay);
 }
 
 .block-plus:hover,
@@ -713,13 +714,23 @@ button.primary:hover {
 
 .block-copy { top: 38px; }
 
+[data-block-id]:has(> .block-note-indicator) > .block-plus,
+.block-shell:has(.block-note-indicator) > .block-plus {
+  top: 38px;
+}
+
+[data-block-id]:has(> .block-note-indicator) > .block-copy,
+.block-shell:has(.block-note-indicator) > .block-copy {
+  top: 74px;
+}
+
 /* Persistent marker for live notes anchored to the whole block. Unlike the
    hover-only thread button, this remains visible so an unquoted note is
    discoverable without moving the pointer over the block. */
 .block-note-indicator {
   position: absolute;
   right: -44px;
-  top: 74px;
+  top: 2px;
   width: 30px;
   height: 30px;
   border-radius: 999px;

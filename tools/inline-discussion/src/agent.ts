@@ -302,7 +302,7 @@ class CodexAppServerClient {
         threadId,
         input: [{ type: 'text', text: input, text_elements: [] }],
         approvalPolicy: 'never',
-        sandboxPolicy: { type: 'readOnly', networkAccess: false },
+        sandboxPolicy: { type: 'readOnly', networkAccess: true },
         cwd: this.opts.cwd,
         ...(this.inferenceSettings ? {
           model: this.inferenceSettings.model,
