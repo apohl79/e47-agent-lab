@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import hashlib
 import json
 import os
 import subprocess
@@ -18,6 +19,8 @@ CONTEXT_FILE = Path("docs/context/context.json")
 CONTEXT_INDEX = Path("docs/context/index.md")
 IGNORE_MARKER = Path(".no-project-context")
 DISABLED_ENV = "PROJECT_CONTEXT_CURATOR_DISABLED"
+REMINDER_INTERVAL_ENV = "PROJECT_CONTEXT_CURATOR_REMINDER_TURNS"
+DEFAULT_REMINDER_INTERVAL = 4
 
 
 def read_payload() -> dict[str, Any]:
@@ -307,11 +310,113 @@ ADMISSION_GATE = (
 )
 
 
+def installed_host() -> str | None:
+    candidates = (
+        Path(__file__).resolve(),
+        *(
+            Path(value).expanduser().resolve()
+            for name in (
+                "PLUGIN_ROOT",
+                "PLUGIN_DATA",
+                "CLAUDE_PLUGIN_ROOT",
+                "CLAUDE_PLUGIN_DATA",
+                "XEDOC_PLUGIN_ROOT",
+                "XEDOC_PLUGIN_DATA",
+            )
+            if (value := os.environ.get(name))
+        ),
+    )
+    for host in ("codex", "xedoc", "claude"):
+        marker = f"{os.sep}.{host}{os.sep}"
+        if any(marker in f"{candidate}{os.sep}" for candidate in candidates):
+            return host
+    return None
+
+
 def admission_gate_lines() -> tuple[str, ...]:
-    # Codex injects the gate through the plugin manifest context slot; only Claude Code needs it here.
-    if os.environ.get("PLUGIN_ROOT"):
+    # Xedoc injects the gate through context.thread. Codex does not support
+    # that manifest field, and Claude Code has always received the gate here.
+    if installed_host() == "xedoc":
         return ()
     return (ADMISSION_GATE,)
+
+
+REMINDER = (
+    "Project Context Curator reminder: for a new project-specific topic, read "
+    "docs/context/index.md and search with 1–3 distinctive terms before making "
+    "project-specific claims, plans, reviews, or edits; treat generic or incomplete "
+    "hits as insufficient. Capture only durable, reusable knowledge not readily "
+    "recoverable from code, tests, or docs; search before add-*, consolidate existing "
+    "records, and defer active implementation behavior until verified."
+)
+
+
+def reminder_interval() -> int:
+    try:
+        configured = int(
+            os.environ.get(REMINDER_INTERVAL_ENV, str(DEFAULT_REMINDER_INTERVAL))
+        )
+    except ValueError:
+        return DEFAULT_REMINDER_INTERVAL
+    return configured if configured > 0 else DEFAULT_REMINDER_INTERVAL
+
+
+def reminder_state_path(session_id: str) -> Path:
+    cache_root = Path(
+        os.environ.get(
+            "PROJECT_CONTEXT_CURATOR_CACHE_DIR",
+            Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
+            / "project-context-curator",
+        )
+    ).expanduser()
+    session_key = hashlib.sha256(session_id.encode("utf-8")).hexdigest()
+    return cache_root / "hook-reminders" / f"{session_key}.json"
+
+
+def reminder_due(payload: dict[str, Any]) -> bool:
+    host = installed_host()
+    if host not in {"codex", "claude"} or payload.get("agent_id"):
+        return False
+
+    session_id = str(payload.get("session_id") or "").strip()
+    turn_id = str(payload.get("turn_id") or "").strip()
+    if not session_id or (host == "codex" and not turn_id):
+        return False
+
+    state_path = reminder_state_path(session_id)
+    turn_key = hashlib.sha256(turn_id.encode("utf-8")).hexdigest() if turn_id else None
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        state = {}
+
+    turns = state.get("turns")
+    if not isinstance(turns, dict):
+        turns = {}
+    if turn_key is not None and turn_key in turns:
+        return bool(turns[turn_key])
+
+    try:
+        count = int(state.get("count", 0)) + 1
+    except (TypeError, ValueError):
+        count = 1
+    due = count % reminder_interval() == 0
+    if turn_key is not None:
+        turns[turn_key] = due
+    next_state = {"count": count, "turns": turns}
+    try:
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = state_path.with_name(f"{state_path.name}.{os.getpid()}.tmp")
+        temporary.write_text(json.dumps(next_state), encoding="utf-8")
+        os.replace(temporary, state_path)
+    except OSError:
+        return False
+    return due
+
+
+def user_prompt_submit(payload: dict[str, Any]) -> None:
+    if reminder_due(payload):
+        emit("UserPromptSubmit", REMINDER)
 
 
 def session_start(payload: dict[str, Any]) -> None:
@@ -468,12 +573,16 @@ def main(argv: list[str]) -> int:
     try:
         if mode == "session-start":
             session_start(payload)
+        elif mode == "user-prompt-submit":
+            user_prompt_submit(payload)
         else:
             event = str(
                 payload.get("hook_event_name") or payload.get("hookEventName") or ""
             )
             if event == "SessionStart":
                 session_start(payload)
+            elif event == "UserPromptSubmit":
+                user_prompt_submit(payload)
         return 0
     except Exception:
         log_exception()

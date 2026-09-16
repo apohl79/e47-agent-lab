@@ -49,10 +49,13 @@ avoid turning a convenience index into an unreviewed data-sharing mechanism.
 
 ## Xedoc and Codex compatibility
 
-Xedoc and the E47 Codex fork support the `context.thread` extension, which
-inserts the curator's durable-knowledge guidance as a fixed context block for
-each active thread. Claude Code receives the normal skills and hooks without
-that persistent thread-level block.
+Xedoc supports the `context.thread` extension, which inserts the curator's
+durable-knowledge guidance as a fixed context block for each active thread.
+Codex does not support that manifest field, so its SessionStart hook provides
+the complete retrieval and capture policy. Codex and Claude Code register a
+UserPromptSubmit hook that reinforces the essentials every fourth top-level
+user turn. Xedoc selects a SessionStart-only hook file alongside its persistent
+thread context and does not register the periodic reminder.
 
 ## Knowledge graph
 

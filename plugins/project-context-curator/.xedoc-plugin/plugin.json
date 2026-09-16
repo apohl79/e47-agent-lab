@@ -4,6 +4,7 @@
   "author": {
     "name": "Local developer"
   },
+  "hooks": "./hooks/xedoc-hooks.json",
   "context": {
     "thread": [
       {
@@ -33,5 +34,5 @@
     ],
     "defaultPrompt": "Maintain project context while working in this repository."
   },
-  "version": "5.7.1"
+  "version": "5.7.2"
 }

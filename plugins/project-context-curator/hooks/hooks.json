@@ -14,6 +14,21 @@
           }
         ]
       }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "description": "Reinforce project-context retrieval and capture in longer Codex and Claude sessions",
+            "command": "sh -c 'test \"${PROJECT_CONTEXT_CURATOR_DISABLED:-0}\" = \"1\" || exec python3 \"${CLAUDE_PLUGIN_ROOT:-.}/hooks/project-context-hook.py\" user-prompt-submit'",
+            "async": false,
+            "timeout": 3,
+            "statusMessage": "Checking project context reminder"
+          }
+        ]
+      }
     ]
   }
 }
