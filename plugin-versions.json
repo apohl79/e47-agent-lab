@@ -34,7 +34,7 @@
         "xedoc"
       ]
     },
-    "signal": {
+    "matrix": {
       "version": "0.1.0",
       "hosts": [
         "xedoc"

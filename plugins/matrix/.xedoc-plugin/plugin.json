@@ -1,0 +1,44 @@
+{
+  "name": "matrix",
+  "version": "0.1.0",
+  "description": "Connect enabled Xedoc sessions to private Matrix rooms used from Element.",
+  "author": {
+    "name": "apohl79"
+  },
+  "homepage": "https://github.com/apohl79/e47-agent-lab",
+  "repository": "https://github.com/apohl79/e47-agent-lab",
+  "keywords": [
+    "matrix",
+    "element",
+    "xedoc",
+    "session"
+  ],
+  "extensions": [
+    {
+      "id": "matrix",
+      "entrypoint": "./extensions/matrix.py",
+      "commands": [
+        {
+          "name": "matrix",
+          "description": "Show the Matrix bridge status for this session."
+        }
+      ],
+      "requestedCapabilities": [
+        "session.observe",
+        "userInput.send",
+        "prompt.requestUserInput.respond"
+      ]
+    }
+  ],
+  "interface": {
+    "displayName": "Matrix (Element)",
+    "shortDescription": "Connect Xedoc sessions to Matrix.",
+    "longDescription": "Matrix creates one private room for each approved Xedoc root session, forwards agent responses, and accepts Element messages and request_user_input answers.",
+    "developerName": "apohl79",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": "Connect this Xedoc session to Matrix."
+  }
+}

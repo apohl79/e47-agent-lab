@@ -58,7 +58,9 @@ run_installer
 assert_logged "xedoc plugin add reviewers@e47"
 assert_logged "xedoc plugin add inline-discussion@e47"
 assert_logged "xedoc plugin add project-context-curator@e47"
-assert_logged "xedoc plugin add signal@e47"
+assert_logged "xedoc plugin add matrix@e47"
+assert_logged "xedoc plugin remove signal@e47"
+assert_logged "xedoc plugin remove matrix@e47"
 assert_host_not_logged claude
 assert_host_not_logged codex
 

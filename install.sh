@@ -28,7 +28,7 @@ XEDOC_PLUGIN_REGISTRY=(
     "reviewers|PR finalization and reviewer-team workflows"
     "inline-discussion|Inline-discussion browser UI"
     "project-context-curator|Durable repository domain context"
-    "signal|Signal bridge for approved Xedoc sessions"
+    "matrix|Matrix bridge for approved Xedoc sessions"
 )
 
 CLAUDE_PLUGIN_REGISTRY=(
@@ -45,6 +45,7 @@ CLEANUP_PLUGIN_REGISTRY=(
     "inline-discussion|Inline-discussion browser UI"
     "project-context-curator|Durable repository domain context"
     "signal|Signal bridge for approved Xedoc sessions"
+    "matrix|Matrix bridge for approved Xedoc sessions"
     "my|Legacy my-coding plugin"
 )
 
@@ -357,7 +358,7 @@ remove_xedoc_plugins() {
     info "Removing existing Xedoc plugins..."
     local entry plugin_name marketplace_name
     for marketplace_name in "${ALL_MARKETPLACE_NAMES[@]}"; do
-        for entry in "${XEDOC_PLUGIN_REGISTRY[@]}"; do
+        for entry in "${CLEANUP_PLUGIN_REGISTRY[@]}"; do
             IFS="|" read -r plugin_name _description <<< "$entry"
             xedoc plugin remove "${plugin_name}@${marketplace_name}" >/dev/null 2>&1 || true
         done
