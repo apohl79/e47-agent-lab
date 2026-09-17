@@ -33,6 +33,12 @@
         "claude",
         "xedoc"
       ]
+    },
+    "signal": {
+      "version": "0.1.0",
+      "hosts": [
+        "xedoc"
+      ]
     }
   }
 }

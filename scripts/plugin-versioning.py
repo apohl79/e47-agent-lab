@@ -166,10 +166,20 @@ def collect_errors(root: Path, registry: dict[str, Any], check_versions: bool) -
         for name in sorted(expected - actual):
             errors.append(f"{MARKETPLACE_MANIFESTS[host]} is missing plugin {name!r}")
         # Codex and Xedoc share the .agents marketplace manifest. A plugin
-        # may be listed there for Codex before it gains an Xedoc manifest.
-        if host != "xedoc":
-            for name in sorted(actual - expected):
-                errors.append(f"{MARKETPLACE_MANIFESTS[host]} lists unversioned plugin {name!r}")
+        # may be listed there for Xedoc without also shipping a Codex manifest.
+        if host == "codex":
+            shared_xedoc_only = {
+                name for name, plugin in plugins.items() if "xedoc" in plugin["hosts"]
+            }
+            unexpected = actual - expected - shared_xedoc_only
+        elif host != "xedoc":
+            unexpected = actual - expected
+        else:
+            unexpected = set()
+        for name in sorted(unexpected):
+            errors.append(
+                f"{MARKETPLACE_MANIFESTS[host]} lists unversioned plugin {name!r}"
+            )
 
     for plugin_name, plugin in plugins.items():
         expected_hosts = set(plugin["hosts"])

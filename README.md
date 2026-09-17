@@ -10,6 +10,7 @@ Plugin marketplace for Codex, Claude Code, and Xedoc.
 | [Auto Compaction](plugins/auto-compaction/README.md) | `0.1.0` | Claude Code auto-compaction gate with setup skill and checkpoint hooks. | Claude Code |
 | [Inline Discussion](plugins/inline-discussion/README.md) | `2.1.1` | Keep document editing, focused AI side threads, and main-agent updates in one view. | Xedoc, Codex, Claude Code |
 | [Project Context Curator](plugins/project-context-curator/README.md) | `5.7.2` | Durable project knowledge with audit and graph-assisted retrieval. | Xedoc, Codex, Claude Code |
+| [Signal](plugins/signal/README.md) | `0.1.0` | Connect approved Xedoc sessions to Signal groups with bidirectional messaging and prompt answers. | Xedoc |
 
 ## Install
 
