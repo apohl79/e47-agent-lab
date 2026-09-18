@@ -108,6 +108,49 @@ def test_setup_response_persists_private_config(
     assert stat.S_IMODE(matrix.CONFIG_PATH.stat().st_mode) == 0o600
 
 
+def test_setup_open_skips_form_for_complete_config(
+    isolated_config: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    matrix.write_private_json(
+        matrix.CONFIG_PATH,
+        matrix.normalize_config(valid_values()),
+    )
+    request = extension_request("extension.setup.open", {})
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(request)))
+
+    assert matrix.run_one_shot() == 0
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["result"] == {
+        "kind": "complete",
+        "summary": "Matrix bridge is already configured.",
+    }
+
+
+def test_setup_command_reopens_settings(
+    isolated_config: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    matrix.write_private_json(
+        matrix.CONFIG_PATH,
+        matrix.normalize_config(valid_values()),
+    )
+    request = extension_request(
+        "extension.command.invoke",
+        {"arguments": ["setup"]},
+    )
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(request)))
+
+    assert matrix.run_one_shot() == 0
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["result"]["kind"] == "interaction"
+    assert output["result"]["interaction"]["surface"]["id"] == "matrix-settings"
+
+
 def test_normalize_config_preserves_saved_token_and_rejects_unsafe_values() -> None:
     config = matrix.normalize_config(
         valid_values(**{"access-token": ""}),

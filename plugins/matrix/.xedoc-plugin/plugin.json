@@ -1,6 +1,6 @@
 {
   "name": "matrix",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Connect enabled Xedoc sessions to private Matrix rooms used from Element.",
   "author": {
     "name": "apohl79"
@@ -20,7 +20,7 @@
       "commands": [
         {
           "name": "matrix",
-          "description": "Show the Matrix bridge status for this session."
+          "description": "Show Matrix bridge status; use /matrix setup to edit settings."
         }
       ],
       "requestedCapabilities": [

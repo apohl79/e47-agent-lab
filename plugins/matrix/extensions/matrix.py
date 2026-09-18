@@ -240,6 +240,14 @@ def stored_config(value: dict[str, Any]) -> dict[str, str]:
     )
 
 
+def has_stored_config(value: dict[str, Any]) -> bool:
+    try:
+        stored_config(value)
+    except ValueError:
+        return False
+    return True
+
+
 class MatrixClient:
     """Minimal Matrix Client-Server API client with bounded responses."""
 
@@ -598,9 +606,19 @@ def run_one_shot() -> int:
         raise RuntimeError("extension request is missing context or params")
 
     if method == "extension.setup.open":
+        config = load_json(CONFIG_PATH)
+        if has_stored_config(config):
+            print(
+                json.dumps(
+                    complete(request, "Matrix bridge is already configured."),
+                    separators=(",", ":"),
+                ),
+                flush=True,
+            )
+            return 0
         print(
             json.dumps(
-                setup_interaction(request, load_json(CONFIG_PATH)),
+                setup_interaction(request, config),
                 separators=(",", ":"),
             ),
             flush=True,
@@ -623,6 +641,18 @@ def run_one_shot() -> int:
         return 0
 
     if method == "extension.command.invoke":
+        arguments = params.get("arguments")
+        if isinstance(arguments, list) and arguments:
+            command = arguments[0]
+            if command in {"setup", "settings", "configure"}:
+                print(
+                    json.dumps(
+                        setup_interaction(request, load_json(CONFIG_PATH)),
+                        separators=(",", ":"),
+                    ),
+                    flush=True,
+                )
+                return 0
         config = load_json(CONFIG_PATH)
         if config.get("agentUserId") and config.get("targetUserId"):
             summary = (

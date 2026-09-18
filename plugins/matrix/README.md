@@ -21,6 +21,11 @@ Configuration, access tokens, and per-thread room IDs are stored under
 Matrix Client-Server API directly and sends the access token only in the
 `Authorization` header.
 
+The extension owns its settings and decides whether setup is needed. Use
+`/matrix setup` to reopen the settings form, `/matrix` to report bridge status,
+and `/matrix --disable` to disable the extension for the current session through
+the Xedoc host.
+
 Rooms created by this version are private and invite-only, but they are not
 end-to-end encrypted. This keeps the dependency-free bridge interoperable with
 Element without storing Matrix device keys. Use a homeserver and accounts whose
