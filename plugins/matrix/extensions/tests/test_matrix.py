@@ -88,6 +88,7 @@ def test_setup_response_persists_private_config(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    monkeypatch.setattr(matrix, "verify_access_token", lambda _config: None)
     request = extension_request(
         "interaction.respond",
         {"continuation": "matrix-setup", "values": valid_values()},
@@ -106,6 +107,50 @@ def test_setup_response_persists_private_config(
     }
     assert stat.S_IMODE(isolated_config.stat().st_mode) == 0o700
     assert stat.S_IMODE(matrix.CONFIG_PATH.stat().st_mode) == 0o600
+
+
+def test_setup_rejects_an_inactive_token_without_replacing_saved_config(
+    isolated_config: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    saved = matrix.normalize_config(
+        valid_values(**{"access-token": "saved-token"})
+    )
+    matrix.write_private_json(matrix.CONFIG_PATH, saved)
+    request = extension_request(
+        "interaction.respond",
+        {
+            "continuation": "matrix-setup",
+            "values": valid_values(**{"access-token": "inactive-token"}),
+        },
+    )
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(request)))
+
+    def reject_token(_config: dict[str, str]) -> None:
+        raise matrix.MatrixError("Matrix request failed (401): Token is not active")
+
+    monkeypatch.setattr(matrix, "verify_access_token", reject_token)
+
+    with pytest.raises(matrix.MatrixError, match="Token is not active"):
+        matrix.run_one_shot()
+
+    assert matrix.load_json(matrix.CONFIG_PATH) == saved
+
+
+def test_verify_access_token_requires_the_configured_agent_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class WrongAccountClient:
+        def __init__(self, _config: dict[str, str]) -> None:
+            pass
+
+        def whoami(self) -> str:
+            return "@other:example.org"
+
+    monkeypatch.setattr(matrix, "MatrixClient", WrongAccountClient)
+
+    with pytest.raises(matrix.MatrixError, match="@other:example.org"):
+        matrix.verify_access_token(matrix.normalize_config(valid_values()))
 
 
 def test_cancelled_setup_does_not_write_config(
@@ -587,7 +632,7 @@ def test_repository_registers_matrix_and_removes_signal() -> None:
     names = {entry["name"] for entry in marketplace["plugins"]}
 
     assert versions["plugins"]["matrix"] == {
-        "version": "0.3.3",
+        "version": "0.3.4",
         "hosts": ["xedoc"],
     }
     assert "signal" not in versions["plugins"]

@@ -248,6 +248,17 @@ def has_stored_config(value: dict[str, Any]) -> bool:
     return True
 
 
+def verify_access_token(
+    config: dict[str, Any], client: MatrixClient | None = None
+) -> None:
+    authenticated_user = (client or MatrixClient(config)).whoami()
+    if authenticated_user != config["agentUserId"]:
+        raise MatrixError(
+            "the configured access token belongs to "
+            f"{authenticated_user}, not {config['agentUserId']}"
+        )
+
+
 class MatrixClient:
     """Minimal Matrix Client-Server API client with bounded responses."""
 
@@ -670,6 +681,7 @@ def run_one_shot() -> int:
         if not isinstance(values, dict):
             raise RuntimeError("setup response is missing values")
         config = normalize_config(values, load_json(CONFIG_PATH))
+        verify_access_token(config)
         write_private_json(CONFIG_PATH, config)
         print(
             json.dumps(
@@ -740,12 +752,7 @@ def run_persistent() -> int:
     raw_config = load_json(CONFIG_PATH)
     config = stored_config(raw_config)
     matrix = MatrixClient(config)
-    authenticated_user = matrix.whoami()
-    if authenticated_user != config["agentUserId"]:
-        raise MatrixError(
-            "the configured access token belongs to "
-            f"{authenticated_user}, not {config['agentUserId']}"
-        )
+    verify_access_token(config, matrix)
 
     client = SessionScriptClient.from_host_child()
     inbound: queue.Queue[str] = queue.Queue()

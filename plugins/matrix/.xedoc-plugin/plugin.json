@@ -1,6 +1,6 @@
 {
   "name": "matrix",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "Connect enabled Xedoc sessions to private Matrix rooms used from Element.",
   "author": {
     "name": "apohl79"
