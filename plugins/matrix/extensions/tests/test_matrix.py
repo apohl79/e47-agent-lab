@@ -108,6 +108,24 @@ def test_setup_response_persists_private_config(
     assert stat.S_IMODE(matrix.CONFIG_PATH.stat().st_mode) == 0o600
 
 
+def test_cancelled_setup_does_not_write_config(
+    isolated_config: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    request = extension_request(
+        "interaction.respond",
+        {"continuation": "matrix-setup", "outcome": "cancelled"},
+    )
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(request)))
+
+    assert matrix.run_one_shot() == 0
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["result"]["summary"] == "Matrix setup cancelled."
+    assert not isolated_config.exists()
+
+
 def test_setup_open_skips_form_for_complete_config(
     isolated_config: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -569,7 +587,7 @@ def test_repository_registers_matrix_and_removes_signal() -> None:
     names = {entry["name"] for entry in marketplace["plugins"]}
 
     assert versions["plugins"]["matrix"] == {
-        "version": "0.3.0",
+        "version": "0.3.3",
         "hosts": ["xedoc"],
     }
     assert "signal" not in versions["plugins"]

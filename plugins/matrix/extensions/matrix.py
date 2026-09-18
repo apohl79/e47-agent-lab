@@ -657,6 +657,15 @@ def run_one_shot() -> int:
         return 0
 
     if method == "interaction.respond" and params.get("continuation") == "matrix-setup":
+        if params.get("outcome") in {"cancelled", "dismissed"}:
+            print(
+                json.dumps(
+                    complete(request, "Matrix setup cancelled."),
+                    separators=(",", ":"),
+                ),
+                flush=True,
+            )
+            return 0
         values = params.get("values")
         if not isinstance(values, dict):
             raise RuntimeError("setup response is missing values")
@@ -676,20 +685,17 @@ def run_one_shot() -> int:
         if isinstance(arguments, list) and arguments:
             command = arguments[0]
             config = load_json(CONFIG_PATH)
-            if command in {"on", "off"}:
+            if command in {"on", "off", "restart"}:
                 if not has_stored_config(config):
-                    print(
-                        json.dumps(
-                            complete(request, "Configure Matrix before enabling it."),
-                            separators=(",", ":"),
-                        ),
-                        flush=True,
-                    )
-                    return 0
+                    raise RuntimeError("Matrix is not configured. Run /matrix setup first.")
                 summary = (
                     "Matrix bridge enabled for this session."
                     if command == "on"
-                    else "Matrix bridge disabled for this session."
+                    else (
+                        "Matrix bridge disabled for this session."
+                        if command == "off"
+                        else "Matrix bridge restarted for this session."
+                    )
                 )
                 print(
                     json.dumps(complete(request, summary), separators=(",", ":")),

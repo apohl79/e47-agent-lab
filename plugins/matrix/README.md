@@ -25,7 +25,8 @@ Matrix Client-Server API directly and sends the access token only in the
 The extension owns its settings and decides whether setup is needed. The bridge
 is disabled by default after setup. Use `/matrix setup` to reopen the settings
 form, `/matrix` to report bridge status, `/matrix on` to enable the bridge for
-the current session, and `/matrix off` to disable it for that session.
+the current session, `/matrix off` to disable it for that session, and
+`/matrix restart` to restart it for that session.
 
 Rooms created by this version are private and invite-only, but they are not
 end-to-end encrypted. This keeps the dependency-free bridge interoperable with
