@@ -103,6 +103,7 @@ def test_setup_response_persists_private_config(
         "agentUserId": "@xedoc:example.org",
         "accessToken": "secret-token",
         "targetUserId": "@andreas:example.org",
+        "enabled": False,
     }
     assert stat.S_IMODE(isolated_config.stat().st_mode) == 0o700
     assert stat.S_IMODE(matrix.CONFIG_PATH.stat().st_mode) == 0o600
@@ -537,7 +538,7 @@ def test_repository_registers_matrix_and_removes_signal() -> None:
     names = {entry["name"] for entry in marketplace["plugins"]}
 
     assert versions["plugins"]["matrix"] == {
-        "version": "0.1.0",
+        "version": "0.2.1",
         "hosts": ["xedoc"],
     }
     assert "signal" not in versions["plugins"]

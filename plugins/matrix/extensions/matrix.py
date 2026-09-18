@@ -630,6 +630,7 @@ def run_one_shot() -> int:
         if not isinstance(values, dict):
             raise RuntimeError("setup response is missing values")
         config = normalize_config(values, load_json(CONFIG_PATH))
+        config["enabled"] = False
         write_private_json(CONFIG_PATH, config)
         print(
             json.dumps(
@@ -644,10 +645,33 @@ def run_one_shot() -> int:
         arguments = params.get("arguments")
         if isinstance(arguments, list) and arguments:
             command = arguments[0]
+            config = load_json(CONFIG_PATH)
+            if command in {"on", "off"}:
+                if not has_stored_config(config):
+                    print(
+                        json.dumps(
+                            complete(request, "Configure Matrix before enabling it."),
+                            separators=(",", ":"),
+                        ),
+                        flush=True,
+                    )
+                    return 0
+                config["enabled"] = command == "on"
+                write_private_json(CONFIG_PATH, config)
+                summary = (
+                    "Matrix bridge enabled."
+                    if command == "on"
+                    else "Matrix bridge disabled."
+                )
+                print(
+                    json.dumps(complete(request, summary), separators=(",", ":")),
+                    flush=True,
+                )
+                return 0
             if command in {"setup", "settings", "configure"}:
                 print(
                     json.dumps(
-                        setup_interaction(request, load_json(CONFIG_PATH)),
+                        setup_interaction(request, config),
                         separators=(",", ":"),
                     ),
                     flush=True,
@@ -656,7 +680,7 @@ def run_one_shot() -> int:
         config = load_json(CONFIG_PATH)
         if config.get("agentUserId") and config.get("targetUserId"):
             summary = (
-                f"Matrix bridge is active for this session: "
+                f"Matrix bridge is {'active' if config.get('enabled') else 'disabled'} for this session: "
                 f"{config['agentUserId']} → {config['targetUserId']}."
             )
         else:
@@ -673,7 +697,10 @@ def run_one_shot() -> int:
 def run_persistent() -> int:
     thread_id = os.environ["XEDOC_SESSION_SCRIPT_THREAD_ID"]
     script_id = os.environ["XEDOC_SESSION_SCRIPT_ID"]
-    config = stored_config(load_json(CONFIG_PATH))
+    raw_config = load_json(CONFIG_PATH)
+    if raw_config.get("enabled") is not True:
+        return 0
+    config = stored_config(raw_config)
     matrix = MatrixClient(config)
     authenticated_user = matrix.whoami()
     if authenticated_user != config["agentUserId"]:
