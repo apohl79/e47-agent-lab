@@ -511,6 +511,37 @@ def inbound_messages(
     return messages
 
 
+def turn_messages(turn: dict[str, Any]) -> list[str]:
+    items = turn.get("items")
+    if not isinstance(items, list):
+        return []
+    messages: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "userMessage":
+            client_id = item.get("clientId")
+            if isinstance(client_id, str) and client_id.startswith("matrix-"):
+                continue
+            content = item.get("content")
+            if not isinstance(content, list):
+                continue
+            text = "".join(
+                fragment["text"]
+                for fragment in content
+                if isinstance(fragment, dict)
+                and fragment.get("type") == "text"
+                and isinstance(fragment.get("text"), str)
+            )
+            if text.strip():
+                messages.append(text)
+        elif item.get("type") == "agentMessage":
+            text = item.get("text")
+            if isinstance(text, str) and text.strip():
+                messages.append(text)
+    return messages
+
+
 def receive_messages(
     client: MatrixClient,
     room_id: str,
@@ -630,7 +661,6 @@ def run_one_shot() -> int:
         if not isinstance(values, dict):
             raise RuntimeError("setup response is missing values")
         config = normalize_config(values, load_json(CONFIG_PATH))
-        config["enabled"] = False
         write_private_json(CONFIG_PATH, config)
         print(
             json.dumps(
@@ -656,12 +686,10 @@ def run_one_shot() -> int:
                         flush=True,
                     )
                     return 0
-                config["enabled"] = command == "on"
-                write_private_json(CONFIG_PATH, config)
                 summary = (
-                    "Matrix bridge enabled."
+                    "Matrix bridge enabled for this session."
                     if command == "on"
-                    else "Matrix bridge disabled."
+                    else "Matrix bridge disabled for this session."
                 )
                 print(
                     json.dumps(complete(request, summary), separators=(",", ":")),
@@ -679,8 +707,14 @@ def run_one_shot() -> int:
                 return 0
         config = load_json(CONFIG_PATH)
         if config.get("agentUserId") and config.get("targetUserId"):
+            session = context.get("session")
+            extension_enabled = (
+                session.get("extensionEnabled") is True
+                if isinstance(session, dict)
+                else False
+            )
             summary = (
-                f"Matrix bridge is {'active' if config.get('enabled') else 'disabled'} for this session: "
+                f"Matrix bridge is {'active' if extension_enabled else 'disabled'} for this session: "
                 f"{config['agentUserId']} → {config['targetUserId']}."
             )
         else:
@@ -698,8 +732,6 @@ def run_persistent() -> int:
     thread_id = os.environ["XEDOC_SESSION_SCRIPT_THREAD_ID"]
     script_id = os.environ["XEDOC_SESSION_SCRIPT_ID"]
     raw_config = load_json(CONFIG_PATH)
-    if raw_config.get("enabled") is not True:
-        return 0
     config = stored_config(raw_config)
     matrix = MatrixClient(config)
     authenticated_user = matrix.whoami()
@@ -741,15 +773,11 @@ def run_persistent() -> int:
         nonlocal room_id
         method = message.get("method")
         params = message.get("params", {})
-        if method == "item/completed":
-            item = params.get("item") if isinstance(params, dict) else None
-            if (
-                isinstance(item, dict)
-                and item.get("type") == "agentMessage"
-                and isinstance(item.get("text"), str)
-                and room_id
-            ):
-                matrix.send_text(room_id, item["text"])
+        if method == "turn/completed" and isinstance(params, dict) and room_id:
+            turn = params.get("turn")
+            if isinstance(turn, dict):
+                for message in turn_messages(turn):
+                    matrix.send_text(room_id, message)
         elif method == "script/promptOpened" and isinstance(params, dict):
             remember_prompt(params)
         elif method == "script/promptClosed" and isinstance(params, dict):
@@ -790,7 +818,7 @@ def run_persistent() -> int:
             "Matrix bridge",
             PLUGIN_VERSION,
             {
-                "modelResponseCompleted": True,
+                "modelResponseCompleted": False,
                 "turnCompleted": True,
                 "prompts": ["requestUserInput"],
                 "sessionUpdates": True,

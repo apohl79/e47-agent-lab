@@ -103,7 +103,6 @@ def test_setup_response_persists_private_config(
         "agentUserId": "@xedoc:example.org",
         "accessToken": "secret-token",
         "targetUserId": "@andreas:example.org",
-        "enabled": False,
     }
     assert stat.S_IMODE(isolated_config.stat().st_mode) == 0o700
     assert stat.S_IMODE(matrix.CONFIG_PATH.stat().st_mode) == 0o600
@@ -437,6 +436,38 @@ def test_inbound_messages_accepts_only_target_text_and_ignores_edits() -> None:
     assert matrix.inbound_messages(events, "@andreas:example.org") == ["continue"]
 
 
+def test_turn_messages_mirrors_xedoc_input_and_output_without_matrix_echo() -> None:
+    turn = {
+        "items": [
+            {
+                "type": "userMessage",
+                "clientId": "xedoc-tui-1",
+                "content": [{"type": "text", "text": "Summarize recent commits"}],
+            },
+            {
+                "type": "agentMessage",
+                "text": "I will inspect the recent history.",
+            },
+            {
+                "type": "userMessage",
+                "clientId": "matrix-123",
+                "content": [{"type": "text", "text": "Already in Matrix"}],
+            },
+            {
+                "type": "userMessage",
+                "clientId": "xedoc-tui-2",
+                "content": [{"type": "image", "url": "mxc://example.org/image"}],
+            },
+            {"type": "commandExecution", "command": "git log"},
+        ]
+    }
+
+    assert matrix.turn_messages(turn) == [
+        "Summarize recent commits",
+        "I will inspect the recent history.",
+    ]
+
+
 def test_limited_sync_backfills_gap_in_order_and_deduplicates() -> None:
     class FakeClient:
         calls: list[tuple[str, str, str]] = []
@@ -538,7 +569,7 @@ def test_repository_registers_matrix_and_removes_signal() -> None:
     names = {entry["name"] for entry in marketplace["plugins"]}
 
     assert versions["plugins"]["matrix"] == {
-        "version": "0.2.1",
+        "version": "0.3.0",
         "hosts": ["xedoc"],
     }
     assert "signal" not in versions["plugins"]
