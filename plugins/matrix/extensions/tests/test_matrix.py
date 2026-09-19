@@ -1044,15 +1044,190 @@ def test_prompt_answer_maps_single_and_multi_question_replies() -> None:
     assert matrix.prompt_answer(multiple, "not-json") is None
 
 
+def test_approval_prompt_renders_and_answers_router_confirmation() -> None:
+    prompt = {
+        "kind": "extensionInteraction",
+        "request": {
+            "method": "item/extensionInteraction/request",
+            "params": {
+                "extensionId": "model-router",
+                "interactionId": "route-confirmation",
+                "continuation": "route-confirmation",
+                "stateRevision": "1",
+                "surface": {
+                    "type": "confirmation",
+                    "title": "Use openai/gpt-5.6-luna/low?",
+                    "body": "The reference router requests confirmation.",
+                    "details": [{"label": "Scope", "value": "root"}],
+                    "sections": [
+                        {
+                            "title": "Prompt",
+                            "rows": [{"text": "and in munich?", "indent": 0}],
+                        }
+                    ],
+                    "actions": [
+                        {"id": "accept", "label": "Accept this route"},
+                        {"id": "keep", "label": "Keep current route"},
+                    ],
+                },
+            },
+        },
+    }
+
+    message = matrix.approval_prompt_message(prompt, "token-1")
+
+    assert "Use openai/gpt-5.6-luna/low?" in message
+    assert "Scope: root" in message
+    assert "accept (Accept this route)" in message
+    assert "approval:token-1 <choice-id>" in message
+    assert matrix.approval_answer(prompt, "accept") == {
+        "extensionId": "model-router",
+        "interactionId": "route-confirmation",
+        "continuation": "route-confirmation",
+        "stateRevision": "1",
+        "outcome": "accepted",
+        "action": {"id": "accept"},
+        "values": None,
+    }
+    assert matrix.approval_answer(prompt, "unknown") is None
+
+
+def test_approval_answer_supports_standard_decisions_and_explicit_json() -> None:
+    command = {
+        "kind": "commandExecutionApproval",
+        "request": {
+            "method": "item/commandExecution/requestApproval",
+            "params": {
+                "reason": "Network access is needed.",
+                "availableDecisions": ["accept", "decline"],
+            },
+        },
+    }
+    permissions = {
+        "kind": "permissionsApproval",
+        "request": {
+            "method": "item/permissions/requestApproval",
+            "params": {},
+        },
+    }
+
+    assert "accept, decline" in matrix.approval_prompt_message(command, "token-2")
+    assert matrix.approval_answer(command, "accept") == {"decision": "accept"}
+    assert matrix.approval_answer(command, "cancel") is None
+    assert matrix.approval_answer(
+        permissions, '{"permissions":{},"scope":"turn"}'
+    ) == {"permissions": {}, "scope": "turn"}
+
+
+def test_extension_interaction_menu_form_and_notice_are_not_trapped() -> None:
+    base = {
+        "extensionId": "extension",
+        "interactionId": "interaction",
+        "continuation": "continue",
+        "stateRevision": None,
+    }
+    menu = {
+        "kind": "extensionInteraction",
+        "request": {
+            "method": "item/extensionInteraction/request",
+            "params": {
+                **base,
+                "surface": {
+                    "type": "menu",
+                    "title": "Choose",
+                    "items": [
+                        {
+                            "id": "item",
+                            "action": {"id": "select", "label": "Select"},
+                        }
+                    ],
+                },
+            },
+        },
+    }
+    form = {
+        "kind": "extensionInteraction",
+        "request": {
+            "method": "item/extensionInteraction/request",
+            "params": {
+                **base,
+                "surface": {
+                    "type": "form",
+                    "title": "Settings",
+                    "fields": [
+                        {
+                            "type": "text",
+                            "id": "opaque_name",
+                            "label": "Name",
+                            "description": "A name",
+                            "value": "Saved",
+                        },
+                        {
+                            "type": "select",
+                            "id": "route",
+                            "label": "Route",
+                            "description": "Choose a route",
+                            "value": "fast",
+                            "options": [
+                                {"id": "fast", "label": "Fast"},
+                                {"id": "safe", "label": "Safe"},
+                            ],
+                        },
+                        {
+                            "type": "text",
+                            "id": "access_token",
+                            "label": "Access token",
+                            "description": "Secret",
+                            "value": "not-visible",
+                            "sensitive": True,
+                        },
+                    ],
+                    "submit": {"id": "save", "label": "Save"},
+                },
+            },
+        },
+    }
+    notice = {
+        "kind": "extensionInteraction",
+        "request": {
+            "method": "item/extensionInteraction/request",
+            "params": {
+                **base,
+                "surface": {"type": "notice", "title": "Done"},
+            },
+        },
+    }
+
+    assert "select (Select)" in matrix.approval_prompt_message(menu, "menu")
+    assert matrix.approval_answer(menu, "select")["action"] == {"id": "select"}
+    form_message = matrix.approval_prompt_message(form, "form")
+    assert 'opaque_name (Name)' in form_message
+    assert "Current: \"Saved\"" in form_message
+    assert "fast (Fast), safe (Safe)" in form_message
+    assert "not-visible" not in form_message
+    assert (
+        '"action":"save","values":{"opaque_name":"value","route":"value",'
+        '"access_token":"value"}' in form_message
+    )
+    assert matrix.approval_answer(
+        form, '{"action":"save","values":{"opaque_name":"Andreas"}}'
+    )["values"] == {"opaque_name": "Andreas"}
+    assert matrix.approval_answer(form, '{"action":"save","values":[]}') is None
+    assert matrix.approval_answer(notice, "dismiss")["outcome"] == "dismissed"
+
+
 def test_repository_registers_matrix_and_removes_signal() -> None:
     versions = json.loads((REPO_ROOT / "plugin-versions.json").read_text())
     marketplace = json.loads(
         (REPO_ROOT / ".agents/plugins/marketplace.json").read_text()
     )
+    manifest = json.loads(
+        (PLUGIN_ROOT / ".xedoc-plugin" / "plugin.json").read_text()
+    )
     names = {entry["name"] for entry in marketplace["plugins"]}
 
     assert versions["plugins"]["matrix"] == {
-        "version": "0.6.0",
+        "version": "0.7.0",
         "hosts": ["xedoc"],
     }
     assert "signal" not in versions["plugins"]
@@ -1060,3 +1235,6 @@ def test_repository_registers_matrix_and_removes_signal() -> None:
     assert "signal" not in names
     assert not (REPO_ROOT / "plugins/signal").exists()
     assert os.access(EXTENSIONS_ROOT / "matrix.py", os.X_OK)
+    assert "prompt.approval.respond" in manifest["extensions"][0][
+        "requestedCapabilities"
+    ]

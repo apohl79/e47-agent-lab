@@ -1008,6 +1008,225 @@ def prompt_answer(prompt: dict[str, Any], text: str) -> dict[str, Any] | None:
     return None
 
 
+def approval_prompt_message(prompt: dict[str, Any], token: str) -> str:
+    request = prompt.get("request")
+    method = request.get("method") if isinstance(request, dict) else None
+    params = request.get("params") if isinstance(request, dict) else {}
+    if not isinstance(params, dict):
+        return "Xedoc approval details are unavailable."
+    if method == "item/extensionInteraction/request":
+        surface = params.get("surface")
+        if not isinstance(surface, dict):
+            return "Xedoc approval details are unavailable."
+        lines = [f"Xedoc approval needed: {surface.get('title') or 'Confirmation'}"]
+        surface_type = surface.get("type")
+        body = surface.get("body")
+        if isinstance(body, str) and body:
+            lines.append(body)
+        for detail in surface.get("details", []):
+            if isinstance(detail, dict):
+                label = detail.get("label")
+                value = detail.get("value")
+                if isinstance(label, str) and isinstance(value, str):
+                    lines.append(f"{label}: {value}")
+        for section in surface.get("sections", []):
+            if not isinstance(section, dict):
+                continue
+            title = section.get("title")
+            if isinstance(title, str) and title:
+                lines.append(title + ":")
+            for row in section.get("rows", []):
+                if isinstance(row, dict) and isinstance(row.get("text"), str):
+                    lines.append(f"- {row['text']}")
+        actions = surface.get("actions")
+        if surface_type == "menu":
+            actions = [
+                item.get("action")
+                for item in surface.get("items", [])
+                if isinstance(item, dict)
+            ]
+        choices = [
+            f"{action['id']} ({action.get('label') or action['id']})"
+            for action in actions if isinstance(action, dict)
+            and isinstance(action.get("id"), str)
+        ] if isinstance(actions, list) else []
+        if surface_type == "form":
+            fields = surface.get("fields")
+            field_actions: list[dict[str, Any]] = []
+            example_values: dict[str, Any] = {}
+            if isinstance(fields, list):
+                for field in fields:
+                    if (
+                        isinstance(field, dict)
+                        and isinstance(field.get("id"), str)
+                        and isinstance(field.get("label"), str)
+                    ):
+                        field_id = field["id"]
+                        lines.append(
+                            f"{field_id} ({field['label']}): "
+                            f"{field.get('description') or ''}"
+                        )
+                        if field.get("sensitive") is not True and "value" in field:
+                            lines.append(f"  Current: {json.dumps(field['value'])}")
+                        options = field.get("options")
+                        if isinstance(options, list):
+                            choices = [
+                                f"{option['id']} ({option.get('label') or option['id']})"
+                                for option in options
+                                if isinstance(option, dict)
+                                and isinstance(option.get("id"), str)
+                            ]
+                            if choices:
+                                lines.append("  Choices: " + ", ".join(choices))
+                        example_values[field_id] = "value"
+                        action = field.get("action")
+                        if isinstance(action, dict):
+                            field_actions.append(action)
+            if field_actions:
+                lines.append(
+                    "Actions: "
+                    + ", ".join(
+                        f"{action['id']} ({action.get('label') or action['id']})"
+                        for action in field_actions
+                        if isinstance(action.get("id"), str)
+                    )
+                )
+                lines.append(f"Reply as `approval:{token} <action-id>`.")
+            submit = surface.get("submit")
+            if isinstance(submit, dict) and isinstance(submit.get("id"), str):
+                example = json.dumps(
+                    {"action": submit["id"], "values": example_values},
+                    separators=(",", ":"),
+                )
+                lines.append(
+                    f"Reply as `approval:{token} {example}` with each field's "
+                    "actual ID and value."
+                )
+            cancel = surface.get("cancel")
+            if isinstance(cancel, dict) and isinstance(cancel.get("id"), str):
+                lines.append(f"Reply as `approval:{token} {cancel['id']}` to cancel.")
+            return "\n".join(lines)
+        if choices:
+            lines.append("Choices: " + ", ".join(choices))
+            lines.append(f"Reply as `approval:{token} <choice-id>`.")
+        elif surface_type == "notice":
+            lines.append(f"Reply as `approval:{token} dismiss`.")
+        return "\n".join(lines)
+    decisions = params.get("availableDecisions")
+    if not isinstance(decisions, list) and method == "item/fileChange/requestApproval":
+        decisions = ["accept", "acceptForSession", "decline", "cancel"]
+    lines = [
+        f"Xedoc approval needed: {str(prompt.get('kind') or 'approval')}",
+        str(params.get("reason") or "Review this approval in Xedoc."),
+    ]
+    simple_decisions = [decision for decision in decisions or [] if isinstance(decision, str)]
+    if simple_decisions:
+        lines.append("Choices: " + ", ".join(simple_decisions))
+        lines.append(f"Reply as `approval:{token} <choice>`.")
+    else:
+        lines.append(
+            f"Reply as `approval:{token} <JSON response>` to provide the "
+            "approval response shown in Xedoc."
+        )
+    return "\n".join(lines)
+
+
+def approval_answer(prompt: dict[str, Any], text: str) -> dict[str, Any] | None:
+    request = prompt.get("request")
+    method = request.get("method") if isinstance(request, dict) else None
+    params = request.get("params") if isinstance(request, dict) else {}
+    if not isinstance(params, dict):
+        return None
+    selected = text.strip()
+    if method == "item/extensionInteraction/request":
+        surface = params.get("surface")
+        if not isinstance(surface, dict):
+            return None
+        surface_type = surface.get("type")
+        if surface_type == "notice" and selected == "dismiss":
+            return extension_interaction_response(params, "dismissed", None, None)
+        if surface_type == "form":
+            fields = surface.get("fields")
+            action_ids = {
+                field["action"]["id"]
+                for field in fields or []
+                if isinstance(field, dict)
+                and isinstance(field.get("action"), dict)
+                and isinstance(field["action"].get("id"), str)
+            }
+            if selected in action_ids:
+                return extension_interaction_response(
+                    params, "accepted", selected, None
+                )
+            cancel = surface.get("cancel")
+            if isinstance(cancel, dict) and selected == cancel.get("id"):
+                return extension_interaction_response(params, "cancelled", None, None)
+            try:
+                form_response = json.loads(selected)
+            except json.JSONDecodeError:
+                return None
+            if not isinstance(form_response, dict):
+                return None
+            action_id = form_response.get("action")
+            values = form_response.get("values")
+            submit = surface.get("submit")
+            if not (
+                isinstance(action_id, str)
+                and isinstance(values, dict)
+                and isinstance(submit, dict)
+                and action_id == submit.get("id")
+            ):
+                return None
+            return extension_interaction_response(
+                params, "accepted", action_id, values
+            )
+        actions = surface.get("actions")
+        if surface_type == "menu":
+            actions = [
+                item.get("action")
+                for item in surface.get("items", [])
+                if isinstance(item, dict)
+            ]
+        action_ids = {
+            action.get("id")
+            for action in actions or []
+            if isinstance(action, dict) and isinstance(action.get("id"), str)
+        }
+        if selected not in action_ids:
+            return None
+        return extension_interaction_response(params, "accepted", selected, None)
+    decisions = params.get("availableDecisions")
+    if not isinstance(decisions, list) and method == "item/fileChange/requestApproval":
+        decisions = ["accept", "acceptForSession", "decline", "cancel"]
+    if isinstance(decisions, list) and selected in decisions:
+        return {"decision": selected}
+    try:
+        response = json.loads(selected)
+    except json.JSONDecodeError:
+        return None
+    return response if isinstance(response, dict) else None
+
+
+def extension_interaction_response(
+    params: dict[str, Any],
+    outcome: str,
+    action_id: str | None,
+    values: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    required = ("extensionId", "interactionId", "continuation")
+    if not all(isinstance(params.get(key), str) for key in required):
+        return None
+    return {
+        "extensionId": params["extensionId"],
+        "interactionId": params["interactionId"],
+        "continuation": params["continuation"],
+        "stateRevision": params.get("stateRevision"),
+        "outcome": outcome,
+        "action": {"id": action_id} if action_id else None,
+        "values": values,
+    }
+
+
 def command_help() -> str:
     return "\n".join(
         [
@@ -1288,7 +1507,14 @@ def run_persistent() -> int:
     registered: dict[str, Any] | None = None
     def remember_prompt(prompt: dict[str, Any]) -> None:
         if (
-            prompt.get("kind") != "requestUserInput"
+            prompt.get("kind")
+            not in {
+                "requestUserInput",
+                "extensionInteraction",
+                "commandExecutionApproval",
+                "fileChangeApproval",
+                "permissionsApproval",
+            }
             or not prompt.get("canRespond")
             or not isinstance(prompt.get("promptId"), str)
             or not isinstance(prompt.get("responseLease"), str)
@@ -1297,7 +1523,12 @@ def run_persistent() -> int:
             return
         token = os.urandom(8).hex()
         pending_prompts[prompt["promptId"]] = {"prompt": prompt, "token": token}
-        agent_matrix.send_text(room_id, prompt_message(prompt, token))
+        message = (
+            prompt_message(prompt, token)
+            if prompt.get("kind") == "requestUserInput"
+            else approval_prompt_message(prompt, token)
+        )
+        agent_matrix.send_text(room_id, message)
 
     def replace_pending_prompts(snapshot: dict[str, Any]) -> None:
         pending_prompts.clear()
@@ -1378,10 +1609,20 @@ def run_persistent() -> int:
             {
                 "modelResponseCompleted": True,
                 "userMessages": True,
-                "prompts": ["requestUserInput"],
+                "prompts": [
+                    "requestUserInput",
+                    "extensionInteraction",
+                    "commandExecutionApproval",
+                    "fileChangeApproval",
+                    "permissionsApproval",
+                ],
                 "sessionUpdates": True,
             },
-            ["userInput.send", "prompt.requestUserInput.respond"],
+            [
+                "userInput.send",
+                "prompt.requestUserInput.respond",
+                "prompt.approval.respond",
+            ],
         )
         registration_id = registered["registrationId"]
         raw_config = load_settings()
@@ -1446,7 +1687,7 @@ def run_persistent() -> int:
             "Matrix bridge connected. Send a message here from Element to talk to Xedoc.",
         )
         pending: deque[str] = deque()
-        prompt_answers: deque[tuple[str, str]] = deque()
+        prompt_answers: deque[tuple[str, str, str]] = deque()
 
         while True:
             readable, _, _ = select.select([sys.stdin], [], [], 0.5)
@@ -1465,42 +1706,68 @@ def run_persistent() -> int:
                     break
                 matched_prompt = next(
                     (
-                        (prompt_id, state)
+                        (prompt_id, state, "prompt")
                         for prompt_id, state in pending_prompts.items()
                         if message.startswith(f"prompt:{state['token']} ")
                     ),
                     None,
                 )
                 if matched_prompt is None:
+                    matched_prompt = next(
+                        (
+                            (prompt_id, state, "approval")
+                            for prompt_id, state in pending_prompts.items()
+                            if message.startswith(f"approval:{state['token']} ")
+                        ),
+                        None,
+                    )
+                if matched_prompt is None:
                     pending.append(message)
                 else:
-                    prompt_id, state = matched_prompt
+                    prompt_id, state, prefix = matched_prompt
                     prompt_answers.append(
-                        (prompt_id, message.removeprefix(f"prompt:{state['token']} "))
+                        (
+                            prompt_id,
+                            prefix,
+                            message.removeprefix(f"{prefix}:{state['token']} "),
+                        )
                     )
             if prompt_answers:
-                prompt_id, text = prompt_answers.popleft()
+                prompt_id, prefix, text = prompt_answers.popleft()
                 state = pending_prompts.get(prompt_id)
                 if state is None:
                     continue
                 prompt = state["prompt"]
-                answer = prompt_answer(prompt, text)
+                answer = (
+                    prompt_answer(prompt, text)
+                    if prefix == "prompt"
+                    else approval_answer(prompt, text)
+                )
                 if answer is None:
                     agent_matrix.send_text(
                         room_id,
                         (
-                            "That answer could not be mapped. Reply with "
-                            f"prompt:{state['token']} and the requested JSON."
+                            "That response could not be mapped. Reply with "
+                            f"{prefix}:{state['token']} and a listed choice "
+                            "or the requested JSON."
                         ),
                     )
                     continue
                 try:
-                    client.respond(
-                        registered["registrationId"],
-                        prompt_id,
-                        prompt["responseLease"],
-                        answer,
-                    )
+                    if prefix == "prompt":
+                        client.respond(
+                            registered["registrationId"],
+                            prompt_id,
+                            prompt["responseLease"],
+                            answer,
+                        )
+                    else:
+                        client.respond_approval(
+                            registered["registrationId"],
+                            prompt_id,
+                            prompt["responseLease"],
+                            answer,
+                        )
                 except RpcError:
                     agent_matrix.send_text(
                         room_id, "Xedoc could not accept that answer."

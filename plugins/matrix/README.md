@@ -7,6 +7,13 @@ accepts messages sent from that account in Element as ordinary turns, and
 routes explicitly correlated replies to `request_user_input` prompts.
 Matrix-originated turns are not mirrored back into their source room.
 
+It also relays actionable Xedoc approval prompts, including model-routing
+confirmations. Element receives the approval title, details, and action IDs;
+reply with the displayed `approval:<token> <choice-id>` form. Standard command
+and file approvals accept their listed decision name. An uncommon approval
+that needs structured data requires the exact JSON response requested by
+Xedoc; the bridge never guesses an approval response.
+
 The bridge persists each root-session-to-room binding, so resuming a session
 after a machine reboot uses the same Matrix room. When the session is renamed,
 the room name follows it.
