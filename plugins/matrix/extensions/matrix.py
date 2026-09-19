@@ -904,6 +904,67 @@ def completed_agent_message_text(item: dict[str, Any]) -> str | None:
     return text if isinstance(text, str) and text.strip() else None
 
 
+def file_change_message(item: dict[str, Any]) -> str | None:
+    if item.get("type") != "fileChange":
+        return None
+    changes = item.get("changes")
+    if not isinstance(changes, list) or not changes:
+        return None
+    status = item.get("status")
+    heading = {
+        "completed": "File changes applied",
+        "failed": "File changes failed",
+        "declined": "File changes declined",
+        "inProgress": "File changes",
+    }.get(status, "File changes")
+    lines = [f"{heading} ({len(changes)} file(s)):"]
+    added_total = 0
+    removed_total = 0
+    for change in changes:
+        if not isinstance(change, dict):
+            continue
+        path = change.get("path")
+        if not isinstance(path, str) or not path:
+            continue
+        kind = change.get("kind")
+        kind_name = (
+            kind.get("type")
+            if isinstance(kind, dict) and isinstance(kind.get("type"), str)
+            else None
+        )
+        diff = change.get("diff")
+        added = 0
+        removed = 0
+        if isinstance(diff, str):
+            if kind_name == "add":
+                added = len(diff.splitlines())
+            elif kind_name == "delete":
+                removed = len(diff.splitlines())
+            else:
+                for line in diff.splitlines():
+                    if line.startswith("+++") or line.startswith("---"):
+                        continue
+                    if line.startswith("+"):
+                        added += 1
+                    elif line.startswith("-"):
+                        removed += 1
+        added_total += added
+        removed_total += removed
+        move_path = None
+        if isinstance(kind, dict):
+            candidate_move_path = kind.get("movePath") or kind.get("move_path")
+            if isinstance(candidate_move_path, str):
+                move_path = candidate_move_path
+        destination = f" → {move_path}" if move_path else ""
+        counts = f" (+{added} -{removed})" if isinstance(diff, str) else ""
+        descriptor = f" [{kind_name}]" if kind_name else ""
+        lines.append(f"- {path}{destination}{descriptor}{counts}")
+    if len(lines) == 1:
+        return None
+    lines[0] += f" (+{added_total} -{removed_total})"
+    return "\n".join(lines)
+
+
 def receive_messages(
     client: MatrixClient,
     room_id: str,
@@ -1008,6 +1069,75 @@ def prompt_answer(prompt: dict[str, Any], text: str) -> dict[str, Any] | None:
     return None
 
 
+def approval_decision_label(decision: str) -> str:
+    labels = {
+        "accept": "Approve",
+        "acceptForSession": "Approve for this session",
+        "decline": "Deny",
+        "cancel": "Cancel",
+    }
+    return labels.get(decision, decision.replace("_", " ").replace("-", " ").title())
+
+
+def approval_choice_entries(
+    prompt: dict[str, Any],
+) -> list[tuple[str, str, str]]:
+    """Return labels and exact host values for numeric approval replies."""
+    request = prompt.get("request")
+    method = request.get("method") if isinstance(request, dict) else None
+    params = request.get("params") if isinstance(request, dict) else {}
+    if not isinstance(params, dict):
+        return []
+    if method == "item/extensionInteraction/request":
+        surface = params.get("surface")
+        if not isinstance(surface, dict):
+            return []
+        surface_type = surface.get("type")
+        if surface_type == "notice":
+            return [("Dismiss", "dismiss", "dismiss")]
+        actions = surface.get("actions")
+        if surface_type == "menu":
+            actions = [
+                item.get("action")
+                for item in surface.get("items", [])
+                if isinstance(item, dict)
+            ]
+        entries = [
+            (action.get("label") or action["id"], action["id"], "action")
+            for action in actions or []
+            if isinstance(action, dict) and isinstance(action.get("id"), str)
+        ]
+        if surface_type == "form":
+            fields = surface.get("fields")
+            entries = [
+                (
+                    field["action"].get("label") or field["action"]["id"],
+                    field["action"]["id"],
+                    "action",
+                )
+                for field in fields or []
+                if (
+                    isinstance(field, dict)
+                    and isinstance(field.get("action"), dict)
+                    and isinstance(field["action"].get("id"), str)
+                )
+            ]
+            cancel = surface.get("cancel")
+            if isinstance(cancel, dict) and isinstance(cancel.get("id"), str):
+                entries.append(
+                    (cancel.get("label") or "Cancel", cancel["id"], "cancel")
+                )
+        return entries
+    decisions = params.get("availableDecisions")
+    if not isinstance(decisions, list) and method == "item/fileChange/requestApproval":
+        decisions = ["accept", "acceptForSession", "decline", "cancel"]
+    return [
+        (approval_decision_label(decision), decision, "decision")
+        for decision in decisions or []
+        if isinstance(decision, str)
+    ]
+
+
 def approval_prompt_message(prompt: dict[str, Any], token: str) -> str:
     request = prompt.get("request")
     method = request.get("method") if isinstance(request, dict) else None
@@ -1038,21 +1168,8 @@ def approval_prompt_message(prompt: dict[str, Any], token: str) -> str:
             for row in section.get("rows", []):
                 if isinstance(row, dict) and isinstance(row.get("text"), str):
                     lines.append(f"- {row['text']}")
-        actions = surface.get("actions")
-        if surface_type == "menu":
-            actions = [
-                item.get("action")
-                for item in surface.get("items", [])
-                if isinstance(item, dict)
-            ]
-        choices = [
-            f"{action['id']} ({action.get('label') or action['id']})"
-            for action in actions if isinstance(action, dict)
-            and isinstance(action.get("id"), str)
-        ] if isinstance(actions, list) else []
         if surface_type == "form":
             fields = surface.get("fields")
-            field_actions: list[dict[str, Any]] = []
             example_values: dict[str, Any] = {}
             if isinstance(fields, list):
                 for field in fields:
@@ -1079,19 +1196,13 @@ def approval_prompt_message(prompt: dict[str, Any], token: str) -> str:
                             if choices:
                                 lines.append("  Choices: " + ", ".join(choices))
                         example_values[field_id] = "value"
-                        action = field.get("action")
-                        if isinstance(action, dict):
-                            field_actions.append(action)
-            if field_actions:
-                lines.append(
-                    "Actions: "
-                    + ", ".join(
-                        f"{action['id']} ({action.get('label') or action['id']})"
-                        for action in field_actions
-                        if isinstance(action.get("id"), str)
-                    )
+            choice_entries = approval_choice_entries(prompt)
+            if choice_entries:
+                lines.append("Reply with the number only:")
+                lines.extend(
+                    f"{index} - {label}"
+                    for index, (label, _, _) in enumerate(choice_entries, 1)
                 )
-                lines.append(f"Reply as `approval:{token} <action-id>`.")
             submit = surface.get("submit")
             if isinstance(submit, dict) and isinstance(submit.get("id"), str):
                 example = json.dumps(
@@ -1102,15 +1213,14 @@ def approval_prompt_message(prompt: dict[str, Any], token: str) -> str:
                     f"Reply as `approval:{token} {example}` with each field's "
                     "actual ID and value."
                 )
-            cancel = surface.get("cancel")
-            if isinstance(cancel, dict) and isinstance(cancel.get("id"), str):
-                lines.append(f"Reply as `approval:{token} {cancel['id']}` to cancel.")
             return "\n".join(lines)
-        if choices:
-            lines.append("Choices: " + ", ".join(choices))
-            lines.append(f"Reply as `approval:{token} <choice-id>`.")
-        elif surface_type == "notice":
-            lines.append(f"Reply as `approval:{token} dismiss`.")
+        choice_entries = approval_choice_entries(prompt)
+        if choice_entries:
+            lines.append("Reply with the number only:")
+            lines.extend(
+                f"{index} - {label}"
+                for index, (label, _, _) in enumerate(choice_entries, 1)
+            )
         return "\n".join(lines)
     decisions = params.get("availableDecisions")
     if not isinstance(decisions, list) and method == "item/fileChange/requestApproval":
@@ -1119,10 +1229,13 @@ def approval_prompt_message(prompt: dict[str, Any], token: str) -> str:
         f"Xedoc approval needed: {str(prompt.get('kind') or 'approval')}",
         str(params.get("reason") or "Review this approval in Xedoc."),
     ]
-    simple_decisions = [decision for decision in decisions or [] if isinstance(decision, str)]
-    if simple_decisions:
-        lines.append("Choices: " + ", ".join(simple_decisions))
-        lines.append(f"Reply as `approval:{token} <choice>`.")
+    choice_entries = approval_choice_entries(prompt)
+    if choice_entries:
+        lines.append("Reply with the number only:")
+        lines.extend(
+            f"{index} - {label}"
+            for index, (label, _, _) in enumerate(choice_entries, 1)
+        )
     else:
         lines.append(
             f"Reply as `approval:{token} <JSON response>` to provide the "
@@ -1138,6 +1251,21 @@ def approval_answer(prompt: dict[str, Any], text: str) -> dict[str, Any] | None:
     if not isinstance(params, dict):
         return None
     selected = text.strip()
+    choice_entries = approval_choice_entries(prompt)
+    if selected.isdecimal():
+        choice_index = int(selected) - 1
+        if not 0 <= choice_index < len(choice_entries):
+            return None
+        _, choice_value, choice_kind = choice_entries[choice_index]
+        if method == "item/extensionInteraction/request":
+            if choice_kind == "dismiss":
+                return extension_interaction_response(params, "dismissed", None, None)
+            if choice_kind == "cancel":
+                return extension_interaction_response(params, "cancelled", None, None)
+            return extension_interaction_response(
+                params, "accepted", choice_value, None
+            )
+        return {"decision": choice_value}
     if method == "item/extensionInteraction/request":
         surface = params.get("surface")
         if not isinstance(surface, dict):
@@ -1205,6 +1333,40 @@ def approval_answer(prompt: dict[str, Any], text: str) -> dict[str, Any] | None:
     except json.JSONDecodeError:
         return None
     return response if isinstance(response, dict) else None
+
+
+def match_pending_prompt(
+    message: str, pending_prompts: dict[str, dict[str, Any]]
+) -> tuple[str, dict[str, Any], str, str] | None:
+    """Match a tokenized prompt or an unambiguous numeric approval reply."""
+    for prompt_id, state in pending_prompts.items():
+        token = state.get("token")
+        if isinstance(token, str) and message.startswith(f"prompt:{token} "):
+            return (
+                prompt_id,
+                state,
+                "prompt",
+                message.removeprefix(f"prompt:{token} "),
+            )
+    for prompt_id, state in pending_prompts.items():
+        token = state.get("token")
+        if isinstance(token, str) and message.startswith(f"approval:{token} "):
+            return (
+                prompt_id,
+                state,
+                "approval",
+                message.removeprefix(f"approval:{token} "),
+            )
+    if message.strip().isdecimal():
+        approval_prompts = [
+            (prompt_id, state)
+            for prompt_id, state in pending_prompts.items()
+            if state.get("prompt", {}).get("kind") != "requestUserInput"
+        ]
+        if len(approval_prompts) == 1:
+            prompt_id, state = approval_prompts[0]
+            return prompt_id, state, "approval", message.strip()
+    return None
 
 
 def extension_interaction_response(
@@ -1497,6 +1659,7 @@ def run_persistent() -> int:
     pending_prompts: dict[str, dict[str, Any]] = {}
     sent_user_event_ids: set[str] = set()
     sent_user_event_ids_lock = threading.Lock()
+    sent_file_change_ids: set[str] = set()
 
     def post_host_message(registration_id: str, level: str, message: str) -> None:
         try:
@@ -1547,16 +1710,26 @@ def run_persistent() -> int:
             if method == "item/completed" and isinstance(params, dict) and room_id:
                 item = params.get("item")
                 if isinstance(item, dict):
-                    text = native_user_message_text(item)
-                    if text is not None:
-                        with sent_user_event_ids_lock:
-                            event_id = user_matrix.send_text(room_id, text)
-                            if event_id:
-                                sent_user_event_ids.add(event_id)
+                    item_id = item.get("id")
+                    file_change = file_change_message(item)
+                    if (
+                        isinstance(item_id, str)
+                        and file_change is not None
+                        and item_id not in sent_file_change_ids
+                    ):
+                        agent_matrix.send_text(room_id, file_change)
+                        sent_file_change_ids.add(item_id)
                     else:
-                        text = completed_agent_message_text(item)
+                        text = native_user_message_text(item)
                         if text is not None:
-                            agent_matrix.send_text(room_id, text)
+                            with sent_user_event_ids_lock:
+                                event_id = user_matrix.send_text(room_id, text)
+                                if event_id:
+                                    sent_user_event_ids.add(event_id)
+                        else:
+                            text = completed_agent_message_text(item)
+                            if text is not None:
+                                agent_matrix.send_text(room_id, text)
             elif method == "script/promptOpened" and isinstance(params, dict):
                 remember_prompt(params)
             elif method == "script/promptClosed" and isinstance(params, dict):
@@ -1617,6 +1790,7 @@ def run_persistent() -> int:
                     "permissionsApproval",
                 ],
                 "sessionUpdates": True,
+                "fileChanges": True,
             },
             [
                 "userInput.send",
@@ -1704,33 +1878,13 @@ def run_persistent() -> int:
                     message = inbound.get_nowait()
                 except queue.Empty:
                     break
-                matched_prompt = next(
-                    (
-                        (prompt_id, state, "prompt")
-                        for prompt_id, state in pending_prompts.items()
-                        if message.startswith(f"prompt:{state['token']} ")
-                    ),
-                    None,
-                )
-                if matched_prompt is None:
-                    matched_prompt = next(
-                        (
-                            (prompt_id, state, "approval")
-                            for prompt_id, state in pending_prompts.items()
-                            if message.startswith(f"approval:{state['token']} ")
-                        ),
-                        None,
-                    )
+                matched_prompt = match_pending_prompt(message, pending_prompts)
                 if matched_prompt is None:
                     pending.append(message)
                 else:
-                    prompt_id, state, prefix = matched_prompt
+                    prompt_id, state, prefix, text = matched_prompt
                     prompt_answers.append(
-                        (
-                            prompt_id,
-                            prefix,
-                            message.removeprefix(f"{prefix}:{state['token']} "),
-                        )
+                        (prompt_id, prefix, text)
                     )
             if prompt_answers:
                 prompt_id, prefix, text = prompt_answers.popleft()
@@ -1747,9 +1901,15 @@ def run_persistent() -> int:
                     agent_matrix.send_text(
                         room_id,
                         (
-                            "That response could not be mapped. Reply with "
-                            f"{prefix}:{state['token']} and a listed choice "
-                            "or the requested JSON."
+                            "That response could not be mapped. "
+                            + (
+                                "Reply with one of the listed numbers."
+                                if prefix == "approval"
+                                else (
+                                    f"Reply with prompt:{state['token']} "
+                                    "and the requested answer."
+                                )
+                            )
                         ),
                     )
                     continue

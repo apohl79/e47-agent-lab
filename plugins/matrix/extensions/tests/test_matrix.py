@@ -951,6 +951,38 @@ def test_completed_agent_message_text_only_mirrors_completed_model_output() -> N
     ) is None
 
 
+def test_file_change_message_includes_edit_summary() -> None:
+    item = {
+        "id": "change-1",
+        "type": "fileChange",
+        "status": "completed",
+        "changes": [
+            {
+                "path": "scripts/model-router/reference-router",
+                "kind": {"type": "update"},
+                "diff": "@@\n-old\n+new\n",
+            },
+            {
+                "path": "scripts/test_model_router_tmux.sh",
+                "kind": {"type": "add"},
+                "diff": "first\nsecond\n",
+            },
+            {
+                "path": "scripts/obsolete.sh",
+                "kind": {"type": "delete"},
+                "diff": "old-first\nold-second\n",
+            },
+        ],
+    }
+
+    message = matrix.file_change_message(item)
+    assert message is not None
+    assert "File changes applied (3 file(s)): (+3 -3)" in message
+    assert "- scripts/model-router/reference-router [update] (+1 -1)" in message
+    assert "- scripts/test_model_router_tmux.sh [add] (+2 -0)" in message
+    assert "- scripts/obsolete.sh [delete] (+0 -2)" in message
+
+
 def test_limited_sync_backfills_gap_in_order_and_deduplicates() -> None:
     class FakeClient:
         calls: list[tuple[str, str, str]] = []
@@ -1078,8 +1110,9 @@ def test_approval_prompt_renders_and_answers_router_confirmation() -> None:
 
     assert "Use openai/gpt-5.6-luna/low?" in message
     assert "Scope: root" in message
-    assert "accept (Accept this route)" in message
-    assert "approval:token-1 <choice-id>" in message
+    assert "1 - Accept this route" in message
+    assert "2 - Keep current route" in message
+    assert "Reply with the number only" in message
     assert matrix.approval_answer(prompt, "accept") == {
         "extensionId": "model-router",
         "interactionId": "route-confirmation",
@@ -1111,7 +1144,11 @@ def test_approval_answer_supports_standard_decisions_and_explicit_json() -> None
         },
     }
 
-    assert "accept, decline" in matrix.approval_prompt_message(command, "token-2")
+    command_message = matrix.approval_prompt_message(command, "token-2")
+    assert "1 - Approve" in command_message
+    assert "2 - Deny" in command_message
+    assert matrix.approval_answer(command, "1") == {"decision": "accept"}
+    assert matrix.approval_answer(command, "2") == {"decision": "decline"}
     assert matrix.approval_answer(command, "accept") == {"decision": "accept"}
     assert matrix.approval_answer(command, "cancel") is None
     assert matrix.approval_answer(
@@ -1198,7 +1235,8 @@ def test_extension_interaction_menu_form_and_notice_are_not_trapped() -> None:
         },
     }
 
-    assert "select (Select)" in matrix.approval_prompt_message(menu, "menu")
+    assert "1 - Select" in matrix.approval_prompt_message(menu, "menu")
+    assert matrix.approval_answer(menu, "1")["action"] == {"id": "select"}
     assert matrix.approval_answer(menu, "select")["action"] == {"id": "select"}
     form_message = matrix.approval_prompt_message(form, "form")
     assert 'opaque_name (Name)' in form_message
@@ -1216,6 +1254,34 @@ def test_extension_interaction_menu_form_and_notice_are_not_trapped() -> None:
     assert matrix.approval_answer(notice, "dismiss")["outcome"] == "dismissed"
 
 
+def test_numeric_matrix_approval_matches_only_one_pending_approval() -> None:
+    approval = {
+        "token": "approval-token",
+        "prompt": {
+            "kind": "commandExecutionApproval",
+            "request": {
+                "params": {
+                    "availableDecisions": ["accept", "decline"],
+                }
+            },
+        },
+    }
+    user_input = {
+        "token": "input-token",
+        "prompt": {"kind": "requestUserInput"},
+    }
+
+    matched = matrix.match_pending_prompt("2", {"approval": approval})
+    assert matched == ("approval", approval, "approval", "2")
+    assert matrix.match_pending_prompt("2", {"approval": approval, "input": user_input}) == (
+        "approval",
+        approval,
+        "approval",
+        "2",
+    )
+    assert matrix.match_pending_prompt("2", {"approval": approval, "other": approval}) is None
+
+
 def test_repository_registers_matrix_and_removes_signal() -> None:
     versions = json.loads((REPO_ROOT / "plugin-versions.json").read_text())
     marketplace = json.loads(
@@ -1227,7 +1293,7 @@ def test_repository_registers_matrix_and_removes_signal() -> None:
     names = {entry["name"] for entry in marketplace["plugins"]}
 
     assert versions["plugins"]["matrix"] == {
-        "version": "0.7.0",
+        "version": "0.9.0",
         "hosts": ["xedoc"],
     }
     assert "signal" not in versions["plugins"]
