@@ -1,7 +1,7 @@
 {
   "name": "matrix",
-  "version": "0.5.0",
-  "description": "Connect enabled Xedoc sessions to private Matrix rooms used from Element.",
+  "version": "0.6.0",
+  "description": "Connect enabled Xedoc sessions to private Matrix rooms through OAuth.",
   "author": {
     "name": "apohl79"
   },
@@ -32,8 +32,8 @@
   ],
   "interface": {
     "displayName": "Matrix (Element)",
-    "shortDescription": "Connect Xedoc sessions to Matrix for bidirectional messaging.",
-    "longDescription": "Matrix creates one private room for each approved Xedoc root session, forwards Xedoc and Element messages bidirectionally without echoing Matrix input, and reports bridge lifecycle and failures to Xedoc.",
+    "shortDescription": "Connect Xedoc sessions to Matrix with OAuth and dual identities.",
+    "longDescription": "Matrix creates one private room for each approved Xedoc root session. OAuth signs in an agent identity for model messages and an Element user identity for Xedoc user messages; Element input remains bidirectional without echoing into its source room, and bridge lifecycle and failures are reported to Xedoc.",
     "developerName": "apohl79",
     "category": "Productivity",
     "capabilities": [

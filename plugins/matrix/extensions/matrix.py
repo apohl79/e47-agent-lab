@@ -2,9 +2,8 @@
 """Bridge one Xedoc root thread to a private Matrix room used from Element.
 
 The Xedoc plugin host invokes this file in one-shot setup/command mode and as
-a persistent session child. Setup stores the Matrix homeserver, the agent
-account and access token, and the target account under
-``~/.config/xedoc/matrix``.
+a persistent session child. Setup stores refreshable OAuth credentials for
+the Matrix agent and user accounts under ``~/.xedoc/extensions/matrix``.
 """
 
 from __future__ import annotations
@@ -18,6 +17,7 @@ import queue
 import select
 import sys
 import threading
+import time
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlparse
@@ -53,13 +53,25 @@ ROOMS_ROOT = CONFIG_ROOT / "rooms"
 LEGACY_CONFIG_PATH = LEGACY_CONFIG_ROOT / "config.json"
 LEGACY_ROOMS_ROOT = LEGACY_CONFIG_ROOT / "rooms"
 MATRIX_API_PREFIX = "/_matrix/client/v3"
+MATRIX_AUTH_METADATA_PATH = "/_matrix/client/v1/auth_metadata"
 MAX_RESPONSE_BYTES = 1 << 20
 SYNC_TIMEOUT_MS = 25_000
 MAX_BACKFILL_PAGES = 100
+OAUTH_DEVICE_GRANT = "urn:ietf:params:oauth:grant-type:device_code"
+OAUTH_API_SCOPE = "urn:matrix:client:api:*"
+CONFIG_WRITE_LOCK = threading.Lock()
 
 
 class MatrixError(RuntimeError):
     """A Matrix homeserver request failed or returned an invalid response."""
+
+
+class OAuthError(MatrixError):
+    """An OAuth endpoint rejected a request."""
+
+    def __init__(self, error: str, description: str | None = None) -> None:
+        self.error = error
+        super().__init__(description or error)
 
 
 class RejectRedirectHandler(HTTPRedirectHandler):
@@ -104,12 +116,6 @@ def complete(request: dict[str, Any], summary: str) -> dict[str, Any]:
 def setup_interaction(
     request: dict[str, Any], config: dict[str, Any]
 ) -> dict[str, Any]:
-    saved_token = bool(config.get("accessToken"))
-    token_description = (
-        "Leave blank to keep the saved token."
-        if saved_token
-        else "Create an access token for the agent account in Element."
-    )
     return response(
         request,
         {
@@ -123,8 +129,8 @@ def setup_interaction(
                     "id": "matrix-settings",
                     "title": "Configure Matrix (Element) bridge",
                     "subtitle": (
-                        "The agent account creates one private room per Xedoc session "
-                        "and invites the target account."
+                        "OAuth login connects an agent account for model messages and "
+                        "your account for Xedoc user messages."
                     ),
                     "fields": [
                         {
@@ -136,35 +142,56 @@ def setup_interaction(
                             "maxBytes": 512,
                             "sensitive": False,
                         },
-                        {
-                            "type": "text",
-                            "id": "agent-user-id",
-                            "label": "Agent Matrix account",
-                            "description": "Full Matrix ID used by the agent, such as @xedoc:example.org.",
-                            "value": str(config.get("agentUserId") or ""),
-                            "maxBytes": 255,
-                            "sensitive": False,
-                        },
-                        {
-                            "type": "text",
-                            "id": "access-token",
-                            "label": "Agent access token",
-                            "description": token_description,
-                            "value": "",
-                            "maxBytes": 4096,
-                            "sensitive": True,
-                        },
-                        {
-                            "type": "text",
-                            "id": "target-user-id",
-                            "label": "Target Matrix account",
-                            "description": "Full Matrix ID of the Element user invited to each room.",
-                            "value": str(config.get("targetUserId") or ""),
-                            "maxBytes": 255,
-                            "sensitive": False,
-                        },
                     ],
-                    "submit": action("save", "Save"),
+                    "submit": action("save", "Save and start OAuth login"),
+                    "cancel": None,
+                },
+            },
+        },
+    )
+
+
+def oauth_authorization_interaction(
+    request: dict[str, Any], pending: dict[str, Any]
+) -> dict[str, Any]:
+    fields: list[dict[str, Any]] = []
+    for role, label in (("agent", "Agent account"), ("user", "Your account")):
+        authorization = pending.get(role)
+        if not isinstance(authorization, dict):
+            continue
+        fields.append(
+            {
+                "type": "text",
+                "id": f"{role}-authorization",
+                "label": label,
+                "description": (
+                    f"Open {authorization['verificationUri']} and enter "
+                    f"code {authorization['userCode']}. Then press Complete "
+                    "OAuth login below."
+                ),
+                "value": "",
+                "maxBytes": 1,
+                "sensitive": False,
+            }
+        )
+    return response(
+        request,
+        {
+            "kind": "interaction",
+            "interaction": {
+                "id": "matrix-oauth",
+                "continuation": "matrix-oauth-complete",
+                "stateRevision": "1",
+                "surface": {
+                    "type": "form",
+                    "id": "matrix-oauth-login",
+                    "title": "Authorize Matrix accounts",
+                    "subtitle": (
+                        "Complete both device-authorisation pages in a browser. "
+                        "No token is shown or pasted into Xedoc."
+                    ),
+                    "fields": fields,
+                    "submit": action("complete", "Complete OAuth login"),
                     "cancel": None,
                 },
             },
@@ -208,11 +235,26 @@ def matrix_user_id(value: str) -> bool:
     return bool(localpart and separator and server)
 
 
+def normalize_homeserver(values: dict[str, Any]) -> str:
+    homeserver = str(values.get("homeserver") or "").strip().rstrip("/")
+    parsed = urlparse(homeserver)
+    if (
+        parsed.scheme != "https"
+        or not parsed.netloc
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("homeserver must be an HTTPS base URL")
+    return homeserver
+
+
 def normalize_config(
     values: dict[str, Any], existing: dict[str, Any] | None = None
 ) -> dict[str, str]:
     existing = existing or {}
-    homeserver = str(values.get("homeserver") or "").strip().rstrip("/")
+    homeserver = normalize_homeserver(values)
     agent_user_id = str(values.get("agent-user-id") or "").strip()
     target_user_id = str(values.get("target-user-id") or "").strip()
     access_token = str(values.get("access-token") or "").strip()
@@ -246,7 +288,7 @@ def normalize_config(
 
 
 def stored_config(value: dict[str, Any]) -> dict[str, str]:
-    return normalize_config(
+    config = normalize_config(
         {
             "homeserver": value.get("homeserver"),
             "agent-user-id": value.get("agentUserId"),
@@ -254,6 +296,19 @@ def stored_config(value: dict[str, Any]) -> dict[str, str]:
             "target-user-id": value.get("targetUserId"),
         }
     )
+    for key in (
+        "refreshToken",
+        "clientId",
+        "targetAccessToken",
+        "targetRefreshToken",
+        "targetClientId",
+        "oauthTokenEndpoint",
+    ):
+        stored = str(value.get(key) or "").strip()
+        if not stored:
+            raise ValueError("both Matrix accounts must be signed in with OAuth")
+        config[key] = stored
+    return config
 
 
 def debug_enabled(value: dict[str, Any]) -> bool:
@@ -273,22 +328,32 @@ def has_stored_config(value: dict[str, Any]) -> bool:
 
 
 def verify_access_token(
-    config: dict[str, Any], client: MatrixClient | None = None
+    config: dict[str, Any],
+    client: MatrixClient | None = None,
+    expected_user_key: str = "agentUserId",
 ) -> None:
     authenticated_user = (client or MatrixClient(config)).whoami()
-    if authenticated_user != config["agentUserId"]:
+    if authenticated_user != config[expected_user_key]:
         raise MatrixError(
             "the configured access token belongs to "
-            f"{authenticated_user}, not {config['agentUserId']}"
+            f"{authenticated_user}, not {config[expected_user_key]}"
         )
 
 
 class MatrixClient:
     """Minimal Matrix Client-Server API client with bounded responses."""
 
-    def __init__(self, config: dict[str, Any], opener: Any | None = None) -> None:
+    def __init__(
+        self,
+        config: dict[str, Any],
+        opener: Any | None = None,
+        role: str = "agent",
+    ) -> None:
         self.homeserver = str(config["homeserver"]).rstrip("/")
-        self.access_token = str(config["accessToken"])
+        self.config = config
+        self.role = role
+        self.access_key = "accessToken" if role == "agent" else "targetAccessToken"
+        self.access_token = str(config[self.access_key])
         self.opener = opener or build_opener(RejectRedirectHandler())
 
     def request(
@@ -298,6 +363,7 @@ class MatrixClient:
         payload: dict[str, Any] | None = None,
         query: dict[str, str | int] | None = None,
         timeout: float = 30,
+        refreshed: bool = False,
     ) -> dict[str, Any]:
         url = f"{self.homeserver}{MATRIX_API_PREFIX}{path}"
         if query:
@@ -326,6 +392,21 @@ class MatrixClient:
                 message = json.loads(detail).get("error", detail)
             except json.JSONDecodeError:
                 message = detail
+            if error.code == 401 and not refreshed:
+                try:
+                    refresh_oauth_account(self.config, self.role)
+                except OAuthError:
+                    pass
+                else:
+                    self.access_token = str(self.config[self.access_key])
+                    return self.request(
+                        method,
+                        path,
+                        payload,
+                        query,
+                        timeout,
+                        refreshed=True,
+                    )
             raise MatrixError(
                 f"Matrix request failed ({error.code}): {str(message)[:500]}"
             ) from error
@@ -374,9 +455,15 @@ class MatrixClient:
             {"name": room_name(title)},
         )
 
-    def send_text(self, room_id: str, text: str) -> None:
+    def join_room(self, room_id: str) -> None:
+        result = self.request("POST", f"/join/{quote(room_id, safe='')}")
+        joined_room_id = result.get("room_id")
+        if joined_room_id != room_id:
+            raise MatrixError("Matrix join response did not include the requested room")
+
+    def send_text(self, room_id: str, text: str) -> str | None:
         transaction_id = f"xedoc-{os.urandom(12).hex()}"
-        self.request(
+        result = self.request(
             "PUT",
             (
                 f"/rooms/{quote(room_id, safe='')}/send/m.room.message/"
@@ -384,6 +471,8 @@ class MatrixClient:
             ),
             {"msgtype": "m.text", "body": text},
         )
+        event_id = result.get("event_id")
+        return event_id if isinstance(event_id, str) else None
 
     def sync(
         self, room_id: str, since: str | None, timeout_ms: int
@@ -446,6 +535,216 @@ class MatrixClient:
         else:
             raise MatrixError("Matrix room history exceeded the pagination limit")
         return chronological
+
+
+class OAuthClient:
+    """Small OAuth client used for Matrix device authorisation and refresh."""
+
+    def __init__(self, opener: Any | None = None) -> None:
+        self.opener = opener or build_opener(RejectRedirectHandler())
+
+    def request(
+        self, url: str, payload: dict[str, Any], *, json_body: bool = False
+    ) -> dict[str, Any]:
+        parsed = urlparse(url)
+        if (
+            parsed.scheme != "https"
+            or not parsed.netloc
+            or parsed.username
+            or parsed.password
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise OAuthError("invalid_endpoint", "OAuth endpoint must be HTTPS")
+        body = (
+            json.dumps(payload, separators=(",", ":")).encode()
+            if json_body
+            else urlencode(
+                {key: value for key, value in payload.items() if value is not None}
+            ).encode()
+        )
+        request = Request(
+            url,
+            data=body,
+            method="POST",
+            headers={
+                "Accept": "application/json",
+                "Content-Type": (
+                    "application/json"
+                    if json_body
+                    else "application/x-www-form-urlencoded"
+                ),
+            },
+        )
+        try:
+            with self.opener.open(request, timeout=30) as opened:
+                raw = opened.read(MAX_RESPONSE_BYTES + 1)
+        except HTTPError as error:
+            raw = error.read(4096)
+            try:
+                value = json.loads(raw)
+            except json.JSONDecodeError:
+                value = {}
+            if isinstance(value, dict):
+                detail = value.get("error_description") or value.get("error")
+                raise OAuthError(
+                    str(value.get("error") or f"http_{error.code}"),
+                    str(detail)[:500] if detail else None,
+                ) from error
+            raise OAuthError(f"http_{error.code}") from error
+        except URLError as error:
+            raise OAuthError("network_error", str(error.reason)) from error
+        if len(raw) > MAX_RESPONSE_BYTES:
+            raise OAuthError("response_too_large")
+        try:
+            value = json.loads(raw)
+        except json.JSONDecodeError as error:
+            raise OAuthError("invalid_response") from error
+        if not isinstance(value, dict):
+            raise OAuthError("invalid_response")
+        return value
+
+    def metadata(self, homeserver: str) -> dict[str, str]:
+        url = f"{homeserver}{MATRIX_AUTH_METADATA_PATH}"
+        request = Request(url, headers={"Accept": "application/json"})
+        try:
+            with self.opener.open(request, timeout=30) as opened:
+                value = json.loads(opened.read(MAX_RESPONSE_BYTES + 1))
+        except (HTTPError, URLError, OSError, json.JSONDecodeError) as error:
+            raise OAuthError("metadata_failed", str(error)) from error
+        if not isinstance(value, dict):
+            raise OAuthError("invalid_metadata")
+        required = (
+            "registration_endpoint",
+            "device_authorization_endpoint",
+            "token_endpoint",
+        )
+        if not all(isinstance(value.get(key), str) for key in required):
+            raise OAuthError("unsupported_homeserver", "OAuth device login is unavailable")
+        return {key: str(value[key]) for key in required}
+
+
+def oauth_device_id(role: str) -> str:
+    return f"e47-{role}-{os.urandom(8).hex()}"
+
+
+def begin_oauth_login(homeserver: str, role: str) -> dict[str, Any]:
+    oauth = OAuthClient()
+    metadata = oauth.metadata(homeserver)
+    registration = oauth.request(
+        metadata["registration_endpoint"],
+        {
+            "application_type": "native",
+            "client_name": "E47 Matrix Bridge",
+            "client_uri": "https://github.com/apohl79/e47-agent-lab",
+            "grant_types": ["refresh_token", OAUTH_DEVICE_GRANT],
+            "redirect_uris": [],
+            "token_endpoint_auth_method": "none",
+        },
+        json_body=True,
+    )
+    client_id = registration.get("client_id")
+    if not isinstance(client_id, str) or not client_id:
+        raise OAuthError("invalid_registration", "OAuth registration omitted client_id")
+    device_id = oauth_device_id(role)
+    pending = oauth.request(
+        metadata["device_authorization_endpoint"],
+        {
+            "client_id": client_id,
+            "scope": f"{OAUTH_API_SCOPE} urn:matrix:client:device:{device_id}",
+        },
+    )
+    required = ("device_code", "user_code", "verification_uri")
+    if not all(isinstance(pending.get(key), str) for key in required):
+        raise OAuthError("invalid_device_authorization")
+    return {
+        "clientId": client_id,
+        "deviceCode": pending["device_code"],
+        "userCode": pending["user_code"],
+        "verificationUri": pending.get("verification_uri_complete")
+        or pending["verification_uri"],
+        "tokenEndpoint": metadata["token_endpoint"],
+        "expiresAt": int(time.time()) + int(pending.get("expires_in") or 600),
+        "role": role,
+    }
+
+
+def complete_oauth_login(pending: dict[str, Any]) -> dict[str, str]:
+    if int(pending.get("expiresAt") or 0) <= time.time():
+        raise OAuthError("expired_token", "OAuth authorisation expired; start again")
+    result = OAuthClient().request(
+        str(pending["tokenEndpoint"]),
+        {
+            "grant_type": OAUTH_DEVICE_GRANT,
+            "device_code": str(pending["deviceCode"]),
+            "client_id": str(pending["clientId"]),
+        },
+    )
+    access_token = result.get("access_token")
+    refresh_token = result.get("refresh_token")
+    if not isinstance(access_token, str) or not isinstance(refresh_token, str):
+        raise OAuthError(
+            "invalid_token_response", "OAuth login did not return refreshable tokens"
+        )
+    return {
+        "accessToken": access_token,
+        "refreshToken": refresh_token,
+        "clientId": str(pending["clientId"]),
+        "tokenEndpoint": str(pending["tokenEndpoint"]),
+    }
+
+
+def configured_oauth_account(
+    homeserver: str, role: str, credentials: dict[str, str]
+) -> tuple[str, dict[str, str]]:
+    probe = {
+        "homeserver": homeserver,
+        "accessToken": credentials["accessToken"],
+        "targetAccessToken": credentials["accessToken"],
+    }
+    user_id = MatrixClient(probe, role=role).whoami()
+    if not matrix_user_id(user_id):
+        raise OAuthError("invalid_whoami", "Matrix OAuth login returned an invalid user ID")
+    return user_id, credentials
+
+
+def refresh_oauth_account(config: dict[str, Any], role: str) -> None:
+    keys = (
+        ("accessToken", "refreshToken", "clientId")
+        if role == "agent"
+        else ("targetAccessToken", "targetRefreshToken", "targetClientId")
+    )
+    access_key, refresh_key, client_key = keys
+    with CONFIG_WRITE_LOCK:
+        persisted = load_settings()
+        current = persisted or config
+        refresh_token = current.get(refresh_key)
+        client_id = current.get(client_key)
+        token_endpoint = current.get("oauthTokenEndpoint")
+        if not all(
+            isinstance(value, str) and value
+            for value in (refresh_token, client_id, token_endpoint)
+        ):
+            return
+        result = OAuthClient().request(
+            token_endpoint,
+            {
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+                "client_id": client_id,
+            },
+        )
+        access_token = result.get("access_token")
+        if not isinstance(access_token, str) or not access_token:
+            raise OAuthError(
+                "invalid_token_response", "OAuth refresh omitted access_token"
+            )
+        current[access_key] = access_token
+        next_refresh = result.get("refresh_token")
+        if isinstance(next_refresh, str) and next_refresh:
+            current[refresh_key] = next_refresh
+        write_private_json(CONFIG_PATH, current)
+        config.update(current)
 
 
 def room_path(thread_id: str) -> Path:
@@ -548,10 +847,20 @@ def events_for_sync(
 
 
 def inbound_messages(
-    events: list[dict[str, Any]], target_user_id: str
+    events: list[dict[str, Any]],
+    target_user_id: str,
+    ignored_event_ids: set[str] | None = None,
 ) -> list[str]:
     messages: list[str] = []
     for event in events:
+        event_id = event.get("event_id")
+        if (
+            ignored_event_ids is not None
+            and isinstance(event_id, str)
+            and event_id in ignored_event_ids
+        ):
+            ignored_event_ids.discard(event_id)
+            continue
         if (
             event.get("type") != "m.room.message"
             or event.get("sender") != target_user_id
@@ -603,6 +912,8 @@ def receive_messages(
     messages: queue.Queue[str],
     host_messages: queue.Queue[tuple[str, str]],
     debug: Callable[[], bool],
+    ignored_event_ids: set[str],
+    ignored_event_ids_lock: threading.Lock,
     stop: threading.Event,
 ) -> None:
     last_error: str | None = None
@@ -628,7 +939,11 @@ def receive_messages(
         if last_error is not None and debug():
             host_messages.put(("info", "Matrix sync connection re-established."))
         last_error = None
-        for message in inbound_messages(events, target_user_id):
+        with ignored_event_ids_lock:
+            accepted = inbound_messages(
+                events, target_user_id, ignored_event_ids
+            )
+        for message in accepted:
             messages.put(message)
         since = next_batch
 
@@ -701,7 +1016,7 @@ def command_help() -> str:
             "/matrix on — enable this session's bridge",
             "/matrix off — disable this session's bridge",
             "/matrix restart — restart this session's bridge",
-            "/matrix setup — configure Matrix accounts and token",
+            "/matrix setup — sign in both Matrix accounts with OAuth",
             "/matrix debug on|off — enable or disable lifecycle messages",
             "/matrix help — show this help",
         ]
@@ -752,14 +1067,119 @@ def run_one_shot() -> int:
         if not isinstance(values, dict):
             raise RuntimeError("setup response is missing values")
         existing = load_settings()
-        config = normalize_config(values, existing)
-        verify_access_token(config)
-        if debug_enabled(existing):
-            config["debug"] = True
+        config = {
+            key: value
+            for key, value in existing.items()
+            if key not in {"pendingOAuth"}
+        }
+        config["homeserver"] = normalize_homeserver(values)
+        pending = {
+            "agent": begin_oauth_login(config["homeserver"], "agent"),
+            "user": begin_oauth_login(config["homeserver"], "user"),
+        }
+        config["pendingOAuth"] = pending
         write_private_json(CONFIG_PATH, config)
         print(
             json.dumps(
-                complete(request, "Matrix bridge configured."),
+                oauth_authorization_interaction(request, pending),
+                separators=(",", ":"),
+            ),
+            flush=True,
+        )
+        return 0
+
+    if (
+        method == "interaction.respond"
+        and params.get("continuation") == "matrix-oauth-complete"
+    ):
+        config = load_settings()
+        pending = config.get("pendingOAuth")
+        if not isinstance(pending, dict):
+            raise RuntimeError("No Matrix OAuth login is pending. Run /matrix setup.")
+        if params.get("outcome") in {"cancelled", "dismissed"}:
+            config.pop("pendingOAuth", None)
+            write_private_json(CONFIG_PATH, config)
+            print(
+                json.dumps(
+                    complete(request, "Matrix OAuth login cancelled."),
+                    separators=(",", ":"),
+                ),
+                flush=True,
+            )
+            return 0
+        completed = pending.setdefault("credentials", {})
+        if not isinstance(completed, dict):
+            raise RuntimeError("Matrix OAuth state is invalid. Run /matrix setup.")
+        credentials: dict[str, dict[str, str]] = {}
+        for role in ("agent", "user"):
+            authorization = pending.get(role)
+            if not isinstance(authorization, dict):
+                raise RuntimeError("Matrix OAuth state is invalid. Run /matrix setup.")
+            saved_credentials = completed.get(role)
+            if isinstance(saved_credentials, dict):
+                credentials[role] = {
+                    key: value
+                    for key, value in saved_credentials.items()
+                    if isinstance(key, str) and isinstance(value, str)
+                }
+                if all(
+                    credentials[role].get(key)
+                    for key in (
+                        "accessToken",
+                        "refreshToken",
+                        "clientId",
+                        "tokenEndpoint",
+                    )
+                ):
+                    continue
+                completed.pop(role, None)
+            try:
+                credentials[role] = complete_oauth_login(authorization)
+            except OAuthError as error:
+                if error.error == "authorization_pending":
+                    config["pendingOAuth"] = pending
+                    write_private_json(CONFIG_PATH, config)
+                    print(
+                        json.dumps(
+                            oauth_authorization_interaction(request, pending),
+                            separators=(",", ":"),
+                        ),
+                        flush=True,
+                    )
+                    return 0
+                raise
+            completed[role] = credentials[role]
+            config["pendingOAuth"] = pending
+            write_private_json(CONFIG_PATH, config)
+        agent_id, agent = configured_oauth_account(
+            str(config["homeserver"]), "agent", credentials["agent"]
+        )
+        user_id, user = configured_oauth_account(
+            str(config["homeserver"]), "user", credentials["user"]
+        )
+        if agent_id == user_id:
+            raise OAuthError(
+                "same_account",
+                "Authorize a distinct agent account and user account.",
+            )
+        config.update(
+            {
+                "agentUserId": agent_id,
+                "accessToken": agent["accessToken"],
+                "refreshToken": agent["refreshToken"],
+                "clientId": agent["clientId"],
+                "targetUserId": user_id,
+                "targetAccessToken": user["accessToken"],
+                "targetRefreshToken": user["refreshToken"],
+                "targetClientId": user["clientId"],
+                "oauthTokenEndpoint": agent["tokenEndpoint"],
+            }
+        )
+        config.pop("pendingOAuth", None)
+        write_private_json(CONFIG_PATH, config)
+        print(
+            json.dumps(
+                complete(request, "Matrix accounts connected with OAuth."),
                 separators=(",", ":"),
             ),
             flush=True,
@@ -856,6 +1276,8 @@ def run_persistent() -> int:
     stop = threading.Event()
     room_id: str | None = None
     pending_prompts: dict[str, dict[str, Any]] = {}
+    sent_user_event_ids: set[str] = set()
+    sent_user_event_ids_lock = threading.Lock()
 
     def post_host_message(registration_id: str, level: str, message: str) -> None:
         try:
@@ -875,7 +1297,7 @@ def run_persistent() -> int:
             return
         token = os.urandom(8).hex()
         pending_prompts[prompt["promptId"]] = {"prompt": prompt, "token": token}
-        matrix.send_text(room_id, prompt_message(prompt, token))
+        agent_matrix.send_text(room_id, prompt_message(prompt, token))
 
     def replace_pending_prompts(snapshot: dict[str, Any]) -> None:
         pending_prompts.clear()
@@ -895,10 +1317,15 @@ def run_persistent() -> int:
                 item = params.get("item")
                 if isinstance(item, dict):
                     text = native_user_message_text(item)
-                    if text is None:
-                        text = completed_agent_message_text(item)
                     if text is not None:
-                        matrix.send_text(room_id, text)
+                        with sent_user_event_ids_lock:
+                            event_id = user_matrix.send_text(room_id, text)
+                            if event_id:
+                                sent_user_event_ids.add(event_id)
+                    else:
+                        text = completed_agent_message_text(item)
+                        if text is not None:
+                            agent_matrix.send_text(room_id, text)
             elif method == "script/promptOpened" and isinstance(params, dict):
                 remember_prompt(params)
             elif method == "script/promptClosed" and isinstance(params, dict):
@@ -909,7 +1336,7 @@ def run_persistent() -> int:
                 session = params.get("session")
                 if isinstance(session, dict):
                     room_id = ensure_room(
-                        matrix,
+                        agent_matrix,
                         config,
                         thread_id,
                         str(session.get("title") or "session"),
@@ -924,7 +1351,7 @@ def run_persistent() -> int:
                         session = snapshot.get("session")
                         if isinstance(session, dict):
                             room_id = ensure_room(
-                                matrix,
+                                agent_matrix,
                                 config,
                                 thread_id,
                                 str(session.get("title") or "session"),
@@ -960,8 +1387,10 @@ def run_persistent() -> int:
         raw_config = load_settings()
         try:
             config = stored_config(raw_config)
-            matrix = MatrixClient(config)
-            verify_access_token(config, matrix)
+            agent_matrix = MatrixClient(raw_config)
+            user_matrix = MatrixClient(raw_config, role="user")
+            verify_access_token(config, agent_matrix)
+            verify_access_token(config, user_matrix, "targetUserId")
         except (MatrixError, ValueError) as error:
             post_host_message(
                 registration_id,
@@ -978,13 +1407,15 @@ def run_persistent() -> int:
         snapshot = registered.get("snapshot", {})
         session = snapshot.get("session", {}) if isinstance(snapshot, dict) else {}
         room_id = ensure_room(
-            matrix,
+            agent_matrix,
             config,
             thread_id,
             str(session.get("title") or "session"),
             lifecycle,
         )
-        initial_sync = matrix.sync(room_id, None, 0)
+        user_matrix.join_room(room_id)
+        lifecycle(f"Matrix user account joined {room_id}.")
+        initial_sync = user_matrix.sync(room_id, None, 0)
         since = initial_sync.get("next_batch")
         if not isinstance(since, str) or not since:
             raise MatrixError("Matrix initial sync did not include next_batch")
@@ -996,19 +1427,21 @@ def run_persistent() -> int:
         receiver = threading.Thread(
             target=receive_messages,
             args=(
-                matrix,
+                user_matrix,
                 room_id,
                 config["targetUserId"],
                 since,
                 inbound,
                 host_messages,
                 current_debug_setting,
+                sent_user_event_ids,
+                sent_user_event_ids_lock,
                 stop,
             ),
             daemon=True,
         )
         receiver.start()
-        matrix.send_text(
+        agent_matrix.send_text(
             room_id,
             "Matrix bridge connected. Send a message here from Element to talk to Xedoc.",
         )
@@ -1053,7 +1486,7 @@ def run_persistent() -> int:
                 prompt = state["prompt"]
                 answer = prompt_answer(prompt, text)
                 if answer is None:
-                    matrix.send_text(
+                    agent_matrix.send_text(
                         room_id,
                         (
                             "That answer could not be mapped. Reply with "
@@ -1069,7 +1502,7 @@ def run_persistent() -> int:
                         answer,
                     )
                 except RpcError:
-                    matrix.send_text(
+                    agent_matrix.send_text(
                         room_id, "Xedoc could not accept that answer."
                     )
                     post_host_message(

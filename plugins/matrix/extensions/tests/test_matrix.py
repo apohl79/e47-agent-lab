@@ -5,8 +5,10 @@ import io
 import json
 import os
 from pathlib import Path
+import queue
 import stat
 import sys
+import threading
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
@@ -49,6 +51,18 @@ def valid_values(**overrides: str) -> dict[str, str]:
     return values
 
 
+def valid_oauth_config() -> dict[str, str]:
+    return {
+        **matrix.normalize_config(valid_values()),
+        "refreshToken": "agent-refresh",
+        "clientId": "agent-client",
+        "targetAccessToken": "user-token",
+        "targetRefreshToken": "user-refresh",
+        "targetClientId": "user-client",
+        "oauthTokenEndpoint": "https://account.example.org/oauth2/token",
+    }
+
+
 def extension_request(method: str, params: dict[str, Any]) -> dict[str, Any]:
     return {
         "protocol": matrix.PROTOCOL,
@@ -59,7 +73,7 @@ def extension_request(method: str, params: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def test_setup_form_collects_agent_credentials_and_target_account() -> None:
+def test_setup_form_collects_homeserver_for_oauth_login() -> None:
     result = matrix.setup_interaction(
         extension_request("extension.setup.open", {}),
         {
@@ -74,17 +88,9 @@ def test_setup_form_collects_agent_credentials_and_target_account() -> None:
         field["id"]: field
         for field in result["result"]["interaction"]["surface"]["fields"]
     }
-    assert set(fields) == {
-        "homeserver",
-        "agent-user-id",
-        "access-token",
-        "target-user-id",
-    }
-    assert fields["agent-user-id"]["value"] == "@xedoc:example.org"
-    assert fields["target-user-id"]["value"] == "@andreas:example.org"
-    assert fields["access-token"]["sensitive"] is True
-    assert fields["access-token"]["value"] == ""
-    assert "keep the saved token" in fields["access-token"]["description"]
+    assert set(fields) == {"homeserver"}
+    assert fields["homeserver"]["value"] == "https://matrix.example.org"
+    assert "OAuth" in result["result"]["interaction"]["surface"]["subtitle"]
 
 
 def test_setup_response_persists_private_config(
@@ -92,25 +98,150 @@ def test_setup_response_persists_private_config(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    monkeypatch.setattr(matrix, "verify_access_token", lambda _config: None)
+    monkeypatch.setattr(
+        matrix,
+        "begin_oauth_login",
+        lambda _homeserver, role: {
+            "clientId": f"{role}-client",
+            "deviceCode": f"{role}-device-code",
+            "userCode": f"{role}-code",
+            "verificationUri": f"https://account.example.org/{role}",
+            "tokenEndpoint": "https://account.example.org/oauth2/token",
+            "expiresAt": 4_000_000_000,
+            "role": role,
+        },
+    )
     request = extension_request(
         "interaction.respond",
-        {"continuation": "matrix-setup", "values": valid_values()},
+        {
+            "continuation": "matrix-setup",
+            "values": {"homeserver": "https://matrix.example.org"},
+        },
     )
     monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(request)))
 
     assert matrix.run_one_shot() == 0
 
     output = json.loads(capsys.readouterr().out)
-    assert output["result"]["summary"] == "Matrix bridge configured."
-    assert matrix.load_json(matrix.CONFIG_PATH) == {
-        "homeserver": "https://matrix.example.org",
-        "agentUserId": "@xedoc:example.org",
-        "accessToken": "secret-token",
-        "targetUserId": "@andreas:example.org",
-    }
+    assert output["result"]["interaction"]["id"] == "matrix-oauth"
+    config = matrix.load_json(matrix.CONFIG_PATH)
+    assert config["homeserver"] == "https://matrix.example.org"
+    assert set(config["pendingOAuth"]) == {"agent", "user"}
     assert stat.S_IMODE(isolated_config.stat().st_mode) == 0o700
     assert stat.S_IMODE(matrix.CONFIG_PATH.stat().st_mode) == 0o600
+
+
+def test_oauth_completion_preserves_first_account_while_second_is_pending(
+    isolated_config: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    pending = {
+        "agent": {
+            "clientId": "agent-client",
+            "deviceCode": "agent-device",
+            "tokenEndpoint": "https://account.example.org/oauth2/token",
+            "userCode": "agent-code",
+            "verificationUri": "https://account.example.org/agent",
+            "expiresAt": 4_000_000_000,
+        },
+        "user": {
+            "clientId": "user-client",
+            "deviceCode": "user-device",
+            "tokenEndpoint": "https://account.example.org/oauth2/token",
+            "userCode": "user-code",
+            "verificationUri": "https://account.example.org/user",
+            "expiresAt": 4_000_000_000,
+        },
+    }
+    matrix.write_private_json(
+        matrix.CONFIG_PATH,
+        {"homeserver": "https://matrix.example.org", "pendingOAuth": pending},
+    )
+    request = extension_request(
+        "interaction.respond",
+        {"continuation": "matrix-oauth-complete", "values": {}},
+    )
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(request)))
+
+    def complete(authorization: dict[str, Any]) -> dict[str, str]:
+        if authorization["clientId"] == "user-client":
+            raise matrix.OAuthError("authorization_pending")
+        return {
+            "accessToken": "agent-access",
+            "refreshToken": "agent-refresh",
+            "clientId": "agent-client",
+            "tokenEndpoint": "https://account.example.org/oauth2/token",
+        }
+
+    monkeypatch.setattr(matrix, "complete_oauth_login", complete)
+
+    assert matrix.run_one_shot() == 0
+    saved = matrix.load_json(matrix.CONFIG_PATH)
+    assert saved["pendingOAuth"]["credentials"]["agent"]["accessToken"] == (
+        "agent-access"
+    )
+    assert json.loads(capsys.readouterr().out)["result"]["interaction"]["id"] == (
+        "matrix-oauth"
+    )
+
+
+def test_oauth_completion_configures_distinct_agent_and_user_accounts(
+    isolated_config: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    matrix.write_private_json(
+        matrix.CONFIG_PATH,
+        {
+            "homeserver": "https://matrix.example.org",
+            "pendingOAuth": {
+                role: {
+                    "clientId": f"{role}-client",
+                    "deviceCode": f"{role}-device",
+                    "tokenEndpoint": "https://account.example.org/oauth2/token",
+                    "userCode": f"{role}-code",
+                    "verificationUri": f"https://account.example.org/{role}",
+                    "expiresAt": 4_000_000_000,
+                }
+                for role in ("agent", "user")
+            },
+        },
+    )
+    request = extension_request(
+        "interaction.respond",
+        {"continuation": "matrix-oauth-complete", "values": {}},
+    )
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(request)))
+    monkeypatch.setattr(
+        matrix,
+        "complete_oauth_login",
+        lambda authorization: {
+            "accessToken": f"{authorization['clientId']}-access",
+            "refreshToken": f"{authorization['clientId']}-refresh",
+            "clientId": str(authorization["clientId"]),
+            "tokenEndpoint": "https://account.example.org/oauth2/token",
+        },
+    )
+    monkeypatch.setattr(
+        matrix,
+        "configured_oauth_account",
+        lambda _homeserver, role, credentials: (
+            "@agent:example.org" if role == "agent" else "@user:example.org",
+            credentials,
+        ),
+    )
+
+    assert matrix.run_one_shot() == 0
+    saved = matrix.load_json(matrix.CONFIG_PATH)
+    assert saved["agentUserId"] == "@agent:example.org"
+    assert saved["targetUserId"] == "@user:example.org"
+    assert saved["accessToken"] == "agent-client-access"
+    assert saved["targetAccessToken"] == "user-client-access"
+    assert "pendingOAuth" not in saved
+    assert "Matrix accounts connected with OAuth." == json.loads(
+        capsys.readouterr().out
+    )["result"]["summary"]
 
 
 def test_load_settings_migrates_legacy_configuration_once(
@@ -132,29 +263,30 @@ def test_load_settings_migrates_legacy_configuration_once(
     assert matrix.load_settings() == legacy
 
 
-def test_setup_rejects_an_inactive_token_without_replacing_saved_config(
+def test_setup_preserves_existing_config_when_oauth_login_cannot_start(
     isolated_config: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    saved = matrix.normalize_config(
-        valid_values(**{"access-token": "saved-token"})
-    )
+    saved = valid_oauth_config()
     matrix.write_private_json(matrix.CONFIG_PATH, saved)
     request = extension_request(
         "interaction.respond",
         {
             "continuation": "matrix-setup",
-            "values": valid_values(**{"access-token": "inactive-token"}),
+            "values": {"homeserver": "https://matrix.example.org"},
         },
     )
     monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(request)))
 
-    def reject_token(_config: dict[str, str]) -> None:
-        raise matrix.MatrixError("Matrix request failed (401): Token is not active")
+    monkeypatch.setattr(
+        matrix,
+        "begin_oauth_login",
+        lambda _homeserver, _role: (_ for _ in ()).throw(
+            matrix.OAuthError("metadata_failed")
+        ),
+    )
 
-    monkeypatch.setattr(matrix, "verify_access_token", reject_token)
-
-    with pytest.raises(matrix.MatrixError, match="Token is not active"):
+    with pytest.raises(matrix.OAuthError, match="metadata_failed"):
         matrix.run_one_shot()
 
     assert matrix.load_json(matrix.CONFIG_PATH) == saved
@@ -201,7 +333,7 @@ def test_setup_open_skips_form_for_complete_config(
 ) -> None:
     matrix.write_private_json(
         matrix.CONFIG_PATH,
-        matrix.normalize_config(valid_values()),
+        valid_oauth_config(),
     )
     request = extension_request("extension.setup.open", {})
     monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(request)))
@@ -222,7 +354,7 @@ def test_setup_command_reopens_settings(
 ) -> None:
     matrix.write_private_json(
         matrix.CONFIG_PATH,
-        matrix.normalize_config(valid_values()),
+        valid_oauth_config(),
     )
     request = extension_request(
         "extension.command.invoke",
@@ -266,7 +398,7 @@ def test_debug_command_persists_lifecycle_setting(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     matrix.write_private_json(
-        matrix.CONFIG_PATH, matrix.normalize_config(valid_values())
+        matrix.CONFIG_PATH, valid_oauth_config()
     )
     request = extension_request(
         "extension.command.invoke", {"arguments": ["debug", "on"]}
@@ -318,6 +450,13 @@ def test_normalize_config_preserves_saved_token_and_rejects_unsafe_values() -> N
         matrix.normalize_config(
             valid_values(**{"target-user-id": "@xedoc:example.org"})
         )
+
+
+def test_stored_config_requires_refreshable_oauth_credentials() -> None:
+    config = matrix.normalize_config(valid_values())
+    config["targetAccessToken"] = "user-access"
+    with pytest.raises(ValueError, match="both Matrix accounts"):
+        matrix.stored_config(config)
 
 
 class FakeResponse:
@@ -395,6 +534,72 @@ def test_matrix_client_updates_room_name() -> None:
         "%21room%3Aexample.org/state/m.room.name"
     )
     assert json.loads(opener.request.data) == {"name": "Xedoc: Renamed session"}
+
+
+def test_matrix_client_joins_room_as_the_user_account() -> None:
+    opener = FakeOpener({"room_id": "!room:example.org"})
+    client = matrix.MatrixClient(
+        valid_oauth_config(), opener=opener, role="user"
+    )
+
+    client.join_room("!room:example.org")
+
+    assert (
+        opener.request.full_url
+        == "https://matrix.example.org/_matrix/client/v3/join/%21room%3Aexample.org"
+    )
+    assert opener.request.get_header("Authorization") == "Bearer user-token"
+
+
+def test_oauth_metadata_uses_the_supported_client_api_endpoint() -> None:
+    opener = FakeOpener(
+        {
+            "registration_endpoint": "https://account.example.org/register",
+            "device_authorization_endpoint": "https://account.example.org/device",
+            "token_endpoint": "https://account.example.org/token",
+        }
+    )
+
+    metadata = matrix.OAuthClient(opener).metadata("https://matrix.example.org")
+
+    assert metadata["token_endpoint"] == "https://account.example.org/token"
+    assert (
+        opener.request.full_url
+        == "https://matrix.example.org/_matrix/client/v1/auth_metadata"
+    )
+
+
+def test_refresh_rotates_and_persists_only_the_account_being_refreshed(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = valid_oauth_config()
+    matrix.write_private_json(matrix.CONFIG_PATH, config)
+
+    class FakeOAuthClient:
+        def request(
+            self, endpoint: str, payload: dict[str, str], **_kwargs: Any
+        ) -> dict[str, str]:
+            assert endpoint == "https://account.example.org/oauth2/token"
+            assert payload == {
+                "grant_type": "refresh_token",
+                "refresh_token": "user-refresh",
+                "client_id": "user-client",
+            }
+            return {
+                "access_token": "rotated-user-access",
+                "refresh_token": "rotated-user-refresh",
+            }
+
+    monkeypatch.setattr(matrix, "OAuthClient", FakeOAuthClient)
+
+    matrix.refresh_oauth_account(config, "user")
+
+    assert config["targetAccessToken"] == "rotated-user-access"
+    assert config["targetRefreshToken"] == "rotated-user-refresh"
+    assert config["accessToken"] == "secret-token"
+    assert matrix.load_json(matrix.CONFIG_PATH)["targetAccessToken"] == (
+        "rotated-user-access"
+    )
 
 
 def test_authenticated_matrix_requests_never_follow_redirects() -> None:
@@ -629,6 +834,89 @@ def test_inbound_messages_accepts_only_target_text_and_ignores_edits() -> None:
     assert matrix.inbound_messages(events, "@andreas:example.org") == ["continue"]
 
 
+def test_inbound_messages_ignores_xedoc_messages_sent_with_the_user_account() -> None:
+    event = {
+        "event_id": "$from-xedoc",
+        "type": "m.room.message",
+        "sender": "@andreas:example.org",
+        "content": {"msgtype": "m.text", "body": "do not loop"},
+    }
+
+    ignored = {"$from-xedoc"}
+    assert matrix.inbound_messages([event], "@andreas:example.org", ignored) == []
+    assert ignored == set()
+
+
+def test_receiver_waits_for_user_send_to_register_its_echo_event() -> None:
+    stop = threading.Event()
+    synced = threading.Event()
+    sent_event_ids: set[str] = set()
+    sent_event_ids_lock = threading.Lock()
+    sent_event_ids_lock.acquire()
+
+    class FakeClient:
+        calls = 0
+
+        def sync(
+            self, _room_id: str, _since: str, _timeout: int
+        ) -> dict[str, Any]:
+            self.calls += 1
+            if self.calls == 1:
+                synced.set()
+                return {
+                    "next_batch": "next",
+                    "rooms": {
+                        "join": {
+                            "!room:example.org": {
+                                "timeline": {
+                                    "events": [
+                                        {
+                                            "event_id": "$from-xedoc",
+                                            "type": "m.room.message",
+                                            "sender": "@andreas:example.org",
+                                            "content": {
+                                                "msgtype": "m.text",
+                                                "body": "do not loop",
+                                            },
+                                        }
+                                    ]
+                                }
+                            }
+                        }
+                    },
+                }
+            stop.wait(0.01)
+            return {"next_batch": "next", "rooms": {}}
+
+    inbound: queue.Queue[str] = queue.Queue()
+    host_messages: queue.Queue[tuple[str, str]] = queue.Queue()
+    receiver = threading.Thread(
+        target=matrix.receive_messages,
+        args=(
+            FakeClient(),
+            "!room:example.org",
+            "@andreas:example.org",
+            "prior",
+            inbound,
+            host_messages,
+            lambda: False,
+            sent_event_ids,
+            sent_event_ids_lock,
+            stop,
+        ),
+    )
+    receiver.start()
+    assert synced.wait(1)
+    assert inbound.empty()
+    sent_event_ids.add("$from-xedoc")
+    sent_event_ids_lock.release()
+    stop.set()
+    receiver.join(1)
+
+    assert inbound.empty()
+    assert not receiver.is_alive()
+
+
 def test_native_user_message_text_mirrors_xedoc_input_without_matrix_echo() -> None:
     native_message = {
         "type": "userMessage",
@@ -764,7 +1052,7 @@ def test_repository_registers_matrix_and_removes_signal() -> None:
     names = {entry["name"] for entry in marketplace["plugins"]}
 
     assert versions["plugins"]["matrix"] == {
-        "version": "0.5.0",
+        "version": "0.6.0",
         "hosts": ["xedoc"],
     }
     assert "signal" not in versions["plugins"]

@@ -11,19 +11,27 @@ The bridge persists each root-session-to-room binding, so resuming a session
 after a machine reboot uses the same Matrix room. When the session is renamed,
 the room name follows it.
 
-Setup asks for:
+Setup uses Matrix OAuth device authorization. Run `/matrix setup`, enter the
+homeserver URL, then complete the two browser approvals shown by Xedoc:
 
-- the Matrix homeserver HTTPS URL;
-- the full Matrix ID and access token of the account the agent should use; and
-- the full Matrix ID of the target Element account.
+- authorize the agent account, which sends model responses and bridge lifecycle
+  messages; and
+- authorize your Element account, which sends user messages entered directly
+  in Xedoc and receives Element input.
 
-Configuration, access tokens, and per-thread room IDs are stored under
+The extension verifies each authenticated Matrix ID and requires distinct
+accounts. It registers an OAuth client for each setup flow, retains refresh
+tokens, and automatically refreshes an expired access token before retrying a
+Matrix request. No access token is displayed or pasted into Xedoc.
+
+Configuration, OAuth tokens, and per-thread room IDs are stored under
 `~/.xedoc/extensions/matrix` (or `$XEDOC_HOME/extensions/matrix`) with
 restrictive permissions, independent of the installed plugin cache. Existing
 settings and room bindings under `~/.config/xedoc/matrix` are migrated on first
-use without deleting the legacy copies. The extension uses the Matrix
-Client-Server API directly and sends the access token only in the
-`Authorization` header.
+use without deleting the legacy copies. Legacy static-token settings do not
+meet the OAuth requirement; run `/matrix setup` again to replace them. The
+extension uses the Matrix Client-Server API directly and sends access tokens
+only in the `Authorization` header.
 
 The extension owns its settings and decides whether setup is needed. The bridge
 is disabled by default after setup. Use `/matrix setup` to reopen the settings
