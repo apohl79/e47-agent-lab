@@ -551,6 +551,51 @@ def test_matrix_client_joins_room_as_the_user_account() -> None:
     assert opener.request.get_header("Authorization") == "Bearer user-token"
 
 
+def test_matrix_client_sends_rich_html_with_plaintext_fallback() -> None:
+    opener = FakeOpener({"event_id": "$event"})
+    client = matrix.MatrixClient(
+        matrix.normalize_config(valid_values()), opener=opener
+    )
+
+    assert (
+        client.send_text(
+            "!room:example.org",
+            "# Completed\n\n- `src/main.py`\n- **2 tests**",
+            "success",
+        )
+        == "$event"
+    )
+
+    assert json.loads(opener.request.data) == {
+        "msgtype": "m.text",
+        "body": "# Completed\n\n- `src/main.py`\n- **2 tests**",
+        "format": "org.matrix.custom.html",
+        "formatted_body": (
+            '<h1><span data-mx-color="#16a34a">Completed</span></h1>'
+            "<ul><li><code>src/main.py</code></li>"
+            "<li><strong>2 tests</strong></li></ul>"
+        ),
+    }
+
+
+def test_matrix_formatted_body_escapes_html_and_preserves_code_blocks() -> None:
+    assert matrix.matrix_formatted_body(
+        "Use <script>alert(1)</script>\n\n```python\nprint('<safe>')\n```"
+    ) == (
+        "<p>Use &lt;script&gt;alert(1)&lt;/script&gt;</p>"
+        "<pre><code class=\"language-python\">print(&#x27;&lt;safe&gt;&#x27;)"
+        "</code></pre>"
+    )
+
+
+def test_matrix_formatted_body_keeps_link_query_parameters() -> None:
+    assert matrix.matrix_formatted_body(
+        "[Open](https://example.org/path?one=1&two=2)"
+    ) == (
+        '<p><a href="https://example.org/path?one=1&amp;two=2">Open</a></p>'
+    )
+
+
 def test_oauth_metadata_uses_the_supported_client_api_endpoint() -> None:
     opener = FakeOpener(
         {
@@ -981,6 +1026,7 @@ def test_file_change_message_includes_edit_summary() -> None:
     assert "- scripts/model-router/reference-router [update] (+1 -1)" in message
     assert "- scripts/test_model_router_tmux.sh [add] (+2 -0)" in message
     assert "- scripts/obsolete.sh [delete] (+0 -2)" in message
+    assert matrix.file_change_tone(item) == "success"
 
 
 def test_limited_sync_backfills_gap_in_order_and_deduplicates() -> None:
@@ -1293,9 +1339,10 @@ def test_repository_registers_matrix_and_removes_signal() -> None:
     names = {entry["name"] for entry in marketplace["plugins"]}
 
     assert versions["plugins"]["matrix"] == {
-        "version": "0.9.0",
+        "version": "0.10.0",
         "hosts": ["xedoc"],
     }
+    assert matrix.PLUGIN_VERSION == versions["plugins"]["matrix"]["version"]
     assert "signal" not in versions["plugins"]
     assert "matrix" in names
     assert "signal" not in names

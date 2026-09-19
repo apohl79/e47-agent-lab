@@ -9,11 +9,13 @@ the Matrix agent and user accounts under ``~/.xedoc/extensions/matrix``.
 from __future__ import annotations
 
 from collections import deque
+from html import escape
 import hashlib
 import json
 import os
 from pathlib import Path
 import queue
+import re
 import select
 import sys
 import threading
@@ -37,7 +39,7 @@ except ModuleNotFoundError:
 
 
 PROTOCOL = "xedoc.script/v1"
-PLUGIN_VERSION = "0.1.0"
+PLUGIN_VERSION = "0.10.0"
 LEGACY_CONFIG_ROOT = (
     Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
     / "xedoc"
@@ -60,6 +62,12 @@ MAX_BACKFILL_PAGES = 100
 OAUTH_DEVICE_GRANT = "urn:ietf:params:oauth:grant-type:device_code"
 OAUTH_API_SCOPE = "urn:matrix:client:api:*"
 CONFIG_WRITE_LOCK = threading.Lock()
+MATRIX_MESSAGE_TONES = {
+    "success": "#16a34a",
+    "warning": "#d97706",
+    "error": "#dc2626",
+    "info": "#2563eb",
+}
 
 
 class MatrixError(RuntimeError):
@@ -461,7 +469,9 @@ class MatrixClient:
         if joined_room_id != room_id:
             raise MatrixError("Matrix join response did not include the requested room")
 
-    def send_text(self, room_id: str, text: str) -> str | None:
+    def send_text(
+        self, room_id: str, text: str, tone: str | None = None
+    ) -> str | None:
         transaction_id = f"xedoc-{os.urandom(12).hex()}"
         result = self.request(
             "PUT",
@@ -469,7 +479,12 @@ class MatrixClient:
                 f"/rooms/{quote(room_id, safe='')}/send/m.room.message/"
                 f"{transaction_id}"
             ),
-            {"msgtype": "m.text", "body": text},
+            {
+                "msgtype": "m.text",
+                "body": text,
+                "format": "org.matrix.custom.html",
+                "formatted_body": matrix_formatted_body(text, tone),
+            },
         )
         event_id = result.get("event_id")
         return event_id if isinstance(event_id, str) else None
@@ -904,6 +919,122 @@ def completed_agent_message_text(item: dict[str, Any]) -> str | None:
     return text if isinstance(text, str) and text.strip() else None
 
 
+def matrix_inline_html(text: str) -> str:
+    """Render a safe, portable subset of Markdown-like inline formatting."""
+
+    placeholders: list[str] = []
+
+    def stash(value: str) -> str:
+        placeholders.append(value)
+        return f"\x00{len(placeholders) - 1}\x00"
+
+    escaped = escape(text, quote=False)
+    escaped = re.sub(
+        r"`([^`\n]+)`",
+        lambda match: stash(f"<code>{match.group(1)}</code>"),
+        escaped,
+    )
+    escaped = re.sub(
+        r"\[([^\]\n]+)\]\((https?://[^)\s]+)\)",
+        lambda match: stash(
+            f'<a href="{match.group(2).replace(chr(34), "&quot;").replace(chr(39), "&#x27;")}">'
+            f"{match.group(1)}</a>"
+        ),
+        escaped,
+    )
+    escaped = re.sub(r"\*\*([^*\n]+)\*\*", r"<strong>\1</strong>", escaped)
+    escaped = re.sub(r"__([^_\n]+)__", r"<strong>\1</strong>", escaped)
+    escaped = re.sub(r"~~([^~\n]+)~~", r"<s>\1</s>", escaped)
+    escaped = re.sub(r"(?<!\*)\*([^*\n]+)\*(?!\*)", r"<em>\1</em>", escaped)
+    escaped = re.sub(r"(?<!_)_([^_\n]+)_(?!_)", r"<em>\1</em>", escaped)
+    for index, value in enumerate(placeholders):
+        escaped = escaped.replace(f"\x00{index}\x00", value)
+    return escaped
+
+
+def matrix_formatted_body(text: str, tone: str | None = None) -> str:
+    """Create Matrix custom HTML with a plaintext fallback kept by the caller."""
+
+    lines = text.splitlines()
+    blocks: list[str] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if not line:
+            index += 1
+            continue
+        if line.startswith("```"):
+            language = line[3:].strip()
+            index += 1
+            code: list[str] = []
+            while index < len(lines) and not lines[index].startswith("```"):
+                code.append(lines[index])
+                index += 1
+            if index < len(lines):
+                index += 1
+            language_class = (
+                f' class="language-{escape(language, quote=True)}"'
+                if language
+                else ""
+            )
+            blocks.append(
+                f"<pre><code{language_class}>{escape(chr(10).join(code))}</code></pre>"
+            )
+            continue
+        heading = re.match(r"^(#{1,6})\s+(.+)$", line)
+        if heading:
+            level = len(heading.group(1))
+            blocks.append(
+                f"<h{level}>{matrix_inline_html(heading.group(2))}</h{level}>"
+            )
+            index += 1
+            continue
+        if line.startswith("> "):
+            quote_lines: list[str] = []
+            while index < len(lines) and lines[index].startswith("> "):
+                quote_lines.append(matrix_inline_html(lines[index][2:]))
+                index += 1
+            blocks.append(f"<blockquote>{'<br>'.join(quote_lines)}</blockquote>")
+            continue
+        if re.match(r"^[-*]\s+", line):
+            items: list[str] = []
+            while index < len(lines):
+                item = re.match(r"^[-*]\s+(.+)$", lines[index])
+                if not item:
+                    break
+                items.append(f"<li>{matrix_inline_html(item.group(1))}</li>")
+                index += 1
+            blocks.append(f"<ul>{''.join(items)}</ul>")
+            continue
+        paragraph = [matrix_inline_html(line)]
+        index += 1
+        while index < len(lines) and lines[index]:
+            if (
+                lines[index].startswith("```")
+                or re.match(r"^(#{1,6})\s+", lines[index])
+                or lines[index].startswith("> ")
+                or re.match(r"^[-*]\s+", lines[index])
+            ):
+                break
+            paragraph.append(matrix_inline_html(lines[index]))
+            index += 1
+        blocks.append(f"<p>{'<br>'.join(paragraph)}</p>")
+
+    body = "".join(blocks) or "<p></p>"
+    color = MATRIX_MESSAGE_TONES.get(tone or "")
+    if not color:
+        return body
+    first_block = re.match(r"<(h[1-6]|p)>(.*?)</\1>", body, flags=re.DOTALL)
+    if not first_block:
+        return f'<span data-mx-color="{color}">●</span>{body}'
+    tag = first_block.group(1)
+    colored = (
+        f'<{tag}><span data-mx-color="{color}">{first_block.group(2)}</span>'
+        f"</{tag}>"
+    )
+    return f"{colored}{body[first_block.end():]}"
+
+
 def file_change_message(item: dict[str, Any]) -> str | None:
     if item.get("type") != "fileChange":
         return None
@@ -963,6 +1094,15 @@ def file_change_message(item: dict[str, Any]) -> str | None:
         return None
     lines[0] += f" (+{added_total} -{removed_total})"
     return "\n".join(lines)
+
+
+def file_change_tone(item: dict[str, Any]) -> str | None:
+    return {
+        "completed": "success",
+        "failed": "error",
+        "declined": "warning",
+        "inProgress": "info",
+    }.get(item.get("status"))
 
 
 def receive_messages(
@@ -1717,7 +1857,9 @@ def run_persistent() -> int:
                         and file_change is not None
                         and item_id not in sent_file_change_ids
                     ):
-                        agent_matrix.send_text(room_id, file_change)
+                        agent_matrix.send_text(
+                            room_id, file_change, file_change_tone(item)
+                        )
                         sent_file_change_ids.add(item_id)
                     else:
                         text = native_user_message_text(item)

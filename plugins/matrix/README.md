@@ -15,7 +15,11 @@ approval that needs structured data still uses the tokenized JSON form shown
 in the prompt; the bridge never guesses an approval response.
 
 Completed file edits are also posted to the room as a compact summary with the
-edited paths and added/removed line counts.
+edited paths and added/removed line counts. Mirrored messages include a
+plaintext fallback plus Matrix-safe rich HTML: headings, lists, quoted text,
+fenced and inline code, emphasis, and HTTPS links render in capable clients.
+Completed, failed, declined, and in-progress file changes receive a semantic
+success, error, warning, or informational accent respectively.
 
 The bridge persists each root-session-to-room binding, so resuming a session
 after a machine reboot uses the same Matrix room. When the session is renamed,
