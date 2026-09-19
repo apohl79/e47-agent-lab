@@ -18,7 +18,7 @@ import queue
 import select
 import sys
 import threading
-from typing import Any
+from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlparse
 from urllib.request import build_opener, HTTPRedirectHandler, Request
@@ -240,6 +240,14 @@ def stored_config(value: dict[str, Any]) -> dict[str, str]:
     )
 
 
+def debug_enabled(value: dict[str, Any]) -> bool:
+    return value.get("debug") is True
+
+
+def current_debug_setting() -> bool:
+    return debug_enabled(load_json(CONFIG_PATH))
+
+
 def has_stored_config(value: dict[str, Any]) -> bool:
     try:
         stored_config(value)
@@ -434,7 +442,11 @@ def room_name(title: str) -> str:
 
 
 def ensure_room(
-    client: MatrixClient, config: dict[str, Any], thread_id: str, title: str
+    client: MatrixClient,
+    config: dict[str, Any],
+    thread_id: str,
+    title: str,
+    lifecycle: Callable[[str], None] | None = None,
 ) -> str:
     path = room_path(thread_id)
     stored = load_json(path)
@@ -452,9 +464,13 @@ def ensure_room(
         if stored.get("title") != title:
             client.update_room_name(room_id, title)
             write_private_json(path, {"roomId": room_id, "title": title, **binding})
+            if lifecycle:
+                lifecycle(f"Matrix room renamed to {room_name(title)!r}.")
         return room_id
     room_id = client.create_room(title or thread_id, str(config["targetUserId"]))
     write_private_json(path, {"roomId": room_id, "title": title, **binding})
+    if lifecycle:
+        lifecycle(f"Matrix room created as {room_name(title or thread_id)!r}.")
     return room_id
 
 
@@ -522,35 +538,30 @@ def inbound_messages(
     return messages
 
 
-def turn_messages(turn: dict[str, Any]) -> list[str]:
-    items = turn.get("items")
-    if not isinstance(items, list):
-        return []
-    messages: list[str] = []
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        if item.get("type") == "userMessage":
-            client_id = item.get("clientId")
-            if isinstance(client_id, str) and client_id.startswith("matrix-"):
-                continue
-            content = item.get("content")
-            if not isinstance(content, list):
-                continue
-            text = "".join(
-                fragment["text"]
-                for fragment in content
-                if isinstance(fragment, dict)
-                and fragment.get("type") == "text"
-                and isinstance(fragment.get("text"), str)
-            )
-            if text.strip():
-                messages.append(text)
-        elif item.get("type") == "agentMessage":
-            text = item.get("text")
-            if isinstance(text, str) and text.strip():
-                messages.append(text)
-    return messages
+def native_user_message_text(item: dict[str, Any]) -> str | None:
+    if item.get("type") != "userMessage":
+        return None
+    client_id = item.get("clientId")
+    if isinstance(client_id, str) and client_id.startswith("matrix-"):
+        return None
+    content = item.get("content")
+    if not isinstance(content, list):
+        return None
+    text = "".join(
+        fragment["text"]
+        for fragment in content
+        if isinstance(fragment, dict)
+        and fragment.get("type") == "text"
+        and isinstance(fragment.get("text"), str)
+    )
+    return text if text.strip() else None
+
+
+def completed_agent_message_text(item: dict[str, Any]) -> str | None:
+    if item.get("type") != "agentMessage":
+        return None
+    text = item.get("text")
+    return text if isinstance(text, str) and text.strip() else None
 
 
 def receive_messages(
@@ -559,19 +570,33 @@ def receive_messages(
     target_user_id: str,
     since: str,
     messages: queue.Queue[str],
+    host_messages: queue.Queue[tuple[str, str]],
+    debug: Callable[[], bool],
     stop: threading.Event,
 ) -> None:
+    last_error: str | None = None
     while not stop.is_set():
         try:
             result = client.sync(room_id, since, SYNC_TIMEOUT_MS)
             events = events_for_sync(client, result, room_id, since)
-        except MatrixError:
+        except MatrixError as error:
+            detail = f"Matrix sync failed: {str(error)[:500]}"
+            if detail != last_error:
+                host_messages.put(("warning", detail))
+                last_error = detail
             stop.wait(1)
             continue
         next_batch = result.get("next_batch")
         if not isinstance(next_batch, str) or not next_batch:
+            detail = "Matrix sync response did not include next_batch."
+            if detail != last_error:
+                host_messages.put(("warning", detail))
+                last_error = detail
             stop.wait(1)
             continue
+        if last_error is not None and debug():
+            host_messages.put(("info", "Matrix sync connection re-established."))
+        last_error = None
         for message in inbound_messages(events, target_user_id):
             messages.put(message)
         since = next_batch
@@ -637,6 +662,21 @@ def prompt_answer(prompt: dict[str, Any], text: str) -> dict[str, Any] | None:
     return None
 
 
+def command_help() -> str:
+    return "\n".join(
+        [
+            "Matrix bridge commands:",
+            "/matrix — show status",
+            "/matrix on — enable this session's bridge",
+            "/matrix off — disable this session's bridge",
+            "/matrix restart — restart this session's bridge",
+            "/matrix setup — configure Matrix accounts and token",
+            "/matrix debug on|off — enable or disable lifecycle messages",
+            "/matrix help — show this help",
+        ]
+    )
+
+
 def run_one_shot() -> int:
     request = json.load(sys.stdin)
     if not isinstance(request, dict) or request.get("protocol") != PROTOCOL:
@@ -682,6 +722,8 @@ def run_one_shot() -> int:
             raise RuntimeError("setup response is missing values")
         config = normalize_config(values, load_json(CONFIG_PATH))
         verify_access_token(config)
+        if debug_enabled(load_json(CONFIG_PATH)):
+            config["debug"] = True
         write_private_json(CONFIG_PATH, config)
         print(
             json.dumps(
@@ -695,8 +737,16 @@ def run_one_shot() -> int:
     if method == "extension.command.invoke":
         arguments = params.get("arguments")
         if isinstance(arguments, list) and arguments:
-            command = arguments[0]
+            command = arguments[0] if isinstance(arguments[0], str) else ""
             config = load_json(CONFIG_PATH)
+            if command == "help":
+                print(
+                    json.dumps(
+                        complete(request, command_help()), separators=(",", ":")
+                    ),
+                    flush=True,
+                )
+                return 0
             if command in {"on", "off", "restart"}:
                 if not has_stored_config(config):
                     raise RuntimeError("Matrix is not configured. Run /matrix setup first.")
@@ -709,6 +759,25 @@ def run_one_shot() -> int:
                         else "Matrix bridge restarted for this session."
                     )
                 )
+                print(
+                    json.dumps(complete(request, summary), separators=(",", ":")),
+                    flush=True,
+                )
+                return 0
+            if command == "debug":
+                value = arguments[1] if len(arguments) > 1 else None
+                if value not in {"on", "off"}:
+                    summary = "Usage: /matrix debug on|off."
+                elif not has_stored_config(config):
+                    summary = "Matrix is not configured. Run /matrix setup first."
+                else:
+                    config["debug"] = value == "on"
+                    write_private_json(CONFIG_PATH, config)
+                    summary = (
+                        "Matrix lifecycle messages enabled."
+                        if config["debug"]
+                        else "Matrix lifecycle messages disabled."
+                    )
                 print(
                     json.dumps(complete(request, summary), separators=(",", ":")),
                     flush=True,
@@ -749,17 +818,20 @@ def run_one_shot() -> int:
 def run_persistent() -> int:
     thread_id = os.environ["XEDOC_SESSION_SCRIPT_THREAD_ID"]
     script_id = os.environ["XEDOC_SESSION_SCRIPT_ID"]
-    raw_config = load_json(CONFIG_PATH)
-    config = stored_config(raw_config)
-    matrix = MatrixClient(config)
-    verify_access_token(config, matrix)
-
     client = SessionScriptClient.from_host_child()
     inbound: queue.Queue[str] = queue.Queue()
+    host_messages: queue.Queue[tuple[str, str]] = queue.Queue()
     stop = threading.Event()
     room_id: str | None = None
     pending_prompts: dict[str, dict[str, Any]] = {}
 
+    def post_host_message(registration_id: str, level: str, message: str) -> None:
+        try:
+            client.post_message(registration_id, level, message[:500])
+        except RpcError:
+            pass
+
+    registered: dict[str, Any] | None = None
     def remember_prompt(prompt: dict[str, Any]) -> None:
         if (
             prompt.get("kind") != "requestUserInput"
@@ -784,45 +856,59 @@ def run_persistent() -> int:
 
     def on_notification(message: dict[str, Any]) -> None:
         nonlocal room_id
-        method = message.get("method")
-        params = message.get("params", {})
-        if method == "turn/completed" and isinstance(params, dict) and room_id:
-            turn = params.get("turn")
-            if isinstance(turn, dict):
-                for message in turn_messages(turn):
-                    matrix.send_text(room_id, message)
-        elif method == "script/promptOpened" and isinstance(params, dict):
-            remember_prompt(params)
-        elif method == "script/promptClosed" and isinstance(params, dict):
-            prompt_id = params.get("promptId")
-            if isinstance(prompt_id, str):
-                pending_prompts.pop(prompt_id, None)
-        elif method == "script/sessionUpdated" and isinstance(params, dict):
-            session = params.get("session")
-            if isinstance(session, dict):
-                room_id = ensure_room(
-                    matrix,
-                    config,
-                    thread_id,
-                    str(session.get("title") or "session"),
-                )
-        elif method == "script/resyncRequired" and isinstance(params, dict):
-            registration_id = params.get("registrationId")
-            if isinstance(registration_id, str):
-                refreshed = client.read(registration_id)
-                snapshot = refreshed.get("snapshot")
-                if isinstance(snapshot, dict):
-                    session = snapshot.get("session")
-                    if isinstance(session, dict):
-                        room_id = ensure_room(
-                            matrix,
-                            config,
-                            thread_id,
-                            str(session.get("title") or "session"),
-                        )
-                    replace_pending_prompts(snapshot)
+        try:
+            method = message.get("method")
+            params = message.get("params", {})
+            if method == "item/completed" and isinstance(params, dict) and room_id:
+                item = params.get("item")
+                if isinstance(item, dict):
+                    text = native_user_message_text(item)
+                    if text is None:
+                        text = completed_agent_message_text(item)
+                    if text is not None:
+                        matrix.send_text(room_id, text)
+            elif method == "script/promptOpened" and isinstance(params, dict):
+                remember_prompt(params)
+            elif method == "script/promptClosed" and isinstance(params, dict):
+                prompt_id = params.get("promptId")
+                if isinstance(prompt_id, str):
+                    pending_prompts.pop(prompt_id, None)
+            elif method == "script/sessionUpdated" and isinstance(params, dict):
+                session = params.get("session")
+                if isinstance(session, dict):
+                    room_id = ensure_room(
+                        matrix,
+                        config,
+                        thread_id,
+                        str(session.get("title") or "session"),
+                        lifecycle,
+                    )
+            elif method == "script/resyncRequired" and isinstance(params, dict):
+                registration_id = params.get("registrationId")
+                if isinstance(registration_id, str):
+                    refreshed = client.read(registration_id)
+                    snapshot = refreshed.get("snapshot")
+                    if isinstance(snapshot, dict):
+                        session = snapshot.get("session")
+                        if isinstance(session, dict):
+                            room_id = ensure_room(
+                                matrix,
+                                config,
+                                thread_id,
+                                str(session.get("title") or "session"),
+                                lifecycle,
+                            )
+                        replace_pending_prompts(snapshot)
+        except (MatrixError, RpcError, ValueError) as error:
+            if registered is not None:
+                registration_id = registered.get("registrationId")
+                if isinstance(registration_id, str):
+                    post_host_message(
+                        registration_id,
+                        "warning",
+                        f"Matrix bridge could not process an update: {error}",
+                    )
 
-    client.set_notification_handler(on_notification)
     try:
         client.initialize("matrix-extension", "Matrix bridge", PLUGIN_VERSION)
         registered = client.register(
@@ -831,23 +917,50 @@ def run_persistent() -> int:
             "Matrix bridge",
             PLUGIN_VERSION,
             {
-                "modelResponseCompleted": False,
-                "turnCompleted": True,
+                "modelResponseCompleted": True,
+                "userMessages": True,
                 "prompts": ["requestUserInput"],
                 "sessionUpdates": True,
             },
             ["userInput.send", "prompt.requestUserInput.respond"],
         )
+        registration_id = registered["registrationId"]
+        raw_config = load_json(CONFIG_PATH)
+        try:
+            config = stored_config(raw_config)
+            matrix = MatrixClient(config)
+            verify_access_token(config, matrix)
+        except (MatrixError, ValueError) as error:
+            post_host_message(
+                registration_id,
+                "error",
+                f"Matrix bridge could not connect: {error}",
+            )
+            return 0
+
+        def lifecycle(message: str) -> None:
+            if current_debug_setting():
+                post_host_message(registration_id, "info", message)
+
+        client.set_notification_handler(on_notification)
         snapshot = registered.get("snapshot", {})
         session = snapshot.get("session", {}) if isinstance(snapshot, dict) else {}
         room_id = ensure_room(
-            matrix, config, thread_id, str(session.get("title") or "session")
+            matrix,
+            config,
+            thread_id,
+            str(session.get("title") or "session"),
+            lifecycle,
         )
         initial_sync = matrix.sync(room_id, None, 0)
         since = initial_sync.get("next_batch")
         if not isinstance(since, str) or not since:
             raise MatrixError("Matrix initial sync did not include next_batch")
         replace_pending_prompts(snapshot)
+        lifecycle(
+            f"Matrix connection established to {config['homeserver']} as "
+            f"{config['agentUserId']}."
+        )
         receiver = threading.Thread(
             target=receive_messages,
             args=(
@@ -856,6 +969,8 @@ def run_persistent() -> int:
                 config["targetUserId"],
                 since,
                 inbound,
+                host_messages,
+                current_debug_setting,
                 stop,
             ),
             daemon=True,
@@ -872,6 +987,12 @@ def run_persistent() -> int:
             readable, _, _ = select.select([sys.stdin], [], [], 0.5)
             if readable:
                 client.handle_message(client.receive_message())
+            while True:
+                try:
+                    level, message = host_messages.get_nowait()
+                except queue.Empty:
+                    break
+                post_host_message(registration_id, level, message)
             while True:
                 try:
                     message = inbound.get_nowait()
@@ -919,6 +1040,11 @@ def run_persistent() -> int:
                     matrix.send_text(
                         room_id, "Xedoc could not accept that answer."
                     )
+                    post_host_message(
+                        registration_id,
+                        "warning",
+                        "Xedoc could not accept the Matrix prompt answer.",
+                    )
                 pending_prompts.pop(prompt_id, None)
             elif pending:
                 latest = client.read(registered["registrationId"])
@@ -937,10 +1063,24 @@ def run_persistent() -> int:
                             },
                         )
                     except RpcError:
+                        post_host_message(
+                            registration_id,
+                            "warning",
+                            "Xedoc could not accept the Matrix message yet.",
+                        )
                         continue
                     pending.popleft()
     except RpcError:
         return 0
+    except (MatrixError, OSError, ValueError) as error:
+        if registered is not None:
+            registration_id = registered.get("registrationId")
+            if isinstance(registration_id, str):
+                post_host_message(
+                    registration_id, "error", f"Matrix bridge stopped: {error}"
+                )
+                return 0
+        raise
     finally:
         stop.set()
         client.close()

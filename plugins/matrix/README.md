@@ -2,10 +2,10 @@
 
 Matrix is an Xedoc-only session extension. After approval and setup, it creates
 one private Matrix room for each enabled root session, invites a configured
-target account, mirrors completed Xedoc turns into the room, accepts messages
-sent from that account in Element as ordinary turns, and routes explicitly
-correlated replies to `request_user_input` prompts. Matrix-originated turns
-are not mirrored back into their source room.
+target account, mirrors Xedoc user and completed model messages into the room,
+accepts messages sent from that account in Element as ordinary turns, and
+routes explicitly correlated replies to `request_user_input` prompts.
+Matrix-originated turns are not mirrored back into their source room.
 
 The bridge persists each root-session-to-room binding, so resuming a session
 after a machine reboot uses the same Matrix room. When the session is renamed,
@@ -26,7 +26,11 @@ The extension owns its settings and decides whether setup is needed. The bridge
 is disabled by default after setup. Use `/matrix setup` to reopen the settings
 form, `/matrix` to report bridge status, `/matrix on` to enable the bridge for
 the current session, `/matrix off` to disable it for that session, and
-`/matrix restart` to restart it for that session.
+`/matrix restart` to restart it for that session. `/matrix help` lists every
+command. `/matrix debug on` enables Xedoc-side lifecycle messages for Matrix
+connection, room creation, room renames, and sync recovery; `/matrix debug off`
+disables those informational messages. Bridge warnings and errors are always
+posted to Xedoc.
 
 Rooms created by this version are private and invite-only, but they are not
 end-to-end encrypted. This keeps the dependency-free bridge interoperable with

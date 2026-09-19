@@ -214,6 +214,72 @@ def test_setup_command_reopens_settings(
     assert output["result"]["interaction"]["surface"]["id"] == "matrix-settings"
 
 
+def test_help_lists_all_matrix_commands(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    request = extension_request(
+        "extension.command.invoke", {"arguments": ["help"]}
+    )
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(request)))
+
+    assert matrix.run_one_shot() == 0
+
+    summary = json.loads(capsys.readouterr().out)["result"]["summary"]
+    for command in (
+        "/matrix on",
+        "/matrix off",
+        "/matrix restart",
+        "/matrix setup",
+        "/matrix debug on|off",
+        "/matrix help",
+    ):
+        assert command in summary
+
+
+def test_debug_command_persists_lifecycle_setting(
+    isolated_config: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    matrix.write_private_json(
+        matrix.CONFIG_PATH, matrix.normalize_config(valid_values())
+    )
+    request = extension_request(
+        "extension.command.invoke", {"arguments": ["debug", "on"]}
+    )
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(request)))
+
+    assert matrix.run_one_shot() == 0
+    assert json.loads(capsys.readouterr().out)["result"]["summary"] == (
+        "Matrix lifecycle messages enabled."
+    )
+    assert matrix.load_json(matrix.CONFIG_PATH)["debug"] is True
+
+    request = extension_request(
+        "extension.command.invoke", {"arguments": ["debug", "off"]}
+    )
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(request)))
+    assert matrix.run_one_shot() == 0
+    assert matrix.load_json(matrix.CONFIG_PATH)["debug"] is False
+
+
+def test_current_debug_setting_reloads_persisted_value(
+    isolated_config: Path,
+) -> None:
+    config = matrix.normalize_config(valid_values())
+    matrix.write_private_json(matrix.CONFIG_PATH, config)
+    assert matrix.current_debug_setting() is False
+
+    config["debug"] = True
+    matrix.write_private_json(matrix.CONFIG_PATH, config)
+    assert matrix.current_debug_setting() is True
+
+    config["debug"] = False
+    matrix.write_private_json(matrix.CONFIG_PATH, config)
+    assert matrix.current_debug_setting() is False
+
+
 def test_normalize_config_preserves_saved_token_and_rejects_unsafe_values() -> None:
     config = matrix.normalize_config(
         valid_values(**{"access-token": ""}),
@@ -460,12 +526,27 @@ def test_ensure_room_updates_name_without_replacing_persistent_binding(
 
     client = FakeClient()
     config = matrix.normalize_config(valid_values())
-    assert matrix.ensure_room(client, config, "thread/1", "Before") == "!room:example.org"
-    assert matrix.ensure_room(client, config, "thread/1", "After") == "!room:example.org"
+    lifecycle: list[str] = []
+    assert (
+        matrix.ensure_room(
+            client, config, "thread/1", "Before", lifecycle.append
+        )
+        == "!room:example.org"
+    )
+    assert (
+        matrix.ensure_room(
+            client, config, "thread/1", "After", lifecycle.append
+        )
+        == "!room:example.org"
+    )
 
     assert client.create_calls == 1
     assert client.update_calls == [("!room:example.org", "After")]
     assert matrix.load_json(matrix.room_path("thread/1"))["title"] == "After"
+    assert lifecycle == [
+        "Matrix room created as 'Xedoc: Before'.",
+        "Matrix room renamed to 'Xedoc: After'.",
+    ]
 
 
 def test_inbound_messages_accepts_only_target_text_and_ignores_edits() -> None:
@@ -499,36 +580,38 @@ def test_inbound_messages_accepts_only_target_text_and_ignores_edits() -> None:
     assert matrix.inbound_messages(events, "@andreas:example.org") == ["continue"]
 
 
-def test_turn_messages_mirrors_xedoc_input_and_output_without_matrix_echo() -> None:
-    turn = {
-        "items": [
-            {
-                "type": "userMessage",
-                "clientId": "xedoc-tui-1",
-                "content": [{"type": "text", "text": "Summarize recent commits"}],
-            },
-            {
-                "type": "agentMessage",
-                "text": "I will inspect the recent history.",
-            },
-            {
-                "type": "userMessage",
-                "clientId": "matrix-123",
-                "content": [{"type": "text", "text": "Already in Matrix"}],
-            },
-            {
-                "type": "userMessage",
-                "clientId": "xedoc-tui-2",
-                "content": [{"type": "image", "url": "mxc://example.org/image"}],
-            },
-            {"type": "commandExecution", "command": "git log"},
-        ]
+def test_native_user_message_text_mirrors_xedoc_input_without_matrix_echo() -> None:
+    native_message = {
+        "type": "userMessage",
+        "clientId": "xedoc-tui-1",
+        "content": [
+            {"type": "text", "text": "Summarize recent commits"},
+            {"type": "text", "text": " and show the diff"},
+        ],
+    }
+    matrix_message = {
+        "type": "userMessage",
+        "clientId": "matrix-123",
+        "content": [{"type": "text", "text": "Already in Matrix"}],
     }
 
-    assert matrix.turn_messages(turn) == [
-        "Summarize recent commits",
-        "I will inspect the recent history.",
-    ]
+    assert (
+        matrix.native_user_message_text(native_message)
+        == "Summarize recent commits and show the diff"
+    )
+    assert matrix.native_user_message_text(matrix_message) is None
+
+
+def test_completed_agent_message_text_only_mirrors_completed_model_output() -> None:
+    assert matrix.completed_agent_message_text(
+        {"type": "agentMessage", "text": "Done."}
+    ) == "Done."
+    assert matrix.completed_agent_message_text(
+        {"type": "userMessage", "text": "Not model output"}
+    ) is None
+    assert matrix.completed_agent_message_text(
+        {"type": "agentMessage", "text": " "}
+    ) is None
 
 
 def test_limited_sync_backfills_gap_in_order_and_deduplicates() -> None:
@@ -632,7 +715,7 @@ def test_repository_registers_matrix_and_removes_signal() -> None:
     names = {entry["name"] for entry in marketplace["plugins"]}
 
     assert versions["plugins"]["matrix"] == {
-        "version": "0.3.4",
+        "version": "0.4.0",
         "hosts": ["xedoc"],
     }
     assert "signal" not in versions["plugins"]

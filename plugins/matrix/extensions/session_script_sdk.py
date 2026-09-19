@@ -259,6 +259,34 @@ class SessionScriptClient:
             },
         )
 
+    def respond_approval(
+        self,
+        registration_id: str,
+        prompt_id: str,
+        response_lease: str,
+        response: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Answer a leased approval or extension-interaction prompt."""
+        return self.respond(
+            registration_id,
+            prompt_id,
+            response_lease,
+            {"kind": "approval", "response": response},
+        )
+
+    def post_message(
+        self, registration_id: str, level: str, message: str
+    ) -> dict[str, Any]:
+        """Post an info, warning, or error message to the registered TUI thread."""
+        return self.request(
+            "script/message",
+            {
+                "registrationId": registration_id,
+                "level": level,
+                "message": message,
+            },
+        )
+
     def unregister(self, registration_id: str) -> dict[str, Any]:
         return self.request("script/unregister", {"registrationId": registration_id})
 

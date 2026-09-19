@@ -1,6 +1,6 @@
 {
   "name": "matrix",
-  "version": "0.3.4",
+  "version": "0.4.0",
   "description": "Connect enabled Xedoc sessions to private Matrix rooms used from Element.",
   "author": {
     "name": "apohl79"
@@ -20,7 +20,7 @@
       "commands": [
         {
           "name": "matrix",
-          "description": "Manage Matrix bridge status and settings with /matrix on, /matrix off, /matrix restart, and /matrix setup."
+          "description": "Manage Matrix bridge status, setup, lifecycle debugging, and help with /matrix."
         }
       ],
       "requestedCapabilities": [
@@ -32,8 +32,8 @@
   ],
   "interface": {
     "displayName": "Matrix (Element)",
-    "shortDescription": "Connect Xedoc sessions to Matrix.",
-    "longDescription": "Matrix creates one private room for each approved Xedoc root session, forwards agent responses, and accepts Element messages and request_user_input answers.",
+    "shortDescription": "Connect Xedoc sessions to Matrix for bidirectional messaging.",
+    "longDescription": "Matrix creates one private room for each approved Xedoc root session, forwards Xedoc and Element messages bidirectionally without echoing Matrix input, and reports bridge lifecycle and failures to Xedoc.",
     "developerName": "apohl79",
     "category": "Productivity",
     "capabilities": [
