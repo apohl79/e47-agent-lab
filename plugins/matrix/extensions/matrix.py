@@ -39,7 +39,7 @@ except ModuleNotFoundError:
 
 
 PROTOCOL = "xedoc.script/v1"
-PLUGIN_VERSION = "0.10.0"
+PLUGIN_VERSION = "0.10.1"
 LEGACY_CONFIG_ROOT = (
     Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
     / "xedoc"
@@ -1105,6 +1105,24 @@ def file_change_tone(item: dict[str, Any]) -> str | None:
     }.get(item.get("status"))
 
 
+def file_change_items_from_notification(
+    message: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Extract file-change items from the host's live completion event."""
+    method = message.get("method")
+    params = message.get("params")
+    if not isinstance(params, dict):
+        return []
+    if method == "item/completed":
+        item = params.get("item")
+        return (
+            [item]
+            if isinstance(item, dict) and item.get("type") == "fileChange"
+            else []
+        )
+    return []
+
+
 def receive_messages(
     client: MatrixClient,
     room_id: str,
@@ -1149,37 +1167,82 @@ def receive_messages(
         since = next_batch
 
 
-def prompt_message(prompt: dict[str, Any], token: str) -> str:
+def prompt_questions(prompt: dict[str, Any]) -> list[dict[str, Any]]:
     request = prompt.get("request")
     params = request.get("params") if isinstance(request, dict) else {}
     questions = params.get("questions") if isinstance(params, dict) else []
+    return [question for question in questions if isinstance(question, dict)]
+
+
+def prompt_option_labels(question: dict[str, Any]) -> list[str]:
+    options = question.get("options")
+    if not isinstance(options, list):
+        return []
+    return [
+        option["label"]
+        for option in options
+        if isinstance(option, dict) and isinstance(option.get("label"), str)
+    ]
+
+
+def prompt_message(prompt: dict[str, Any]) -> str:
+    questions = prompt_questions(prompt)
     lines = ["Xedoc needs your answer:"]
-    for question in questions if isinstance(questions, list) else []:
-        if not isinstance(question, dict):
-            continue
-        question_id = question.get("id")
+    all_choices = bool(questions)
+    for index, question in enumerate(questions, 1):
         text = question.get("question")
-        lines.append(f"- {question_id}: {text}")
-        options = question.get("options")
-        if isinstance(options, list):
-            labels = [
-                option.get("label")
-                for option in options
-                if isinstance(option, dict) and isinstance(option.get("label"), str)
-            ]
-            if labels:
-                lines.append(f"  Choices: {', '.join(labels)}")
-    lines.append(f'Reply as `prompt:{token} {{"question-id":["answer"]}}`.')
+        lines.append(f"{index}. {text}")
+        labels = prompt_option_labels(question)
+        if labels:
+            lines.extend(
+                f"   {choice_index} - {label}"
+                for choice_index, label in enumerate(labels, 1)
+            )
+        else:
+            all_choices = False
+    if len(questions) == 1 and all_choices:
+        lines.append("Reply with the number only.")
+    elif all_choices:
+        lines.append(
+            "Reply with one number per question in order "
+            f"(for example, {', '.join('1' for _ in questions)})."
+        )
+    elif len(questions) == 1:
+        lines.append("Reply with your answer.")
+    else:
+        lines.append("Reply with one answer per line, in question order.")
     return "\n".join(lines)
 
 
+def numbered_prompt_answer(
+    questions: list[dict[str, Any]], text: str
+) -> dict[str, Any] | None:
+    selections = [part.strip() for part in text.split(",")]
+    if len(selections) != len(questions) or not all(
+        selection.isdecimal() for selection in selections
+    ):
+        return None
+    answers: dict[str, dict[str, list[str]]] = {}
+    for question, selection in zip(questions, selections):
+        question_id = question.get("id")
+        labels = prompt_option_labels(question)
+        choice_index = int(selection) - 1
+        if (
+            not isinstance(question_id, str)
+            or not 0 <= choice_index < len(labels)
+        ):
+            return None
+        answers[question_id] = {"answers": [labels[choice_index]]}
+    return {"kind": "requestUserInput", "answers": answers}
+
+
 def prompt_answer(prompt: dict[str, Any], text: str) -> dict[str, Any] | None:
-    request = prompt.get("request")
-    params = request.get("params") if isinstance(request, dict) else {}
-    questions = params.get("questions") if isinstance(params, dict) else []
-    questions = [question for question in questions if isinstance(question, dict)]
+    questions = prompt_questions(prompt)
     if not questions:
         return None
+    numbered_answer = numbered_prompt_answer(questions, text)
+    if numbered_answer is not None:
+        return numbered_answer
     try:
         raw_answers = json.loads(text)
     except json.JSONDecodeError:
@@ -1206,6 +1269,15 @@ def prompt_answer(prompt: dict[str, Any], text: str) -> dict[str, Any] | None:
             "kind": "requestUserInput",
             "answers": {questions[0]["id"]: {"answers": [text]}},
         }
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if len(lines) == len(questions):
+        answers = {}
+        for question, line in zip(questions, lines):
+            question_id = question.get("id")
+            if not isinstance(question_id, str):
+                return None
+            answers[question_id] = {"answers": [line]}
+        return {"kind": "requestUserInput", "answers": answers}
     return None
 
 
@@ -1278,7 +1350,7 @@ def approval_choice_entries(
     ]
 
 
-def approval_prompt_message(prompt: dict[str, Any], token: str) -> str:
+def approval_prompt_message(prompt: dict[str, Any]) -> str:
     request = prompt.get("request")
     method = request.get("method") if isinstance(request, dict) else None
     params = request.get("params") if isinstance(request, dict) else {}
@@ -1350,8 +1422,7 @@ def approval_prompt_message(prompt: dict[str, Any], token: str) -> str:
                     separators=(",", ":"),
                 )
                 lines.append(
-                    f"Reply as `approval:{token} {example}` with each field's "
-                    "actual ID and value."
+                    f"Reply with `{example}` with each field's actual ID and value."
                 )
             return "\n".join(lines)
         choice_entries = approval_choice_entries(prompt)
@@ -1377,10 +1448,7 @@ def approval_prompt_message(prompt: dict[str, Any], token: str) -> str:
             for index, (label, _, _) in enumerate(choice_entries, 1)
         )
     else:
-        lines.append(
-            f"Reply as `approval:{token} <JSON response>` to provide the "
-            "approval response shown in Xedoc."
-        )
+        lines.append("Reply with the JSON approval response shown in Xedoc.")
     return "\n".join(lines)
 
 
@@ -1478,34 +1546,16 @@ def approval_answer(prompt: dict[str, Any], text: str) -> dict[str, Any] | None:
 def match_pending_prompt(
     message: str, pending_prompts: dict[str, dict[str, Any]]
 ) -> tuple[str, dict[str, Any], str, str] | None:
-    """Match a tokenized prompt or an unambiguous numeric approval reply."""
-    for prompt_id, state in pending_prompts.items():
-        token = state.get("token")
-        if isinstance(token, str) and message.startswith(f"prompt:{token} "):
-            return (
-                prompt_id,
-                state,
-                "prompt",
-                message.removeprefix(f"prompt:{token} "),
-            )
-    for prompt_id, state in pending_prompts.items():
-        token = state.get("token")
-        if isinstance(token, str) and message.startswith(f"approval:{token} "):
-            return (
-                prompt_id,
-                state,
-                "approval",
-                message.removeprefix(f"approval:{token} "),
-            )
-    if message.strip().isdecimal():
-        approval_prompts = [
-            (prompt_id, state)
-            for prompt_id, state in pending_prompts.items()
-            if state.get("prompt", {}).get("kind") != "requestUserInput"
-        ]
-        if len(approval_prompts) == 1:
-            prompt_id, state = approval_prompts[0]
-            return prompt_id, state, "approval", message.strip()
+    """Match an ordinary reply only when exactly one prompt is active."""
+    if len(pending_prompts) == 1:
+        prompt_id, state = next(iter(pending_prompts.items()))
+        kind = state.get("prompt", {}).get("kind")
+        return (
+            prompt_id,
+            state,
+            "prompt" if kind == "requestUserInput" else "approval",
+            message.strip(),
+        )
     return None
 
 
@@ -1824,32 +1874,46 @@ def run_persistent() -> int:
             or not room_id
         ):
             return
-        token = os.urandom(8).hex()
-        pending_prompts[prompt["promptId"]] = {"prompt": prompt, "token": token}
+        pending_prompts[prompt["promptId"]] = {"prompt": prompt}
         message = (
-            prompt_message(prompt, token)
+            prompt_message(prompt)
             if prompt.get("kind") == "requestUserInput"
-            else approval_prompt_message(prompt, token)
+            else approval_prompt_message(prompt)
         )
         agent_matrix.send_text(room_id, message)
 
     def replace_pending_prompts(snapshot: dict[str, Any]) -> None:
         pending_prompts.clear()
+        merge_pending_prompts(snapshot)
+
+    def merge_pending_prompts(snapshot: dict[str, Any]) -> None:
         prompts = snapshot.get("pendingPrompts")
         if not isinstance(prompts, list):
             return
+        prompt_ids = {
+            prompt.get("promptId")
+            for prompt in prompts
+            if isinstance(prompt, dict) and isinstance(prompt.get("promptId"), str)
+        }
+        for prompt_id in tuple(pending_prompts):
+            if prompt_id not in prompt_ids:
+                pending_prompts.pop(prompt_id, None)
         for prompt in prompts:
             if isinstance(prompt, dict):
-                remember_prompt(prompt)
+                prompt_id = prompt.get("promptId")
+                if isinstance(prompt_id, str) and prompt_id in pending_prompts:
+                    pending_prompts[prompt_id]["prompt"] = prompt
+                else:
+                    remember_prompt(prompt)
 
     def on_notification(message: dict[str, Any]) -> None:
         nonlocal room_id
         try:
             method = message.get("method")
             params = message.get("params", {})
-            if method == "item/completed" and isinstance(params, dict) and room_id:
-                item = params.get("item")
-                if isinstance(item, dict):
+            if method == "item/completed" and room_id:
+                file_change_items = file_change_items_from_notification(message)
+                for item in file_change_items:
                     item_id = item.get("id")
                     file_change = file_change_message(item)
                     if (
@@ -1861,17 +1925,18 @@ def run_persistent() -> int:
                             room_id, file_change, file_change_tone(item)
                         )
                         sent_file_change_ids.add(item_id)
+                item = params.get("item") if isinstance(params, dict) else None
+                if isinstance(item, dict) and item.get("type") != "fileChange":
+                    text = native_user_message_text(item)
+                    if text is not None:
+                        with sent_user_event_ids_lock:
+                            event_id = user_matrix.send_text(room_id, text)
+                            if event_id:
+                                sent_user_event_ids.add(event_id)
                     else:
-                        text = native_user_message_text(item)
+                        text = completed_agent_message_text(item)
                         if text is not None:
-                            with sent_user_event_ids_lock:
-                                event_id = user_matrix.send_text(room_id, text)
-                                if event_id:
-                                    sent_user_event_ids.add(event_id)
-                        else:
-                            text = completed_agent_message_text(item)
-                            if text is not None:
-                                agent_matrix.send_text(room_id, text)
+                            agent_matrix.send_text(room_id, text)
             elif method == "script/promptOpened" and isinstance(params, dict):
                 remember_prompt(params)
             elif method == "script/promptClosed" and isinstance(params, dict):
@@ -2020,9 +2085,22 @@ def run_persistent() -> int:
                     message = inbound.get_nowait()
                 except queue.Empty:
                     break
+                latest = client.read(registered["registrationId"])
+                snapshot = latest.get("snapshot")
+                if isinstance(snapshot, dict):
+                    merge_pending_prompts(snapshot)
                 matched_prompt = match_pending_prompt(message, pending_prompts)
                 if matched_prompt is None:
-                    pending.append(message)
+                    if pending_prompts:
+                        agent_matrix.send_text(
+                            room_id,
+                            (
+                                "More than one Xedoc prompt is active. "
+                                "Resolve one in Xedoc, then reply here."
+                            ),
+                        )
+                    else:
+                        pending.append(message)
                 else:
                     prompt_id, state, prefix, text = matched_prompt
                     prompt_answers.append(
@@ -2047,10 +2125,7 @@ def run_persistent() -> int:
                             + (
                                 "Reply with one of the listed numbers."
                                 if prefix == "approval"
-                                else (
-                                    f"Reply with prompt:{state['token']} "
-                                    "and the requested answer."
-                                )
+                                else "Reply with the listed number or answer."
                             )
                         ),
                     )

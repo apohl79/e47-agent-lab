@@ -4,15 +4,17 @@ Matrix is an Xedoc-only session extension. After approval and setup, it creates
 one private Matrix room for each enabled root session, invites a configured
 target account, mirrors Xedoc user and completed model messages into the room,
 accepts messages sent from that account in Element as ordinary turns, and
-routes explicitly correlated replies to `request_user_input` prompts.
+routes replies to the one active `request_user_input` prompt.
 Matrix-originated turns are not mirrored back into their source room.
 
 It also relays actionable Xedoc approval prompts, including model-routing
 confirmations. Element receives the approval title, details, and numbered
 choices; reply with the number only (for example, `1`). Standard command and
-file approvals use friendly choices such as “Approve” and “Deny”. An uncommon
-approval that needs structured data still uses the tokenized JSON form shown
-in the prompt; the bridge never guesses an approval response.
+file approvals use friendly choices such as “Approve” and “Deny”. User-input
+choice prompts use the same format; multi-question prompts accept one
+comma-separated number per question. An uncommon form that needs structured
+data asks for its JSON values directly; the bridge never guesses an approval
+response.
 
 Completed file edits are also posted to the room as a compact summary with the
 edited paths and added/removed line counts. Mirrored messages include a

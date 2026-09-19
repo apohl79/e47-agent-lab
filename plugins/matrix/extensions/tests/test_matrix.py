@@ -1029,6 +1029,30 @@ def test_file_change_message_includes_edit_summary() -> None:
     assert matrix.file_change_tone(item) == "success"
 
 
+def test_file_change_items_from_notification_handles_live_event() -> None:
+    item = {
+        "id": "change-1",
+        "type": "fileChange",
+        "status": "completed",
+        "changes": [{"path": "README.md", "kind": {"type": "update"}, "diff": "@@\n"}],
+    }
+
+    assert matrix.file_change_items_from_notification(
+        {"method": "item/completed", "params": {"item": item}}
+    ) == [item]
+    assert matrix.file_change_items_from_notification(
+        {
+            "method": "turn/completed",
+            "params": {
+                "turn": {
+                    "itemsView": "notLoaded",
+                    "items": [],
+                }
+            },
+        }
+    ) == []
+
+
 def test_limited_sync_backfills_gap_in_order_and_deduplicates() -> None:
     class FakeClient:
         calls: list[tuple[str, str, str]] = []
@@ -1087,13 +1111,30 @@ def test_limited_sync_without_backfill_token_is_rejected() -> None:
         )
 
 
-def test_prompt_answer_maps_single_and_multi_question_replies() -> None:
+def test_prompt_answer_maps_numbered_single_and_multi_question_replies() -> None:
     single = {
         "request": {
             "params": {
-                "questions": [{"id": "choice", "question": "Continue?"}]
+                "questions": [
+                    {
+                        "id": "choice",
+                        "question": "Continue?",
+                        "options": [
+                            {"label": "Approve"},
+                            {"label": "Deny"},
+                        ],
+                    }
+                ]
             }
         }
+    }
+    message = matrix.prompt_message(single)
+    assert "1 - Approve" in message
+    assert "2 - Deny" in message
+    assert "Reply with the number only." in message
+    assert matrix.prompt_answer(single, "2") == {
+        "kind": "requestUserInput",
+        "answers": {"choice": {"answers": ["Deny"]}},
     }
     assert matrix.prompt_answer(single, "yes") == {
         "kind": "requestUserInput",
@@ -1104,11 +1145,26 @@ def test_prompt_answer_maps_single_and_multi_question_replies() -> None:
         "request": {
             "params": {
                 "questions": [
-                    {"id": "first", "question": "First?"},
-                    {"id": "second", "question": "Second?"},
+                    {
+                        "id": "first",
+                        "question": "First?",
+                        "options": [{"label": "A"}, {"label": "B"}],
+                    },
+                    {
+                        "id": "second",
+                        "question": "Second?",
+                        "options": [{"label": "C"}, {"label": "D"}],
+                    },
                 ]
             }
         }
+    }
+    assert matrix.prompt_answer(multiple, "2, 1") == {
+        "kind": "requestUserInput",
+        "answers": {
+            "first": {"answers": ["B"]},
+            "second": {"answers": ["C"]},
+        },
     }
     assert matrix.prompt_answer(
         multiple, '{"first":["a"],"second":"b"}'
@@ -1152,7 +1208,7 @@ def test_approval_prompt_renders_and_answers_router_confirmation() -> None:
         },
     }
 
-    message = matrix.approval_prompt_message(prompt, "token-1")
+    message = matrix.approval_prompt_message(prompt)
 
     assert "Use openai/gpt-5.6-luna/low?" in message
     assert "Scope: root" in message
@@ -1190,7 +1246,7 @@ def test_approval_answer_supports_standard_decisions_and_explicit_json() -> None
         },
     }
 
-    command_message = matrix.approval_prompt_message(command, "token-2")
+    command_message = matrix.approval_prompt_message(command)
     assert "1 - Approve" in command_message
     assert "2 - Deny" in command_message
     assert matrix.approval_answer(command, "1") == {"decision": "accept"}
@@ -1281,10 +1337,10 @@ def test_extension_interaction_menu_form_and_notice_are_not_trapped() -> None:
         },
     }
 
-    assert "1 - Select" in matrix.approval_prompt_message(menu, "menu")
+    assert "1 - Select" in matrix.approval_prompt_message(menu)
     assert matrix.approval_answer(menu, "1")["action"] == {"id": "select"}
     assert matrix.approval_answer(menu, "select")["action"] == {"id": "select"}
-    form_message = matrix.approval_prompt_message(form, "form")
+    form_message = matrix.approval_prompt_message(form)
     assert 'opaque_name (Name)' in form_message
     assert "Current: \"Saved\"" in form_message
     assert "fast (Fast), safe (Safe)" in form_message
@@ -1300,7 +1356,7 @@ def test_extension_interaction_menu_form_and_notice_are_not_trapped() -> None:
     assert matrix.approval_answer(notice, "dismiss")["outcome"] == "dismissed"
 
 
-def test_numeric_matrix_approval_matches_only_one_pending_approval() -> None:
+def test_matrix_reply_matches_only_one_pending_prompt() -> None:
     approval = {
         "token": "approval-token",
         "prompt": {
@@ -1312,19 +1368,19 @@ def test_numeric_matrix_approval_matches_only_one_pending_approval() -> None:
             },
         },
     }
-    user_input = {
-        "token": "input-token",
-        "prompt": {"kind": "requestUserInput"},
-    }
+    user_input = {"prompt": {"kind": "requestUserInput"}}
 
     matched = matrix.match_pending_prompt("2", {"approval": approval})
     assert matched == ("approval", approval, "approval", "2")
-    assert matrix.match_pending_prompt("2", {"approval": approval, "input": user_input}) == (
-        "approval",
-        approval,
-        "approval",
+    assert matrix.match_pending_prompt("2", {"input": user_input}) == (
+        "input",
+        user_input,
+        "prompt",
         "2",
     )
+    assert matrix.match_pending_prompt(
+        "2", {"approval": approval, "input": user_input}
+    ) is None
     assert matrix.match_pending_prompt("2", {"approval": approval, "other": approval}) is None
 
 
@@ -1339,7 +1395,7 @@ def test_repository_registers_matrix_and_removes_signal() -> None:
     names = {entry["name"] for entry in marketplace["plugins"]}
 
     assert versions["plugins"]["matrix"] == {
-        "version": "0.10.0",
+        "version": "0.10.1",
         "hosts": ["xedoc"],
     }
     assert matrix.PLUGIN_VERSION == versions["plugins"]["matrix"]["version"]
