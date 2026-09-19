@@ -28,9 +28,13 @@ SPEC.loader.exec_module(matrix)
 @pytest.fixture
 def isolated_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     root = tmp_path / "matrix"
+    legacy_root = tmp_path / "legacy-matrix"
     monkeypatch.setattr(matrix, "CONFIG_ROOT", root)
     monkeypatch.setattr(matrix, "CONFIG_PATH", root / "config.json")
     monkeypatch.setattr(matrix, "ROOMS_ROOT", root / "rooms")
+    monkeypatch.setattr(matrix, "LEGACY_CONFIG_ROOT", legacy_root)
+    monkeypatch.setattr(matrix, "LEGACY_CONFIG_PATH", legacy_root / "config.json")
+    monkeypatch.setattr(matrix, "LEGACY_ROOMS_ROOT", legacy_root / "rooms")
     return root
 
 
@@ -107,6 +111,25 @@ def test_setup_response_persists_private_config(
     }
     assert stat.S_IMODE(isolated_config.stat().st_mode) == 0o700
     assert stat.S_IMODE(matrix.CONFIG_PATH.stat().st_mode) == 0o600
+
+
+def test_load_settings_migrates_legacy_configuration_once(
+    isolated_config: Path,
+) -> None:
+    legacy = matrix.normalize_config(valid_values())
+    legacy["debug"] = True
+    matrix.write_private_json(matrix.LEGACY_CONFIG_PATH, legacy)
+
+    assert matrix.load_settings() == legacy
+    assert matrix.load_json(matrix.CONFIG_PATH) == legacy
+
+    matrix.write_private_json(
+        matrix.LEGACY_CONFIG_PATH,
+        matrix.normalize_config(
+            valid_values(**{"access-token": "replacement-legacy-token"})
+        ),
+    )
+    assert matrix.load_settings() == legacy
 
 
 def test_setup_rejects_an_inactive_token_without_replacing_saved_config(
@@ -509,6 +532,32 @@ def test_ensure_room_reuses_private_thread_mapping_across_restart(
     assert first_process.targets == ["@andreas:example.org", "@other:example.org"]
 
 
+def test_ensure_room_migrates_legacy_thread_binding(
+    isolated_config: Path,
+) -> None:
+    class FakeClient:
+        def create_room(self, _title: str, _target_user_id: str) -> str:
+            raise AssertionError("existing room binding must be reused")
+
+        def update_room_name(self, _room_id: str, _title: str) -> None:
+            raise AssertionError("unchanged room title must not be updated")
+
+    config = matrix.normalize_config(valid_values())
+    binding = {
+        "roomId": "!room:example.org",
+        "title": "Session",
+        "homeserver": config["homeserver"],
+        "agentUserId": config["agentUserId"],
+        "targetUserId": config["targetUserId"],
+    }
+    matrix.write_private_json(matrix.legacy_room_path("thread/1"), binding)
+
+    assert matrix.ensure_room(FakeClient(), config, "thread/1", "Session") == (
+        "!room:example.org"
+    )
+    assert matrix.load_json(matrix.room_path("thread/1")) == binding
+
+
 def test_ensure_room_updates_name_without_replacing_persistent_binding(
     isolated_config: Path,
 ) -> None:
@@ -715,7 +764,7 @@ def test_repository_registers_matrix_and_removes_signal() -> None:
     names = {entry["name"] for entry in marketplace["plugins"]}
 
     assert versions["plugins"]["matrix"] == {
-        "version": "0.4.0",
+        "version": "0.5.0",
         "hosts": ["xedoc"],
     }
     assert "signal" not in versions["plugins"]

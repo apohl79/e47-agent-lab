@@ -18,8 +18,11 @@ Setup asks for:
 - the full Matrix ID of the target Element account.
 
 Configuration, access tokens, and per-thread room IDs are stored under
-`~/.config/xedoc/matrix` with restrictive permissions. The extension uses the
-Matrix Client-Server API directly and sends the access token only in the
+`~/.xedoc/extensions/matrix` (or `$XEDOC_HOME/extensions/matrix`) with
+restrictive permissions, independent of the installed plugin cache. Existing
+settings and room bindings under `~/.config/xedoc/matrix` are migrated on first
+use without deleting the legacy copies. The extension uses the Matrix
+Client-Server API directly and sends the access token only in the
 `Authorization` header.
 
 The extension owns its settings and decides whether setup is needed. The bridge

@@ -38,13 +38,20 @@ except ModuleNotFoundError:
 
 PROTOCOL = "xedoc.script/v1"
 PLUGIN_VERSION = "0.1.0"
-CONFIG_ROOT = (
+LEGACY_CONFIG_ROOT = (
     Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
     / "xedoc"
     / "matrix"
 )
+CONFIG_ROOT = (
+    Path(os.environ.get("XEDOC_HOME", Path.home() / ".xedoc"))
+    / "extensions"
+    / "matrix"
+)
 CONFIG_PATH = CONFIG_ROOT / "config.json"
 ROOMS_ROOT = CONFIG_ROOT / "rooms"
+LEGACY_CONFIG_PATH = LEGACY_CONFIG_ROOT / "config.json"
+LEGACY_ROOMS_ROOT = LEGACY_CONFIG_ROOT / "rooms"
 MATRIX_API_PREFIX = "/_matrix/client/v3"
 MAX_RESPONSE_BYTES = 1 << 20
 SYNC_TIMEOUT_MS = 25_000
@@ -173,6 +180,15 @@ def load_json(path: Path) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def load_settings() -> dict[str, Any]:
+    if CONFIG_PATH.exists():
+        return load_json(CONFIG_PATH)
+    legacy = load_json(LEGACY_CONFIG_PATH)
+    if legacy:
+        write_private_json(CONFIG_PATH, legacy)
+    return legacy
+
+
 def write_private_json(path: Path, value: dict[str, Any]) -> None:
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     path.parent.chmod(0o700)
@@ -245,7 +261,7 @@ def debug_enabled(value: dict[str, Any]) -> bool:
 
 
 def current_debug_setting() -> bool:
-    return debug_enabled(load_json(CONFIG_PATH))
+    return debug_enabled(load_settings())
 
 
 def has_stored_config(value: dict[str, Any]) -> bool:
@@ -437,6 +453,21 @@ def room_path(thread_id: str) -> Path:
     return ROOMS_ROOT / f"{safe_id}.json"
 
 
+def legacy_room_path(thread_id: str) -> Path:
+    safe_id = hashlib.sha256(thread_id.encode("utf-8")).hexdigest()
+    return LEGACY_ROOMS_ROOT / f"{safe_id}.json"
+
+
+def load_room_binding(thread_id: str) -> dict[str, Any]:
+    path = room_path(thread_id)
+    if path.exists():
+        return load_json(path)
+    legacy = load_json(legacy_room_path(thread_id))
+    if legacy:
+        write_private_json(path, legacy)
+    return legacy
+
+
 def room_name(title: str) -> str:
     return f"Xedoc: {title}"[:255]
 
@@ -449,7 +480,7 @@ def ensure_room(
     lifecycle: Callable[[str], None] | None = None,
 ) -> str:
     path = room_path(thread_id)
-    stored = load_json(path)
+    stored = load_room_binding(thread_id)
     room_id = stored.get("roomId")
     binding = {
         "homeserver": config["homeserver"],
@@ -688,7 +719,7 @@ def run_one_shot() -> int:
         raise RuntimeError("extension request is missing context or params")
 
     if method == "extension.setup.open":
-        config = load_json(CONFIG_PATH)
+        config = load_settings()
         if has_stored_config(config):
             print(
                 json.dumps(
@@ -720,9 +751,10 @@ def run_one_shot() -> int:
         values = params.get("values")
         if not isinstance(values, dict):
             raise RuntimeError("setup response is missing values")
-        config = normalize_config(values, load_json(CONFIG_PATH))
+        existing = load_settings()
+        config = normalize_config(values, existing)
         verify_access_token(config)
-        if debug_enabled(load_json(CONFIG_PATH)):
+        if debug_enabled(existing):
             config["debug"] = True
         write_private_json(CONFIG_PATH, config)
         print(
@@ -738,7 +770,7 @@ def run_one_shot() -> int:
         arguments = params.get("arguments")
         if isinstance(arguments, list) and arguments:
             command = arguments[0] if isinstance(arguments[0], str) else ""
-            config = load_json(CONFIG_PATH)
+            config = load_settings()
             if command == "help":
                 print(
                     json.dumps(
@@ -792,7 +824,7 @@ def run_one_shot() -> int:
                     flush=True,
                 )
                 return 0
-        config = load_json(CONFIG_PATH)
+        config = load_settings()
         if config.get("agentUserId") and config.get("targetUserId"):
             session = context.get("session")
             extension_enabled = (
@@ -925,7 +957,7 @@ def run_persistent() -> int:
             ["userInput.send", "prompt.requestUserInput.respond"],
         )
         registration_id = registered["registrationId"]
-        raw_config = load_json(CONFIG_PATH)
+        raw_config = load_settings()
         try:
             config = stored_config(raw_config)
             matrix = MatrixClient(config)
