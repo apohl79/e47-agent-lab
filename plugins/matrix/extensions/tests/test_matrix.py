@@ -588,6 +588,28 @@ def test_matrix_formatted_body_escapes_html_and_preserves_code_blocks() -> None:
     )
 
 
+def test_matrix_formatted_body_colors_file_change_counts_only_when_requested() -> None:
+    text = (
+        "File changes applied (2 file(s)): (+3 -1)\n"
+        "- [src/main.py](https://example.org/delta=-2&added=+3) [update] (+2 -1)"
+    )
+
+    assert matrix.matrix_formatted_body(text) == (
+        "<p>File changes applied (2 file(s)): (+3 -1)</p>"
+        '<ul><li><a href="https://example.org/delta=-2&amp;added=+3">src/main.py</a>'
+        " [update] (+2 -1)</li></ul>"
+    )
+    assert matrix.matrix_formatted_body(text, color_file_change_counts=True) == (
+        "<p>File changes applied (2 file(s)): "
+        '(<span data-mx-color="#16a34a">+3</span> '
+        '<span data-mx-color="#dc2626">-1</span>)</p>'
+        '<ul><li><a href="https://example.org/delta=-2&amp;added=+3">src/main.py</a>'
+        " [update] "
+        '(<span data-mx-color="#16a34a">+2</span> '
+        '<span data-mx-color="#dc2626">-1</span>)</li></ul>'
+    )
+
+
 def test_matrix_formatted_body_keeps_link_query_parameters() -> None:
     assert matrix.matrix_formatted_body(
         "[Open](https://example.org/path?one=1&two=2)"
@@ -1395,7 +1417,7 @@ def test_repository_registers_matrix_and_removes_signal() -> None:
     names = {entry["name"] for entry in marketplace["plugins"]}
 
     assert versions["plugins"]["matrix"] == {
-        "version": "0.10.1",
+        "version": "0.11.0",
         "hosts": ["xedoc"],
     }
     assert matrix.PLUGIN_VERSION == versions["plugins"]["matrix"]["version"]

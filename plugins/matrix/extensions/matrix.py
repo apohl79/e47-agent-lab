@@ -39,7 +39,7 @@ except ModuleNotFoundError:
 
 
 PROTOCOL = "xedoc.script/v1"
-PLUGIN_VERSION = "0.10.1"
+PLUGIN_VERSION = "0.11.0"
 LEGACY_CONFIG_ROOT = (
     Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
     / "xedoc"
@@ -470,7 +470,11 @@ class MatrixClient:
             raise MatrixError("Matrix join response did not include the requested room")
 
     def send_text(
-        self, room_id: str, text: str, tone: str | None = None
+        self,
+        room_id: str,
+        text: str,
+        tone: str | None = None,
+        color_file_change_counts: bool = False,
     ) -> str | None:
         transaction_id = f"xedoc-{os.urandom(12).hex()}"
         result = self.request(
@@ -483,7 +487,9 @@ class MatrixClient:
                 "msgtype": "m.text",
                 "body": text,
                 "format": "org.matrix.custom.html",
-                "formatted_body": matrix_formatted_body(text, tone),
+                "formatted_body": matrix_formatted_body(
+                    text, tone, color_file_change_counts
+                ),
             },
         )
         event_id = result.get("event_id")
@@ -919,7 +925,7 @@ def completed_agent_message_text(item: dict[str, Any]) -> str | None:
     return text if isinstance(text, str) and text.strip() else None
 
 
-def matrix_inline_html(text: str) -> str:
+def matrix_inline_html(text: str, color_file_change_counts: bool = False) -> str:
     """Render a safe, portable subset of Markdown-like inline formatting."""
 
     placeholders: list[str] = []
@@ -947,12 +953,23 @@ def matrix_inline_html(text: str) -> str:
     escaped = re.sub(r"~~([^~\n]+)~~", r"<s>\1</s>", escaped)
     escaped = re.sub(r"(?<!\*)\*([^*\n]+)\*(?!\*)", r"<em>\1</em>", escaped)
     escaped = re.sub(r"(?<!_)_([^_\n]+)_(?!_)", r"<em>\1</em>", escaped)
+    if color_file_change_counts:
+        escaped = re.sub(
+            r"(\+(\d+))\s(-(\d+))",
+            (
+                r'<span data-mx-color="#16a34a">\1</span> '
+                r'<span data-mx-color="#dc2626">\3</span>'
+            ),
+            escaped,
+        )
     for index, value in enumerate(placeholders):
         escaped = escaped.replace(f"\x00{index}\x00", value)
     return escaped
 
 
-def matrix_formatted_body(text: str, tone: str | None = None) -> str:
+def matrix_formatted_body(
+    text: str, tone: str | None = None, color_file_change_counts: bool = False
+) -> str:
     """Create Matrix custom HTML with a plaintext fallback kept by the caller."""
 
     lines = text.splitlines()
@@ -985,14 +1002,16 @@ def matrix_formatted_body(text: str, tone: str | None = None) -> str:
         if heading:
             level = len(heading.group(1))
             blocks.append(
-                f"<h{level}>{matrix_inline_html(heading.group(2))}</h{level}>"
+                f"<h{level}>{matrix_inline_html(heading.group(2), color_file_change_counts)}</h{level}>"
             )
             index += 1
             continue
         if line.startswith("> "):
             quote_lines: list[str] = []
             while index < len(lines) and lines[index].startswith("> "):
-                quote_lines.append(matrix_inline_html(lines[index][2:]))
+                quote_lines.append(
+                    matrix_inline_html(lines[index][2:], color_file_change_counts)
+                )
                 index += 1
             blocks.append(f"<blockquote>{'<br>'.join(quote_lines)}</blockquote>")
             continue
@@ -1002,11 +1021,13 @@ def matrix_formatted_body(text: str, tone: str | None = None) -> str:
                 item = re.match(r"^[-*]\s+(.+)$", lines[index])
                 if not item:
                     break
-                items.append(f"<li>{matrix_inline_html(item.group(1))}</li>")
+                items.append(
+                    f"<li>{matrix_inline_html(item.group(1), color_file_change_counts)}</li>"
+                )
                 index += 1
             blocks.append(f"<ul>{''.join(items)}</ul>")
             continue
-        paragraph = [matrix_inline_html(line)]
+        paragraph = [matrix_inline_html(line, color_file_change_counts)]
         index += 1
         while index < len(lines) and lines[index]:
             if (
@@ -1016,7 +1037,7 @@ def matrix_formatted_body(text: str, tone: str | None = None) -> str:
                 or re.match(r"^[-*]\s+", lines[index])
             ):
                 break
-            paragraph.append(matrix_inline_html(lines[index]))
+            paragraph.append(matrix_inline_html(lines[index], color_file_change_counts))
             index += 1
         blocks.append(f"<p>{'<br>'.join(paragraph)}</p>")
 
@@ -1922,7 +1943,10 @@ def run_persistent() -> int:
                         and item_id not in sent_file_change_ids
                     ):
                         agent_matrix.send_text(
-                            room_id, file_change, file_change_tone(item)
+                            room_id,
+                            file_change,
+                            file_change_tone(item),
+                            color_file_change_counts=True,
                         )
                         sent_file_change_ids.add(item_id)
                 item = params.get("item") if isinstance(params, dict) else None
