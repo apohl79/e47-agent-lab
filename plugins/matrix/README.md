@@ -64,6 +64,9 @@ end-to-end encrypted. This keeps the dependency-free bridge interoperable with
 Element without storing Matrix device keys. Use a homeserver and accounts whose
 security policy permits unencrypted private rooms.
 
-`request_user_input` responses use Xedoc's leased responder capability. The
-current Xedoc host gives plugin responders a 10-second lease; replies must
-arrive within that window.
+`request_user_input` responses use Xedoc's leased responder capability and
+retain the host's 10-second window. Matrix approval replies receive a
+declaration-bound 60-second window so a numbered answer can reach the session
+before Xedoc falls back to its local approval screen. A late numbered reply for
+an approval already resolved in Xedoc is discarded instead of becoming a new
+user message.

@@ -1404,6 +1404,10 @@ def test_matrix_reply_matches_only_one_pending_prompt() -> None:
         "2", {"approval": approval, "input": user_input}
     ) is None
     assert matrix.match_pending_prompt("2", {"approval": approval, "other": approval}) is None
+    assert matrix.is_numbered_approval_reply("1", 2)
+    assert matrix.is_numbered_approval_reply("2", 2)
+    assert not matrix.is_numbered_approval_reply("3", 2)
+    assert not matrix.is_numbered_approval_reply("reply 1", 2)
 
 
 def test_repository_registers_matrix_and_removes_signal() -> None:
@@ -1417,7 +1421,7 @@ def test_repository_registers_matrix_and_removes_signal() -> None:
     names = {entry["name"] for entry in marketplace["plugins"]}
 
     assert versions["plugins"]["matrix"] == {
-        "version": "0.11.0",
+        "version": "0.12.0",
         "hosts": ["xedoc"],
     }
     assert matrix.PLUGIN_VERSION == versions["plugins"]["matrix"]["version"]
@@ -1429,3 +1433,4 @@ def test_repository_registers_matrix_and_removes_signal() -> None:
     assert "prompt.approval.respond" in manifest["extensions"][0][
         "requestedCapabilities"
     ]
+    assert manifest["extensions"][0]["approvalResponseTimeoutMs"] == 60000

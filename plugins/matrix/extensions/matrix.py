@@ -39,7 +39,7 @@ except ModuleNotFoundError:
 
 
 PROTOCOL = "xedoc.script/v1"
-PLUGIN_VERSION = "0.11.0"
+PLUGIN_VERSION = "0.12.0"
 LEGACY_CONFIG_ROOT = (
     Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
     / "xedoc"
@@ -59,6 +59,7 @@ MATRIX_AUTH_METADATA_PATH = "/_matrix/client/v1/auth_metadata"
 MAX_RESPONSE_BYTES = 1 << 20
 SYNC_TIMEOUT_MS = 25_000
 MAX_BACKFILL_PAGES = 100
+STALE_APPROVAL_REPLY_GRACE_SECONDS = 60
 OAUTH_DEVICE_GRANT = "urn:ietf:params:oauth:grant-type:device_code"
 OAUTH_API_SCOPE = "urn:matrix:client:api:*"
 CONFIG_WRITE_LOCK = threading.Lock()
@@ -1580,6 +1581,12 @@ def match_pending_prompt(
     return None
 
 
+def is_numbered_approval_reply(message: str, choice_count: int) -> bool:
+    """Return whether message selects one of an approval's numbered choices."""
+    selected = message.strip()
+    return selected.isdecimal() and 1 <= int(selected) <= choice_count
+
+
 def extension_interaction_response(
     params: dict[str, Any],
     outcome: str,
@@ -1868,6 +1875,7 @@ def run_persistent() -> int:
     stop = threading.Event()
     room_id: str | None = None
     pending_prompts: dict[str, dict[str, Any]] = {}
+    recently_closed_approval: tuple[float, int] | None = None
     sent_user_event_ids: set[str] = set()
     sent_user_event_ids_lock = threading.Lock()
     sent_file_change_ids: set[str] = set()
@@ -1879,6 +1887,33 @@ def run_persistent() -> int:
             pass
 
     registered: dict[str, Any] | None = None
+
+    def close_pending_prompt(prompt_id: str) -> None:
+        nonlocal recently_closed_approval
+        state = pending_prompts.pop(prompt_id, None)
+        prompt = state.get("prompt") if isinstance(state, dict) else None
+        if not isinstance(prompt, dict) or prompt.get("kind") == "requestUserInput":
+            return
+        choice_count = len(approval_choice_entries(prompt))
+        if choice_count:
+            recently_closed_approval = (
+                time.monotonic() + STALE_APPROVAL_REPLY_GRACE_SECONDS,
+                choice_count,
+            )
+
+    def is_recent_approval_reply(message: str) -> bool:
+        nonlocal recently_closed_approval
+        if recently_closed_approval is None:
+            return False
+        expires_at, choice_count = recently_closed_approval
+        if time.monotonic() >= expires_at:
+            recently_closed_approval = None
+            return False
+        if not is_numbered_approval_reply(message, choice_count):
+            return False
+        recently_closed_approval = None
+        return True
+
     def remember_prompt(prompt: dict[str, Any]) -> None:
         if (
             prompt.get("kind")
@@ -1904,7 +1939,6 @@ def run_persistent() -> int:
         agent_matrix.send_text(room_id, message)
 
     def replace_pending_prompts(snapshot: dict[str, Any]) -> None:
-        pending_prompts.clear()
         merge_pending_prompts(snapshot)
 
     def merge_pending_prompts(snapshot: dict[str, Any]) -> None:
@@ -1918,7 +1952,7 @@ def run_persistent() -> int:
         }
         for prompt_id in tuple(pending_prompts):
             if prompt_id not in prompt_ids:
-                pending_prompts.pop(prompt_id, None)
+                close_pending_prompt(prompt_id)
         for prompt in prompts:
             if isinstance(prompt, dict):
                 prompt_id = prompt.get("promptId")
@@ -1966,7 +2000,7 @@ def run_persistent() -> int:
             elif method == "script/promptClosed" and isinstance(params, dict):
                 prompt_id = params.get("promptId")
                 if isinstance(prompt_id, str):
-                    pending_prompts.pop(prompt_id, None)
+                    close_pending_prompt(prompt_id)
             elif method == "script/sessionUpdated" and isinstance(params, dict):
                 session = params.get("session")
                 if isinstance(session, dict):
@@ -2123,6 +2157,14 @@ def run_persistent() -> int:
                                 "Resolve one in Xedoc, then reply here."
                             ),
                         )
+                    elif is_recent_approval_reply(message):
+                        agent_matrix.send_text(
+                            room_id,
+                            (
+                                "That numbered approval was already resolved "
+                                "in Xedoc, so it was not sent as a new message."
+                            ),
+                        )
                     else:
                         pending.append(message)
                 else:
@@ -2178,7 +2220,8 @@ def run_persistent() -> int:
                         "warning",
                         "Xedoc could not accept the Matrix prompt answer.",
                     )
-                pending_prompts.pop(prompt_id, None)
+                else:
+                    pending_prompts.pop(prompt_id, None)
             elif pending:
                 latest = client.read(registered["registrationId"])
                 thread = latest.get("snapshot", {}).get("thread", {})
