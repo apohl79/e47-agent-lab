@@ -39,7 +39,7 @@ except ModuleNotFoundError:
 
 
 PROTOCOL = "xedoc.script/v1"
-PLUGIN_VERSION = "0.12.0"
+PLUGIN_VERSION = "0.12.1"
 LEGACY_CONFIG_ROOT = (
     Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
     / "xedoc"
@@ -958,8 +958,8 @@ def matrix_inline_html(text: str, color_file_change_counts: bool = False) -> str
         escaped = re.sub(
             r"(\+(\d+))\s(-(\d+))",
             (
-                r'<span data-mx-color="#16a34a">\1</span> '
-                r'<span data-mx-color="#dc2626">\3</span>'
+                r'<code><span data-mx-color="#16a34a">\1</span> '
+                r'<span data-mx-color="#dc2626">\3</span></code>'
             ),
             escaped,
         )

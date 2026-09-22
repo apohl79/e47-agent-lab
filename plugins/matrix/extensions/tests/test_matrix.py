@@ -601,12 +601,12 @@ def test_matrix_formatted_body_colors_file_change_counts_only_when_requested() -
     )
     assert matrix.matrix_formatted_body(text, color_file_change_counts=True) == (
         "<p>File changes applied (2 file(s)): "
-        '(<span data-mx-color="#16a34a">+3</span> '
-        '<span data-mx-color="#dc2626">-1</span>)</p>'
+        '(<code><span data-mx-color="#16a34a">+3</span> '
+        '<span data-mx-color="#dc2626">-1</span></code>)</p>'
         '<ul><li><a href="https://example.org/delta=-2&amp;added=+3">src/main.py</a>'
         " [update] "
-        '(<span data-mx-color="#16a34a">+2</span> '
-        '<span data-mx-color="#dc2626">-1</span>)</li></ul>'
+        '(<code><span data-mx-color="#16a34a">+2</span> '
+        '<span data-mx-color="#dc2626">-1</span></code>)</li></ul>'
     )
 
 
@@ -1421,7 +1421,7 @@ def test_repository_registers_matrix_and_removes_signal() -> None:
     names = {entry["name"] for entry in marketplace["plugins"]}
 
     assert versions["plugins"]["matrix"] == {
-        "version": "0.12.0",
+        "version": "0.12.1",
         "hosts": ["xedoc"],
     }
     assert matrix.PLUGIN_VERSION == versions["plugins"]["matrix"]["version"]
