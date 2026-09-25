@@ -12,6 +12,7 @@ import type {
   InferenceSettings,
   SourceRange,
   Thread,
+  ThreadRecipient,
 } from '../types.ts';
 import { ALLOWED_URI_REGEXP } from '../uri-policy.ts';
 import {
@@ -138,6 +139,7 @@ interface Bootstrap {
   applyAvailable?: boolean;
   applyCount?: number;
   hasMainSession?: boolean;
+  canSendToMainSession?: boolean;
   targetLine?: number | null;
   targetRange?: SourceRange | null;
   targetText?: string | null;
@@ -169,6 +171,7 @@ const state = {
   // legacy behaviour: Apply visible. The standalone CLI shortcut sets this
   // to false in /api/bootstrap so we hide Apply.
   hasMainSession: true,
+  canSendToMainSession: false,
   readOnly: false,
   sourceView: false,
   documentPath: '',
@@ -557,6 +560,7 @@ async function init(): Promise<void> {
   // hide the Apply buttons entirely. Apply delegates work to the main
   // agent — without one, the controls have nothing to do.
   state.hasMainSession = boot.hasMainSession !== false;
+  state.canSendToMainSession = boot.canSendToMainSession === true;
   if (!state.hasMainSession) {
     for (const id of ['apply-top', 'apply-bottom']) {
       const btn = document.getElementById(id) as HTMLButtonElement | null;
@@ -1604,6 +1608,12 @@ function openComposer(blockId: string, quote: string | undefined, occurrence = 1
   box.innerHTML = `
     ${quote ? `<blockquote class="quote">${escapeHtml(quote)}</blockquote>` : ''}
     <textarea rows="3" placeholder="Message assistant…  Enter to send, ${noteShortcut} to add note, Shift+Enter for newline."></textarea>
+    <label class="composer-recipient">Talk to
+      <select aria-label="Discussion recipient">
+        <option value="thread-agent">Thread agent</option>
+        <option value="main-agent"${state.canSendToMainSession ? '' : ' disabled'}>Main agent</option>
+      </select>
+    </label>
     <div class="composer-actions">
       <button class="btn btn-primary send">Send</button>
       <button class="btn note">Add note</button>
@@ -1624,6 +1634,7 @@ function openComposer(blockId: string, quote: string | undefined, occurrence = 1
   const sendBtn = box.querySelector('.send') as HTMLButtonElement;
   const noteBtn = box.querySelector('.note') as HTMLButtonElement;
   const cancelBtn = box.querySelector('.cancel') as HTMLButtonElement;
+  const recipient = box.querySelector<HTMLSelectElement>('.composer-recipient select')!;
   // While the platform's note modifier is held (Cmd on macOS, Ctrl elsewhere),
   // Enter adds a note instead of sending. Highlight the "Add note" button so
   // the alternate action is visible before the key is released. Ctrl+Enter is
@@ -1654,7 +1665,14 @@ function openComposer(blockId: string, quote: string | undefined, occurrence = 1
     const prevError = box.querySelector('.composer-error');
     if (prevError) prevError.remove();
     try {
-      await createThread(blockId, quote, message, kind, occurrence);
+      await createThread(
+        blockId,
+        quote,
+        message,
+        kind,
+        kind === 'thread' ? recipient.value as ThreadRecipient : 'thread-agent',
+        occurrence,
+      );
       box.remove();
       positionNoteOverlays();
     } catch (err) {
@@ -1683,13 +1701,18 @@ async function createThread(
   quote: string | undefined,
   message: string,
   kind: 'thread' | 'note',
+  recipient: ThreadRecipient = 'thread-agent',
   occurrence = 1,
 ): Promise<void> {
   const r = await fetch('/api/threads', {
     method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ documentPath: state.documentPath, anchor: { blockId, quote, occurrence }, message, kind }),
+    body: JSON.stringify({ documentPath: state.documentPath, anchor: { blockId, quote, occurrence }, message, kind, recipient }),
   });
   if (!r.ok) throw new Error(`server responded ${r.status}`);
+  if (recipient === 'main-agent') {
+    showCenterToast('Sent to the main agent.');
+    return;
+  }
   const { threadId } = (await r.json()) as { threadId: string };
   const thread: Thread = {
     id: threadId, kind, status: 'open',

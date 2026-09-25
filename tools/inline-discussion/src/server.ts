@@ -29,6 +29,7 @@ import type {
   Block,
   Thread,
   ThreadKind,
+  ThreadRecipient,
   Highlight,
   LiveSessionSnapshot,
   FinishResult,
@@ -895,6 +896,23 @@ function finishHandoffPrompt(resultPath: string): string {
   ].join('\n');
 }
 
+function mainAgentMessagePrompt(input: {
+  documentPath: string;
+  anchor: { blockId: string; quote?: string; occurrence?: number };
+  message: string;
+}): string {
+  return [
+    'The user sent you a message directly from an inline-discussion composer.',
+    'Treat it as a request in this main session, not as a thread-agent handoff.',
+    `Document: ${input.documentPath}`,
+    `Anchor block: ${input.anchor.blockId}`,
+    ...(input.anchor.quote ? [`Selected text: ${input.anchor.quote}`] : []),
+    ...(input.anchor.occurrence ? [`Selected-text occurrence: ${input.anchor.occurrence}`] : []),
+    'User message:',
+    input.message,
+  ].join('\n');
+}
+
 async function handle(state: ServerState, req: IncomingMessage, res: ServerResponse): Promise<void> {
   const url = new URL(req.url ?? '/', 'http://x');
   res.setHeader('x-content-type-options', 'nosniff');
@@ -1020,6 +1038,7 @@ async function handle(state: ServerState, req: IncomingMessage, res: ServerRespo
       applyProgress: state.applyProgress,
       applyTasks: state.applyTasks,
       hasMainSession: state.hasMainSession,
+      canSendToMainSession: state.mainSession !== null,
       applyAvailable: applyAvailable(state),
       applyCount: applyCount(state),
       targetLine: rendered.targetLine,
@@ -1167,6 +1186,7 @@ async function handle(state: ServerState, req: IncomingMessage, res: ServerRespo
       anchor: { blockId: string; quote?: string; occurrence?: number };
       message?: string;
       kind?: ThreadKind;
+      recipient?: ThreadRecipient;
       documentPath?: string;
     };
     const documentPath = resolveAnnotationDocument(state, body.documentPath);
@@ -1174,6 +1194,30 @@ async function handle(state: ServerState, req: IncomingMessage, res: ServerRespo
       res.statusCode = 400;
       res.setHeader('content-type', 'application/json');
       res.end(JSON.stringify({ ok: false, error: 'documentPath must reference a Markdown document' }));
+      return;
+    }
+    if (body.recipient === 'main-agent') {
+      if (!state.mainSession) {
+        res.statusCode = 409;
+        res.setHeader('content-type', 'application/json');
+        res.end(JSON.stringify({ ok: false, error: 'main-session-direct-input-unavailable' }));
+        return;
+      }
+      try {
+        await state.mainSession.send(mainAgentMessagePrompt({
+          documentPath,
+          anchor: body.anchor,
+          message: body.message ?? '',
+        }));
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        res.statusCode = 502;
+        res.setHeader('content-type', 'application/json');
+        res.end(JSON.stringify({ ok: false, error: 'main-session-message-failed', message }));
+        return;
+      }
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ recipient: 'main-agent' }));
       return;
     }
     const kind: ThreadKind = body.kind === 'note' ? 'note' : 'thread';

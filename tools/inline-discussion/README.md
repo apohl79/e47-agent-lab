@@ -105,6 +105,10 @@ inline-discussion wait  --session-dir <path> [--idle-exit-seconds <seconds>]
   sole exception is a permission-gated tool call explicitly approved in the
   browser: that exact call may mutate external state, without granting local
   repository, discussion-document, or project-context write access.
+- New-thread composers default to a focused thread-agent discussion. When a
+  live Codex or Xedoc main-session bridge is available, their recipient picker
+  also offers **Main agent**, which sends the anchored message directly to the
+  current main session instead of creating a child discussion thread.
 
 ## HTTP surface (relevant subset)
 

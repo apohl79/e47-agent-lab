@@ -95,3 +95,80 @@ test('thread.created includes the initial user message for a new assistant threa
     await close();
   }
 });
+
+test('POST /api/threads sends a main-agent recipient directly to the live main session', async () => {
+  const { docPath, sessionDir, transcriptPath, prefsPath } = scratchSession('# T\n\nAnchor paragraph.\n');
+  const prompts: string[] = [];
+  const { port, close } = await createServer({
+    docPath,
+    sessionDir,
+    mainJsonlPath: transcriptPath,
+    prefsPath,
+    mainSession: { send: async (prompt) => { prompts.push(prompt); } },
+    agentFactory: mockAgentFactory({ reply: 'short answer', conclusion: 'c' }),
+    shutdownOnFinish: false,
+  });
+  try {
+    const boot = (await (await fetch(`http://127.0.0.1:${port}/api/bootstrap`)).json()) as {
+      blockIds: string[];
+      canSendToMainSession: boolean;
+    };
+    assert.equal(boot.canSendToMainSession, true);
+    const response = await fetch(`http://127.0.0.1:${port}/api/threads`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        anchor: { blockId: boot.blockIds[1], quote: 'Anchor paragraph.' },
+        message: 'Please revise this directly.',
+        recipient: 'main-agent',
+      }),
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { recipient: 'main-agent' });
+    assert.equal(prompts.length, 1);
+    assert.match(prompts[0]!, /Treat it as a request in this main session/);
+    assert.match(prompts[0]!, /Anchor paragraph\./);
+    assert.match(prompts[0]!, /Please revise this directly\./);
+    const after = (await (await fetch(`http://127.0.0.1:${port}/api/bootstrap`)).json()) as {
+      threads: unknown[];
+    };
+    assert.equal(after.threads.length, 0);
+  } finally {
+    await close();
+  }
+});
+
+test('POST /api/threads rejects main-agent recipients without a live main-session bridge', async () => {
+  const { docPath, sessionDir, transcriptPath, prefsPath } = scratchSession('# T\n\nAnchor paragraph.\n');
+  const { port, close } = await createServer({
+    docPath,
+    sessionDir,
+    mainJsonlPath: transcriptPath,
+    prefsPath,
+    agentFactory: mockAgentFactory({ reply: 'short answer', conclusion: 'c' }),
+    shutdownOnFinish: false,
+  });
+  try {
+    const boot = (await (await fetch(`http://127.0.0.1:${port}/api/bootstrap`)).json()) as {
+      blockIds: string[];
+      canSendToMainSession: boolean;
+    };
+    assert.equal(boot.canSendToMainSession, false);
+    const response = await fetch(`http://127.0.0.1:${port}/api/threads`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        anchor: { blockId: boot.blockIds[1] },
+        message: 'Please revise this directly.',
+        recipient: 'main-agent',
+      }),
+    });
+    assert.equal(response.status, 409);
+    assert.deepEqual(await response.json(), {
+      ok: false,
+      error: 'main-session-direct-input-unavailable',
+    });
+  } finally {
+    await close();
+  }
+});

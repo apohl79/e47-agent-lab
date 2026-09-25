@@ -67,6 +67,8 @@ export type InferenceCatalog = Readonly<{
 
 export type ThreadKind = 'thread' | 'note';
 
+export type ThreadRecipient = 'thread-agent' | 'main-agent';
+
 export interface Thread {
   id: string;
   kind: ThreadKind;
