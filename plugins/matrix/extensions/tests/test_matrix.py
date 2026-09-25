@@ -914,6 +914,97 @@ def test_inbound_messages_ignores_xedoc_messages_sent_with_the_user_account() ->
     assert ignored == set()
 
 
+def test_matrix_input_request_starts_idle_thread() -> None:
+    request = matrix.matrix_input_request(
+        "thread-1",
+        {
+            "thread": {
+                "canAcceptDirectInput": True,
+                "status": {"type": "idle"},
+            }
+        },
+        "matrix-message-1",
+        "continue",
+    )
+
+    assert request == (
+        "turn/start",
+        {
+            "threadId": "thread-1",
+            "clientUserMessageId": "matrix-message-1",
+            "input": [{"type": "text", "text": "continue"}],
+        },
+    )
+
+
+def test_matrix_input_request_steers_active_turn() -> None:
+    request = matrix.matrix_input_request(
+        "thread-1",
+        {
+            "thread": {
+                "canAcceptDirectInput": True,
+                "status": {"type": "active"},
+            },
+            "turn": {"id": "turn-1", "status": "inProgress"},
+        },
+        "matrix-message-1",
+        "continue",
+    )
+
+    assert request == (
+        "turn/steer",
+        {
+            "threadId": "thread-1",
+            "clientUserMessageId": "matrix-message-1",
+            "input": [{"type": "text", "text": "continue"}],
+            "expectedTurnId": "turn-1",
+        },
+    )
+
+
+def test_matrix_input_request_waits_for_nonsteerable_active_turn() -> None:
+    snapshot = {
+        "thread": {
+            "canAcceptDirectInput": True,
+            "status": {"type": "active"},
+        },
+        "turn": {"id": "turn-1", "status": "completed"},
+    }
+
+    assert (
+        matrix.matrix_input_request(
+            "thread-1", snapshot, "matrix-message-1", "continue"
+        )
+        is None
+    )
+    assert matrix.matrix_input_waiting_message(snapshot) == (
+        "Your Matrix message is queued until the current Xedoc operation can "
+        "accept input.",
+        False,
+    )
+
+
+def test_matrix_input_request_rejects_threads_without_direct_input() -> None:
+    snapshot = {
+        "thread": {
+            "canAcceptDirectInput": False,
+            "status": {"type": "idle"},
+        }
+    }
+
+    assert (
+        matrix.matrix_input_request(
+            "thread-1", snapshot, "matrix-message-1", "continue"
+        )
+        is None
+    )
+    assert matrix.matrix_input_waiting_message(snapshot) == (
+        "This Xedoc thread does not permit direct Matrix input, so your "
+        "message was not delivered.",
+        True,
+    )
+
+
 def test_receiver_waits_for_user_send_to_register_its_echo_event() -> None:
     stop = threading.Event()
     synced = threading.Event()
@@ -1421,7 +1512,7 @@ def test_repository_registers_matrix_and_removes_signal() -> None:
     names = {entry["name"] for entry in marketplace["plugins"]}
 
     assert versions["plugins"]["matrix"] == {
-        "version": "0.12.2",
+        "version": "0.12.3",
         "hosts": ["xedoc"],
     }
     assert matrix.PLUGIN_VERSION == versions["plugins"]["matrix"]["version"]

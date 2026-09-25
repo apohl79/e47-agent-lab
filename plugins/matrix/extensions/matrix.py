@@ -39,7 +39,7 @@ except ModuleNotFoundError:
 
 
 PROTOCOL = "xedoc.script/v1"
-PLUGIN_VERSION = "0.12.2"
+PLUGIN_VERSION = "0.12.3"
 LEGACY_CONFIG_ROOT = (
     Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
     / "xedoc"
@@ -898,6 +898,61 @@ def inbound_messages(
         if isinstance(body, str) and body.strip():
             messages.append(body)
     return messages
+
+
+def matrix_input_request(
+    thread_id: str,
+    snapshot: dict[str, Any],
+    client_user_message_id: str,
+    text: str,
+) -> tuple[str, dict[str, Any]] | None:
+    """Build the appropriate Xedoc request for one Matrix user message."""
+    thread = snapshot.get("thread")
+    if not isinstance(thread, dict) or thread.get("canAcceptDirectInput") is not True:
+        return None
+    status = thread.get("status")
+    if not isinstance(status, dict):
+        return None
+    request: dict[str, Any] = {
+        "threadId": thread_id,
+        "clientUserMessageId": client_user_message_id,
+        "input": [{"type": "text", "text": text}],
+    }
+    if status.get("type") == "idle":
+        return "turn/start", request
+    turn = snapshot.get("turn")
+    if (
+        status.get("type") == "active"
+        and isinstance(turn, dict)
+        and isinstance(turn.get("id"), str)
+        and turn["id"]
+        and turn.get("status") == "inProgress"
+    ):
+        request["expectedTurnId"] = turn["id"]
+        return "turn/steer", request
+    return None
+
+
+def matrix_input_waiting_message(snapshot: dict[str, Any]) -> tuple[str, bool]:
+    """Explain whether a queued Matrix message can still be delivered."""
+    thread = snapshot.get("thread")
+    if not isinstance(thread, dict) or thread.get("canAcceptDirectInput") is not True:
+        return (
+            "This Xedoc thread does not permit direct Matrix input, so your "
+            "message was not delivered.",
+            True,
+        )
+    status = thread.get("status")
+    if isinstance(status, dict) and status.get("type") == "active":
+        return (
+            "Your Matrix message is queued until the current Xedoc operation "
+            "can accept input.",
+            False,
+        )
+    return (
+        "Your Matrix message is queued while Xedoc refreshes its session state.",
+        False,
+    )
 
 
 def native_user_message_text(item: dict[str, Any]) -> str | None:
@@ -2125,8 +2180,25 @@ def run_persistent() -> int:
             room_id,
             "Matrix bridge connected. Send a message here from Element to talk to Xedoc.",
         )
-        pending: deque[str] = deque()
+        pending: deque[tuple[str, str]] = deque()
+        deferred_inbound: deque[str] = deque()
         prompt_answers: deque[tuple[str, str, str]] = deque()
+        last_input_status: str | None = None
+
+        def report_input_status(message: str) -> None:
+            nonlocal last_input_status
+            if message == last_input_status:
+                return
+            last_input_status = message
+            post_host_message(registration_id, "warning", message)
+            try:
+                agent_matrix.send_text(room_id, message, "warning")
+            except MatrixError:
+                post_host_message(
+                    registration_id,
+                    "warning",
+                    "Matrix bridge could not report its input delivery status.",
+                )
 
         while True:
             readable, _, _ = select.select([sys.stdin], [], [], 0.5)
@@ -2143,35 +2215,51 @@ def run_persistent() -> int:
                     message = inbound.get_nowait()
                 except queue.Empty:
                     break
-                latest = client.read(registered["registrationId"])
-                snapshot = latest.get("snapshot")
-                if isinstance(snapshot, dict):
-                    merge_pending_prompts(snapshot)
-                matched_prompt = match_pending_prompt(message, pending_prompts)
-                if matched_prompt is None:
-                    if pending_prompts:
-                        agent_matrix.send_text(
-                            room_id,
-                            (
-                                "More than one Xedoc prompt is active. "
-                                "Resolve one in Xedoc, then reply here."
-                            ),
-                        )
-                    elif is_recent_approval_reply(message):
-                        agent_matrix.send_text(
-                            room_id,
-                            (
-                                "That numbered approval was already resolved "
-                                "in Xedoc, so it was not sent as a new message."
-                            ),
-                        )
-                    else:
-                        pending.append(message)
-                else:
-                    prompt_id, state, prefix, text = matched_prompt
-                    prompt_answers.append(
-                        (prompt_id, prefix, text)
+                deferred_inbound.append(message)
+            if deferred_inbound:
+                try:
+                    latest = client.read(registered["registrationId"])
+                except RpcError:
+                    report_input_status(
+                        "Your Matrix message is queued while the Xedoc bridge "
+                        "reconnects."
                     )
+                    continue
+                snapshot = latest.get("snapshot")
+                if not isinstance(snapshot, dict):
+                    report_input_status(
+                        "Your Matrix message is queued while Xedoc refreshes "
+                        "its session state."
+                    )
+                    continue
+                merge_pending_prompts(snapshot)
+                while deferred_inbound:
+                    message = deferred_inbound.popleft()
+                    matched_prompt = match_pending_prompt(message, pending_prompts)
+                    if matched_prompt is None:
+                        if pending_prompts:
+                            agent_matrix.send_text(
+                                room_id,
+                                (
+                                    "More than one Xedoc prompt is active. "
+                                    "Resolve one in Xedoc, then reply here."
+                                ),
+                            )
+                        elif is_recent_approval_reply(message):
+                            agent_matrix.send_text(
+                                room_id,
+                                (
+                                    "That numbered approval was already resolved "
+                                    "in Xedoc, so it was not sent as a new message."
+                                ),
+                            )
+                        else:
+                            pending.append(
+                                (message, f"matrix-{os.urandom(8).hex()}")
+                            )
+                    else:
+                        prompt_id, _state, prefix, text = matched_prompt
+                        prompt_answers.append((prompt_id, prefix, text))
             if prompt_answers:
                 prompt_id, prefix, text = prompt_answers.popleft()
                 state = pending_prompts.get(prompt_id)
@@ -2223,29 +2311,43 @@ def run_persistent() -> int:
                 else:
                     pending_prompts.pop(prompt_id, None)
             elif pending:
-                latest = client.read(registered["registrationId"])
-                thread = latest.get("snapshot", {}).get("thread", {})
-                if thread.get("canAcceptDirectInput"):
-                    text = pending[0]
-                    try:
-                        client.request(
-                            "turn/start",
-                            {
-                                "threadId": thread_id,
-                                "clientUserMessageId": (
-                                    f"matrix-{os.urandom(8).hex()}"
-                                ),
-                                "input": [{"type": "text", "text": text}],
-                            },
-                        )
-                    except RpcError:
-                        post_host_message(
-                            registration_id,
-                            "warning",
-                            "Xedoc could not accept the Matrix message yet.",
-                        )
-                        continue
-                    pending.popleft()
+                try:
+                    latest = client.read(registered["registrationId"])
+                except RpcError:
+                    report_input_status(
+                        "Your Matrix message is queued while the Xedoc bridge "
+                        "reconnects."
+                    )
+                    continue
+                snapshot = latest.get("snapshot")
+                if not isinstance(snapshot, dict):
+                    report_input_status(
+                        "Your Matrix message is queued while Xedoc refreshes "
+                        "its session state."
+                    )
+                    continue
+                text, client_user_message_id = pending[0]
+                request = matrix_input_request(
+                    thread_id, snapshot, client_user_message_id, text
+                )
+                if request is None:
+                    message, discard = matrix_input_waiting_message(snapshot)
+                    report_input_status(message)
+                    if discard:
+                        pending.popleft()
+                        last_input_status = None
+                    continue
+                method, params = request
+                try:
+                    client.request(method, params)
+                except RpcError:
+                    report_input_status(
+                        "Xedoc could not accept your Matrix message yet. "
+                        "It will retry."
+                    )
+                    continue
+                pending.popleft()
+                last_input_status = None
     except RpcError:
         return 0
     except (MatrixError, OSError, ValueError) as error:
