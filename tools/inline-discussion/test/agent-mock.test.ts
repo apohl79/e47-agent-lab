@@ -103,7 +103,7 @@ test('discussion agents disable project-context-curator while preserving their e
   );
 });
 
-test('Xedoc app-server children receive the Xedoc marker and harness only', () => {
+test('Xedoc app-server children disable routing and set the Xedoc marker', () => {
   assert.deepEqual(
     appServerDiscussionAgentEnvironment('xedoc', {
       KEEP_ME: 'yes',
@@ -114,6 +114,7 @@ test('Xedoc app-server children receive the Xedoc marker and harness only', () =
       KEEP_ME: 'yes',
       PROJECT_CONTEXT_CURATOR_DISABLED: '1',
       HARNESS: 'xedoc',
+      XEDOC_DISABLE_MODEL_ROUTER: '1',
       XEDOC_INLINE_DISCUSSION_CHILD: '1',
     },
   );

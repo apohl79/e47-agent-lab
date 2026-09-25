@@ -39,6 +39,7 @@ export interface ToolApprovalDecision {
 
 const THREAD_CONCLUSION_REQUEST = 'Conclude this thread now. Follow the mandatory thread role and output contract.';
 const PROJECT_CONTEXT_CURATOR_DISABLED_ENV = 'PROJECT_CONTEXT_CURATOR_DISABLED';
+const XEDOC_DISABLE_MODEL_ROUTER_ENV = 'XEDOC_DISABLE_MODEL_ROUTER';
 
 export function discussionAgentEnvironment(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   return { ...env, [PROJECT_CONTEXT_CURATOR_DISABLED_ENV]: '1' };
@@ -54,6 +55,7 @@ export function appServerDiscussionAgentEnvironment(
   return {
     ...childEnvironment,
     HARNESS: harness,
+    ...(harness === 'xedoc' ? { [XEDOC_DISABLE_MODEL_ROUTER_ENV]: '1' } : {}),
     [`${harness.toUpperCase()}_INLINE_DISCUSSION_CHILD`]: '1',
   };
 }

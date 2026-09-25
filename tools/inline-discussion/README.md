@@ -85,7 +85,9 @@ inline-discussion wait  --session-dir <path> [--idle-exit-seconds <seconds>]
 - Xedoc host detection and app-server lookup use only `XEDOC_*` variables:
   `XEDOC_THREAD_ID`, `XEDOC_SESSION_JSONL`, `XEDOC_HOME`, and
   `XEDOC_APP_SERVER_SOCKET`. Xedoc app-server children receive
-  `HARNESS=xedoc` and `XEDOC_INLINE_DISCUSSION_CHILD=1`.
+  `HARNESS=xedoc`, `XEDOC_INLINE_DISCUSSION_CHILD=1`, and
+  `XEDOC_DISABLE_MODEL_ROUTER=1` so their explicit thread inference settings
+  do not wait for a router approval.
 - Codex and Xedoc thread inference are explicit. A host-launched discussion initializes
   its page defaults from the latest main-session model and reasoning effort,
   resolving the provider from the selected app-server model catalog; standalone
