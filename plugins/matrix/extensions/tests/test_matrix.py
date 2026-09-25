@@ -1244,7 +1244,7 @@ def test_approval_prompt_renders_and_answers_router_confirmation() -> None:
         "stateRevision": "1",
         "outcome": "accepted",
         "action": {"id": "accept"},
-        "values": None,
+        "values": {},
     }
     assert matrix.approval_answer(prompt, "unknown") is None
 
@@ -1421,7 +1421,7 @@ def test_repository_registers_matrix_and_removes_signal() -> None:
     names = {entry["name"] for entry in marketplace["plugins"]}
 
     assert versions["plugins"]["matrix"] == {
-        "version": "0.12.1",
+        "version": "0.12.2",
         "hosts": ["xedoc"],
     }
     assert matrix.PLUGIN_VERSION == versions["plugins"]["matrix"]["version"]

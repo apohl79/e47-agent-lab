@@ -39,7 +39,7 @@ except ModuleNotFoundError:
 
 
 PROTOCOL = "xedoc.script/v1"
-PLUGIN_VERSION = "0.12.1"
+PLUGIN_VERSION = "0.12.2"
 LEGACY_CONFIG_ROOT = (
     Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
     / "xedoc"
@@ -1603,7 +1603,7 @@ def extension_interaction_response(
         "stateRevision": params.get("stateRevision"),
         "outcome": outcome,
         "action": {"id": action_id} if action_id else None,
-        "values": values,
+        "values": values or {},
     }
 
 
