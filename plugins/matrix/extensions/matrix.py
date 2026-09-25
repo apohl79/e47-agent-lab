@@ -39,7 +39,7 @@ except ModuleNotFoundError:
 
 
 PROTOCOL = "xedoc.script/v1"
-PLUGIN_VERSION = "0.12.4"
+PLUGIN_VERSION = "0.12.5"
 LEGACY_CONFIG_ROOT = (
     Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
     / "xedoc"
@@ -1377,6 +1377,105 @@ def prompt_answer(prompt: dict[str, Any], text: str) -> dict[str, Any] | None:
     return None
 
 
+def submit_prompt_response(
+    client: SessionScriptClient,
+    registration_id: str,
+    prompt_id: str,
+    prompt: dict[str, Any],
+    prefix: str,
+    text: str,
+) -> bool:
+    """Submit one mapped Matrix prompt reply through the leased script API."""
+    answer = (
+        prompt_answer(prompt, text)
+        if prefix == "prompt"
+        else approval_answer(prompt, text)
+    )
+    if answer is None:
+        return False
+    if prefix == "prompt":
+        client.respond(
+            registration_id,
+            prompt_id,
+            prompt["responseLease"],
+            answer,
+        )
+    else:
+        client.respond_approval(
+            registration_id,
+            prompt_id,
+            prompt["responseLease"],
+            answer,
+        )
+    return True
+
+
+def prompt_is_actionable(prompt: dict[str, Any]) -> bool:
+    return (
+        prompt.get("kind")
+        in {
+            "requestUserInput",
+            "extensionInteraction",
+            "commandExecutionApproval",
+            "fileChangeApproval",
+            "permissionsApproval",
+        }
+        and prompt.get("canRespond") is True
+        and isinstance(prompt.get("promptId"), str)
+        and isinstance(prompt.get("responseLease"), str)
+    )
+
+
+def merge_prompt_state(
+    pending_prompts: dict[str, dict[str, Any]],
+    snapshot: dict[str, Any],
+    *,
+    close_missing: bool,
+) -> None:
+    """Merge a prompt snapshot without losing notification-owned prompts."""
+    prompts = snapshot.get("pendingPrompts")
+    if not isinstance(prompts, list):
+        return
+    for prompt_id in prompt_ids_to_close(
+        set(pending_prompts), snapshot, close_missing=close_missing
+    ):
+        pending_prompts.pop(prompt_id, None)
+    for prompt in prompts:
+        if not isinstance(prompt, dict):
+            continue
+        if prompt_is_actionable(prompt):
+            pending_prompts[prompt["promptId"]] = {"prompt": prompt}
+
+
+def process_prompt_reply(
+    client: SessionScriptClient,
+    registration_id: str,
+    pending_prompts: dict[str, dict[str, Any]],
+    snapshot: dict[str, Any],
+    message: str,
+    *,
+    merge_snapshot: bool = True,
+) -> tuple[str, str, bool] | None:
+    """Merge an ordinary read and submit a matching Matrix prompt reply."""
+    if merge_snapshot:
+        merge_prompt_state(pending_prompts, snapshot, close_missing=False)
+    matched = match_pending_prompt(message, pending_prompts)
+    if matched is None:
+        return None
+    prompt_id, state, prefix, text = matched
+    accepted = submit_prompt_response(
+        client,
+        registration_id,
+        prompt_id,
+        state["prompt"],
+        prefix,
+        text,
+    )
+    if accepted:
+        pending_prompts.pop(prompt_id, None)
+    return prompt_id, prefix, accepted
+
+
 def approval_decision_label(decision: str) -> str:
     labels = {
         "accept": "Approve",
@@ -1653,6 +1752,26 @@ def match_pending_prompt(
             message.strip(),
         )
     return None
+
+
+def prompt_ids_to_close(
+    pending_prompt_ids: set[str],
+    snapshot: dict[str, Any],
+    *,
+    close_missing: bool,
+) -> set[str]:
+    """Return prompts absent from an authoritative replacement snapshot."""
+    if not close_missing:
+        return set()
+    prompts = snapshot.get("pendingPrompts")
+    if not isinstance(prompts, list):
+        return set()
+    snapshot_prompt_ids = {
+        prompt.get("promptId")
+        for prompt in prompts
+        if isinstance(prompt, dict) and isinstance(prompt.get("promptId"), str)
+    }
+    return pending_prompt_ids - snapshot_prompt_ids
 
 
 def is_numbered_approval_reply(message: str, choice_count: int) -> bool:
@@ -1990,17 +2109,7 @@ def run_persistent() -> int:
 
     def remember_prompt(prompt: dict[str, Any]) -> None:
         if (
-            prompt.get("kind")
-            not in {
-                "requestUserInput",
-                "extensionInteraction",
-                "commandExecutionApproval",
-                "fileChangeApproval",
-                "permissionsApproval",
-            }
-            or not prompt.get("canRespond")
-            or not isinstance(prompt.get("promptId"), str)
-            or not isinstance(prompt.get("responseLease"), str)
+            not prompt_is_actionable(prompt)
             or not room_id
         ):
             return
@@ -2013,27 +2122,31 @@ def run_persistent() -> int:
         agent_matrix.send_text(room_id, message)
 
     def replace_pending_prompts(snapshot: dict[str, Any]) -> None:
-        merge_pending_prompts(snapshot)
+        merge_pending_prompts(snapshot, close_missing=True)
 
-    def merge_pending_prompts(snapshot: dict[str, Any]) -> None:
+    def merge_pending_prompts(
+        snapshot: dict[str, Any], *, close_missing: bool = False
+    ) -> None:
         prompts = snapshot.get("pendingPrompts")
         if not isinstance(prompts, list):
             return
-        prompt_ids = {
-            prompt.get("promptId")
-            for prompt in prompts
-            if isinstance(prompt, dict) and isinstance(prompt.get("promptId"), str)
-        }
-        for prompt_id in tuple(pending_prompts):
-            if prompt_id not in prompt_ids:
+        previous_ids = set(pending_prompts)
+        if close_missing:
+            for prompt_id in prompt_ids_to_close(
+                previous_ids, snapshot, close_missing=True
+            ):
                 close_pending_prompt(prompt_id)
+        merge_prompt_state(
+            pending_prompts, snapshot, close_missing=False
+        )
         for prompt in prompts:
-            if isinstance(prompt, dict):
-                prompt_id = prompt.get("promptId")
-                if isinstance(prompt_id, str) and prompt_id in pending_prompts:
-                    pending_prompts[prompt_id]["prompt"] = prompt
-                else:
-                    remember_prompt(prompt)
+            prompt_id = prompt.get("promptId") if isinstance(prompt, dict) else None
+            if (
+                isinstance(prompt_id, str)
+                and prompt_id not in previous_ids
+                and prompt_id in pending_prompts
+            ):
+                remember_prompt(prompt)
 
     def on_notification(message: dict[str, Any]) -> None:
         nonlocal room_id
@@ -2201,7 +2314,6 @@ def run_persistent() -> int:
         )
         pending: deque[tuple[str, str]] = deque()
         deferred_inbound: deque[str] = deque()
-        prompt_answers: deque[tuple[str, str, str]] = deque()
         last_input_status: str | None = None
 
         def report_input_status(message: str) -> None:
@@ -2251,84 +2363,65 @@ def run_persistent() -> int:
                         "its session state."
                     )
                     continue
-                merge_pending_prompts(snapshot)
+                merge_prompt_state(
+                    pending_prompts, snapshot, close_missing=False
+                )
                 while deferred_inbound:
                     message = deferred_inbound.popleft()
-                    matched_prompt = match_pending_prompt(message, pending_prompts)
-                    if matched_prompt is None:
-                        if pending_prompts:
+                    try:
+                        prompt_result = process_prompt_reply(
+                            client,
+                            registered["registrationId"],
+                            pending_prompts,
+                            snapshot,
+                            message,
+                            merge_snapshot=False,
+                        )
+                    except RpcError:
+                        agent_matrix.send_text(
+                            room_id, "Xedoc could not accept that answer."
+                        )
+                        post_host_message(
+                            registration_id,
+                            "warning",
+                            "Xedoc could not accept the Matrix prompt answer.",
+                        )
+                        continue
+                    if prompt_result is not None:
+                        _, prefix, accepted = prompt_result
+                        if not accepted:
                             agent_matrix.send_text(
                                 room_id,
                                 (
-                                    "More than one Xedoc prompt is active. "
-                                    "Resolve one in Xedoc, then reply here."
+                                    "That response could not be mapped. "
+                                    + (
+                                        "Reply with one of the listed numbers."
+                                        if prefix == "approval"
+                                        else "Reply with the listed number or answer."
+                                    )
                                 ),
                             )
-                        elif is_recent_approval_reply(message):
-                            agent_matrix.send_text(
-                                room_id,
-                                (
-                                    "That numbered approval was already resolved "
-                                    "in Xedoc, so it was not sent as a new message."
-                                ),
-                            )
-                        else:
-                            pending.append(
-                                (message, f"matrix-{os.urandom(8).hex()}")
-                            )
-                    else:
-                        prompt_id, _state, prefix, text = matched_prompt
-                        prompt_answers.append((prompt_id, prefix, text))
-            if prompt_answers:
-                prompt_id, prefix, text = prompt_answers.popleft()
-                state = pending_prompts.get(prompt_id)
-                if state is None:
-                    continue
-                prompt = state["prompt"]
-                answer = (
-                    prompt_answer(prompt, text)
-                    if prefix == "prompt"
-                    else approval_answer(prompt, text)
-                )
-                if answer is None:
-                    agent_matrix.send_text(
-                        room_id,
-                        (
-                            "That response could not be mapped. "
-                            + (
-                                "Reply with one of the listed numbers."
-                                if prefix == "approval"
-                                else "Reply with the listed number or answer."
-                            )
-                        ),
-                    )
-                    continue
-                try:
-                    if prefix == "prompt":
-                        client.respond(
-                            registered["registrationId"],
-                            prompt_id,
-                            prompt["responseLease"],
-                            answer,
+                        continue
+                    if pending_prompts:
+                        agent_matrix.send_text(
+                            room_id,
+                            (
+                                "More than one Xedoc prompt is active. "
+                                "Resolve one in Xedoc, then reply here."
+                            ),
+                        )
+                    elif is_recent_approval_reply(message):
+                        agent_matrix.send_text(
+                            room_id,
+                            (
+                                "That numbered approval was already resolved "
+                                "in Xedoc, so it was not sent as a new message."
+                            ),
                         )
                     else:
-                        client.respond_approval(
-                            registered["registrationId"],
-                            prompt_id,
-                            prompt["responseLease"],
-                            answer,
+                        pending.append(
+                            (message, f"matrix-{os.urandom(8).hex()}")
                         )
-                except RpcError:
-                    agent_matrix.send_text(
-                        room_id, "Xedoc could not accept that answer."
-                    )
-                    post_host_message(
-                        registration_id,
-                        "warning",
-                        "Xedoc could not accept the Matrix prompt answer.",
-                    )
-                else:
-                    pending_prompts.pop(prompt_id, None)
             elif pending:
                 try:
                     latest = client.read(registered["registrationId"])

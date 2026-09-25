@@ -1571,6 +1571,100 @@ def test_matrix_reply_matches_only_one_pending_prompt() -> None:
     assert not matrix.is_numbered_approval_reply("reply 1", 2)
 
 
+def test_matrix_question_reply_survives_read_and_uses_original_lease() -> None:
+    prompt = {
+        "kind": "requestUserInput",
+        "promptId": "prompt-1",
+        "responseLease": "lease-1",
+        "request": {
+            "method": "item/tool/requestUserInput",
+            "params": {
+                "questions": [
+                    {
+                        "id": "choice",
+                        "question": "What would you like me to help with?",
+                        "options": [
+                            {"label": "Inspect the repository"},
+                            {"label": "Explain a concept"},
+                        ],
+                    }
+                ]
+            },
+        },
+    }
+    pending = {"prompt-1": {"prompt": prompt}}
+
+    class RecordingClient:
+        def __init__(self) -> None:
+            self.calls: list[tuple[Any, ...]] = []
+
+        def respond(self, *args: Any) -> None:
+            self.calls.append(args)
+
+    client = RecordingClient()
+    matrix.merge_prompt_state(
+        pending, {"pendingPrompts": []}, close_missing=False
+    )
+    assert matrix.process_prompt_reply(
+        client,
+        "registration-1",
+        pending,
+        {"pendingPrompts": []},
+        "2",
+        merge_snapshot=False,
+    ) == ("prompt-1", "prompt", True)
+    assert pending == {}
+    assert client.calls == [
+        (
+            "registration-1",
+            "prompt-1",
+            "lease-1",
+            {
+                "kind": "requestUserInput",
+                "answers": {"choice": {"answers": ["Explain a concept"]}},
+            },
+        )
+    ]
+    assert matrix.process_prompt_reply(
+        client,
+        "registration-1",
+        pending,
+        {"pendingPrompts": [prompt]},
+        "follow-up",
+        merge_snapshot=False,
+    ) is None
+
+
+def test_observer_only_snapshot_prompt_is_not_actionable() -> None:
+    pending: dict[str, dict[str, Any]] = {}
+    matrix.merge_prompt_state(
+        pending,
+        {
+            "pendingPrompts": [
+                {
+                    "kind": "requestUserInput",
+                    "promptId": "observer-prompt",
+                    "canRespond": False,
+                    "responseLease": None,
+                }
+            ]
+        },
+        close_missing=False,
+    )
+    assert pending == {}
+
+
+def test_prompt_replacement_does_not_drop_notification_owned_prompt() -> None:
+    snapshot = {"pendingPrompts": []}
+
+    assert matrix.prompt_ids_to_close(
+        {"prompt-1"}, snapshot, close_missing=False
+    ) == set()
+    assert matrix.prompt_ids_to_close(
+        {"prompt-1"}, snapshot, close_missing=True
+    ) == {"prompt-1"}
+
+
 def test_repository_registers_matrix_and_removes_signal() -> None:
     versions = json.loads((REPO_ROOT / "plugin-versions.json").read_text())
     marketplace = json.loads(
@@ -1582,7 +1676,7 @@ def test_repository_registers_matrix_and_removes_signal() -> None:
     names = {entry["name"] for entry in marketplace["plugins"]}
 
     assert versions["plugins"]["matrix"] == {
-        "version": "0.12.4",
+        "version": "0.12.5",
         "hosts": ["xedoc"],
     }
     assert matrix.PLUGIN_VERSION == versions["plugins"]["matrix"]["version"]
