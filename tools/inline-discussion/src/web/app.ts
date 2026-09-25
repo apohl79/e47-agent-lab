@@ -1961,8 +1961,7 @@ function renderThread(thread: Thread): void {
       <textarea class="reply" rows="1" placeholder="Reply…  Enter to send, Shift+Enter for newline"></textarea>
       <button class="btn btn-primary send">Send</button>
       <div class="thread-close-actions">
-        <button class="btn btn-ghost summarize-thread-btn">Summarize thread</button>
-        <button class="btn btn-ghost close-with-last-btn">Close with last response</button>
+        <button class="btn btn-ghost close-with-last-btn">Close</button>
       </div>
       <button class="btn btn-ghost delete-btn">Delete</button>
     </div>`;
@@ -2064,18 +2063,6 @@ function renderThread(thread: Thread): void {
       deleteBtn.disabled = false;
     }
   });
-  const summarizeBtn = card.querySelector('.summarize-thread-btn') as HTMLButtonElement;
-  summarizeBtn.addEventListener('click', async () => {
-    setCloseActionsPending(card, summarizeBtn, 'Summarizing…');
-    try {
-      await summarizeThread(thread);
-    } catch (err) {
-      console.error('summarizeThread failed', err);
-      showCardError(card, `Failed to summarize thread: ${err instanceof Error ? err.message : String(err)}`);
-      restoreCloseActions(card, thread);
-    }
-  });
-
   const closeWithLastBtn = card.querySelector('.close-with-last-btn') as HTMLButtonElement;
   syncCloseWithLastButton(card, thread);
   closeWithLastBtn.addEventListener('click', async () => {
@@ -2492,7 +2479,7 @@ function getLastAssistantMessage(thread: Thread): { text: string } | null {
 }
 
 function closeActionButtons(card: HTMLElement): HTMLButtonElement[] {
-  return [...card.querySelectorAll<HTMLButtonElement>('.summarize-thread-btn, .close-with-last-btn')];
+  return [...card.querySelectorAll<HTMLButtonElement>('.close-with-last-btn')];
 }
 
 function setCloseActionsPending(card: HTMLElement, activeButton: HTMLButtonElement, label: string): void {
@@ -2522,11 +2509,6 @@ function syncCloseWithLastButton(card: HTMLElement, thread: Thread): void {
     : 'No agent response yet';
 }
 
-async function summarizeThread(thread: Thread): Promise<void> {
-  const r = await fetch(`/api/threads/${thread.id}/propose-conclusion`, { method: 'POST' });
-  if (!r.ok) throw new Error(`server responded ${r.status}`);
-}
-
 async function closeThread(threadId: string, conclusion: string): Promise<void> {
   const r = await fetch(`/api/threads/${threadId}/close`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
@@ -2540,11 +2522,8 @@ function onConclusion(evt: { threadId: string; conclusion: string }): void {
   if (!card) return;
   const t = state.threads.get(evt.threadId);
   if (t && t.status === 'closed') return;
-  // Spinner / "Summarizing…" label did its job — swap close action labels back
-  // to their original text (they stay disabled while the editor is open).
   for (const b of closeActionButtons(card)) {
-    const fallbackLabel = b.classList.contains('summarize-thread-btn') ? 'Summarize thread' : 'Close with last response';
-    b.textContent = b.dataset.origLabel ?? fallbackLabel;
+    b.textContent = b.dataset.origLabel ?? 'Close';
     b.disabled = true;
   }
   const existing = card.querySelector<HTMLElement>('.conclusion-edit');
