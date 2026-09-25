@@ -10,6 +10,7 @@ import stat
 import sys
 import threading
 from typing import Any
+from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -493,6 +494,75 @@ class SequenceOpener:
     def open(self, request: Any, timeout: float) -> FakeResponse:
         self.requests.append(request)
         return FakeResponse(next(self.payloads))
+
+
+class TransientThenSuccessOpener:
+    def __init__(self, failures: int, status: int = 503) -> None:
+        self.failures = failures
+        self.status = status
+        self.calls = 0
+
+    def open(self, request: Any, timeout: float) -> FakeResponse:
+        self.calls += 1
+        if self.calls <= self.failures:
+            raise HTTPError(
+                request.full_url,
+                self.status,
+                "Service Unavailable",
+                {},
+                io.BytesIO(b'{"error":"Unable to introspect the access token"}'),
+            )
+        return FakeResponse({"user_id": "@xedoc:example.org"})
+
+
+@pytest.mark.parametrize("status", [502, 503, 504])
+def test_matrix_client_retries_transient_introspection_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+) -> None:
+    opener = TransientThenSuccessOpener(failures=2, status=status)
+    monkeypatch.setattr(matrix.time, "sleep", lambda _seconds: None)
+    client = matrix.MatrixClient(
+        matrix.normalize_config(valid_values()), opener=opener
+    )
+
+    assert client.whoami() == "@xedoc:example.org"
+    assert opener.calls == 3
+
+
+def test_matrix_client_does_not_retry_invalid_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    opener = TransientThenSuccessOpener(failures=1, status=401)
+    monkeypatch.setattr(matrix.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        matrix,
+        "refresh_oauth_account",
+        lambda *_args: (_ for _ in ()).throw(
+            matrix.OAuthError("refresh_unavailable")
+        ),
+    )
+    client = matrix.MatrixClient(
+        matrix.normalize_config(valid_values()), opener=opener
+    )
+
+    with pytest.raises(matrix.MatrixError, match="401"):
+        client.whoami()
+    assert opener.calls == 1
+
+
+def test_matrix_client_does_not_retry_room_creation_on_transient_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    opener = TransientThenSuccessOpener(failures=1)
+    monkeypatch.setattr(matrix.time, "sleep", lambda _seconds: None)
+    client = matrix.MatrixClient(
+        matrix.normalize_config(valid_values()), opener=opener
+    )
+
+    with pytest.raises(matrix.MatrixError, match="503"):
+        client.create_room("A session", "@andreas:example.org")
+    assert opener.calls == 1
 
 
 def test_matrix_client_uses_bearer_header_and_json_body(
@@ -1512,7 +1582,7 @@ def test_repository_registers_matrix_and_removes_signal() -> None:
     names = {entry["name"] for entry in marketplace["plugins"]}
 
     assert versions["plugins"]["matrix"] == {
-        "version": "0.12.3",
+        "version": "0.12.4",
         "hosts": ["xedoc"],
     }
     assert matrix.PLUGIN_VERSION == versions["plugins"]["matrix"]["version"]

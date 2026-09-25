@@ -39,7 +39,7 @@ except ModuleNotFoundError:
 
 
 PROTOCOL = "xedoc.script/v1"
-PLUGIN_VERSION = "0.12.3"
+PLUGIN_VERSION = "0.12.4"
 LEGACY_CONFIG_ROOT = (
     Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
     / "xedoc"
@@ -60,6 +60,9 @@ MAX_RESPONSE_BYTES = 1 << 20
 SYNC_TIMEOUT_MS = 25_000
 MAX_BACKFILL_PAGES = 100
 STALE_APPROVAL_REPLY_GRACE_SECONDS = 60
+TRANSIENT_HTTP_STATUS_CODES = {502, 503, 504}
+TRANSIENT_HTTP_RETRIES = 2
+TRANSIENT_HTTP_RETRY_DELAY_SECONDS = 1.0
 OAUTH_DEVICE_GRANT = "urn:ietf:params:oauth:grant-type:device_code"
 OAUTH_API_SCOPE = "urn:matrix:client:api:*"
 CONFIG_WRITE_LOCK = threading.Lock()
@@ -373,6 +376,7 @@ class MatrixClient:
         query: dict[str, str | int] | None = None,
         timeout: float = 30,
         refreshed: bool = False,
+        retry_transient: bool = False,
     ) -> dict[str, Any]:
         url = f"{self.homeserver}{MATRIX_API_PREFIX}{path}"
         if query:
@@ -392,35 +396,48 @@ class MatrixClient:
                 "Content-Type": "application/json",
             },
         )
-        try:
-            with self.opener.open(request, timeout=timeout) as opened:
-                raw = opened.read(MAX_RESPONSE_BYTES + 1)
-        except HTTPError as error:
-            detail = error.read(4096).decode("utf-8", errors="replace")
+        for attempt in range(TRANSIENT_HTTP_RETRIES + 1):
             try:
-                message = json.loads(detail).get("error", detail)
-            except json.JSONDecodeError:
-                message = detail
-            if error.code == 401 and not refreshed:
+                with self.opener.open(request, timeout=timeout) as opened:
+                    raw = opened.read(MAX_RESPONSE_BYTES + 1)
+                break
+            except HTTPError as error:
+                detail = error.read(4096).decode("utf-8", errors="replace")
                 try:
-                    refresh_oauth_account(self.config, self.role)
-                except OAuthError:
-                    pass
-                else:
-                    self.access_token = str(self.config[self.access_key])
-                    return self.request(
-                        method,
-                        path,
-                        payload,
-                        query,
-                        timeout,
-                        refreshed=True,
+                    message = json.loads(detail).get("error", detail)
+                except json.JSONDecodeError:
+                    message = detail
+                if (
+                    retry_transient
+                    and
+                    error.code in TRANSIENT_HTTP_STATUS_CODES
+                    and attempt < TRANSIENT_HTTP_RETRIES
+                ):
+                    time.sleep(
+                        TRANSIENT_HTTP_RETRY_DELAY_SECONDS * (2**attempt)
                     )
-            raise MatrixError(
-                f"Matrix request failed ({error.code}): {str(message)[:500]}"
-            ) from error
-        except URLError as error:
-            raise MatrixError(f"Matrix request failed: {error.reason}") from error
+                    continue
+                if error.code == 401 and not refreshed:
+                    try:
+                        refresh_oauth_account(self.config, self.role)
+                    except OAuthError:
+                        pass
+                    else:
+                        self.access_token = str(self.config[self.access_key])
+                        return self.request(
+                            method,
+                            path,
+                            payload,
+                            query,
+                            timeout,
+                            refreshed=True,
+                            retry_transient=retry_transient,
+                        )
+                raise MatrixError(
+                    f"Matrix request failed ({error.code}): {str(message)[:500]}"
+                ) from error
+            except URLError as error:
+                raise MatrixError(f"Matrix request failed: {error.reason}") from error
         if len(raw) > MAX_RESPONSE_BYTES:
             raise MatrixError("Matrix response exceeds the size limit")
         if not raw:
@@ -434,7 +451,9 @@ class MatrixClient:
         return value
 
     def whoami(self) -> str:
-        result = self.request("GET", "/account/whoami")
+        result = self.request(
+            "GET", "/account/whoami", retry_transient=True
+        )
         user_id = result.get("user_id")
         if not isinstance(user_id, str):
             raise MatrixError("Matrix whoami response did not include user_id")
