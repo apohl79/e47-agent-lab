@@ -481,6 +481,11 @@ async function updateInferenceSettings(url: string, settings: InferenceSettings)
   throw new Error(payload.error ?? `server responded ${response.status}`);
 }
 
+async function responseError(response: Response): Promise<Error> {
+  const payload = (await response.json().catch(() => ({}))) as { error?: string; message?: string };
+  return new Error(payload.message ?? payload.error ?? `server responded ${response.status}`);
+}
+
 function renderDefaultInferenceSelectors(): void {
   const host = document.getElementById('inference-defaults');
   if (!host) return;
@@ -1708,19 +1713,17 @@ async function createThread(
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ documentPath: state.documentPath, anchor: { blockId, quote, occurrence }, message, kind, recipient }),
   });
-  if (!r.ok) throw new Error(`server responded ${r.status}`);
-  if (recipient === 'main-agent') {
-    showCenterToast('Sent to the main agent.');
-    return;
-  }
+  if (!r.ok) throw await responseError(r);
   const { threadId } = (await r.json()) as { threadId: string };
+  const toMainAgent = kind === 'thread' && recipient === 'main-agent';
   const thread: Thread = {
     id: threadId, kind, status: 'open',
+    ...(toMainAgent ? { recipient } : {}),
     documentPath: state.documentPath,
     anchor: { blockId, quote, occurrence },
     messages: [{ role: 'user', text: message, ts: new Date().toISOString() }],
     createdAt: new Date().toISOString(),
-    inferenceSettings: kind === 'thread' && state.defaultInferenceSettings
+    inferenceSettings: kind === 'thread' && !toMainAgent && state.defaultInferenceSettings
       ? { ...state.defaultInferenceSettings }
       : undefined,
   };
@@ -1836,7 +1839,7 @@ async function submitReply(card: HTMLElement, threadId: string, text: string): P
         method: 'POST', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ message: text }),
       });
-      if (!r.ok) throw new Error(`server responded ${r.status}`);
+      if (!r.ok) throw await responseError(r);
       pendingUser.classList.remove('steering-pending');
       const index = turn.queued.indexOf(text);
       if (index >= 0) turn.queued.splice(index, 1);
@@ -1861,7 +1864,7 @@ async function submitReply(card: HTMLElement, threadId: string, text: string): P
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ message: text }),
     });
-    if (!r.ok) throw new Error(`server responded ${r.status}`);
+    if (!r.ok) throw await responseError(r);
   } catch (err) {
     onMessageError({ threadId, error: err instanceof Error ? err.message : String(err) });
   }
@@ -1949,7 +1952,7 @@ function renderThread(thread: Thread): void {
   card.classList.remove('resolved');
   card.innerHTML = `
     <div class="thread-header">
-      <div class="thread-label"><span class="thread-icon">💬</span> <strong>Thread</strong> <span class="anchor-quote">${thread.anchor.quote ? `“${escapeHtml(thread.anchor.quote)}”` : 'entire block'}</span></div>
+      <div class="thread-label"><span class="thread-icon">💬</span> <strong>${thread.recipient === 'main-agent' ? 'Main agent' : 'Thread'}</strong> <span class="anchor-quote">${thread.anchor.quote ? `“${escapeHtml(thread.anchor.quote)}”` : 'entire block'}</span></div>
       <div class="thread-actions">
         <div class="thread-inference"></div>
         <button class="btn btn-ghost to-note-btn" title="Collapse this thread into a single note">↩ To note</button>
@@ -1961,7 +1964,7 @@ function renderThread(thread: Thread): void {
       <textarea class="reply" rows="1" placeholder="Reply…  Enter to send, Shift+Enter for newline"></textarea>
       <button class="btn btn-primary send">Send</button>
       <div class="thread-close-actions">
-        <button class="btn btn-ghost close-with-last-btn">Close</button>
+        <button class="btn btn-ghost close-with-last-btn">Finish</button>
       </div>
       <button class="btn btn-ghost delete-btn">Delete</button>
     </div>`;
@@ -2039,7 +2042,7 @@ function renderThread(thread: Thread): void {
         method: 'POST', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ to: 'note' }),
       });
-      if (!r.ok) throw new Error(`server responded ${r.status}`);
+      if (!r.ok) throw await responseError(r);
     } catch (err) {
       showCardError(card, `Failed to convert to note: ${err instanceof Error ? err.message : String(err)}`);
       toNoteBtn.disabled = false;
@@ -2057,7 +2060,7 @@ function renderThread(thread: Thread): void {
     deleteBtn.disabled = true;
     try {
       const r = await fetch(`/api/threads/${thread.id}`, { method: 'DELETE' });
-      if (!r.ok) throw new Error(`server responded ${r.status}`);
+      if (!r.ok) throw await responseError(r);
     } catch (err) {
       showCardError(card, `Failed to delete thread: ${err instanceof Error ? err.message : String(err)}`);
       deleteBtn.disabled = false;
@@ -2073,7 +2076,7 @@ function renderThread(thread: Thread): void {
       syncCloseWithLastButton(card, current);
       return;
     }
-    setCloseActionsPending(card, closeWithLastBtn, 'Closing…');
+    setCloseActionsPending(card, closeWithLastBtn, 'Finishing…');
     try {
       await closeThread(thread.id, lastAssistant.text);
     } catch (err) {
@@ -2505,7 +2508,7 @@ function syncCloseWithLastButton(card: HTMLElement, thread: Thread): void {
   const hasLastAssistant = getLastAssistantMessage(thread) !== null;
   button.disabled = !hasLastAssistant;
   button.title = hasLastAssistant
-    ? 'Close the thread and use the last agent response as the summary'
+    ? 'Finish the thread and use the last agent response as the summary'
     : 'No agent response yet';
 }
 
@@ -2523,7 +2526,7 @@ function onConclusion(evt: { threadId: string; conclusion: string }): void {
   const t = state.threads.get(evt.threadId);
   if (t && t.status === 'closed') return;
   for (const b of closeActionButtons(card)) {
-    b.textContent = b.dataset.origLabel ?? 'Close';
+    b.textContent = b.dataset.origLabel ?? 'Finish';
     b.disabled = true;
   }
   const existing = card.querySelector<HTMLElement>('.conclusion-edit');

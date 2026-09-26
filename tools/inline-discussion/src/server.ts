@@ -223,6 +223,7 @@ export async function createServer(opts: ServerOptions): Promise<ServerHandle> {
     shutdownOnFinish: opts.shutdownOnFinish !== false,
     hasMainSession: hasMainSession || mainSession !== null,
     mainSession,
+    mainSessionLease: null,
   };
   restoreLiveSession(state);
   state.archivedThreads = parseArchivedThreads(state.docMd, state.docPath);
@@ -320,7 +321,14 @@ interface ServerState {
   // to the main host agent.
   hasMainSession: boolean;
   mainSession: MainSessionBridge | null;
+  // Exclusive claim on the shared main session: one main-agent turn, or the
+  // Finish archive-and-handoff. Acquired synchronously with its admission check.
+  mainSessionLease: MainSessionLease | null;
 }
+
+type MainSessionLease =
+  | Readonly<{ kind: 'turn'; threadId: string }>
+  | Readonly<{ kind: 'finish' }>;
 
 function liveSessionPath(state: Pick<ServerState, 'sessionDir'>): string {
   return join(state.sessionDir, LIVE_SESSION_FILE);
@@ -364,7 +372,7 @@ function restoreLiveSession(state: ServerState): void {
     state.nextHighlightSeq = snapshot.nextHighlightSeq;
     for (const thread of state.liveThreads.values()) {
       if (thread.kind !== 'thread' || thread.status !== 'open') continue;
-      if (!thread.inferenceSettings && state.defaultInferenceSettings) {
+      if (!thread.inferenceSettings && state.defaultInferenceSettings && thread.recipient !== 'main-agent') {
         thread.inferenceSettings = Object.freeze({ ...state.defaultInferenceSettings });
       }
       state.agents.set(thread.id, createThreadAgent(state, thread));
@@ -375,6 +383,7 @@ function restoreLiveSession(state: ServerState): void {
 }
 
 function createThreadAgent(state: ServerState, thread: Thread): ThreadAgent {
+  if (thread.recipient === 'main-agent') return createMainSessionThreadAgent(state, thread);
   const transcript = thread.messages
     .map((message) => `${message.role === 'user' ? 'User' : 'Assistant'}: ${message.text}`)
     .join('\n\n');
@@ -391,6 +400,100 @@ function createThreadAgent(state: ServerState, thread: Thread): ThreadAgent {
     inferenceSettings: thread.inferenceSettings,
     requestToolApproval: (request) => requestThreadToolApproval(state, thread, request),
   });
+}
+
+function createMainSessionThreadAgent(state: ServerState, thread: Thread): ThreadAgent {
+  const bridge = state.mainSession;
+  let activeTurnId: string | null = null;
+  const prompt = (message: string): string => mainAgentMessagePrompt({
+    threadId: thread.id,
+    documentPath: threadDocumentPath(state, thread),
+    anchor: thread.anchor,
+    message,
+  });
+  return {
+    provider: 'main-session',
+    async *send(userText) {
+      if (!bridge?.stream) throw new Error('main-session-direct-input-unavailable');
+      const lease = state.mainSessionLease;
+      if (lease?.kind !== 'turn' || lease.threadId !== thread.id) {
+        throw new Error(lease ? mainSessionBusy(lease).message : 'main-session turn was not admitted');
+      }
+      activeTurnId = null;
+      try {
+        yield* bridge.stream(prompt(userText), (turnId) => { activeTurnId = turnId; });
+      } finally {
+        activeTurnId = null;
+      }
+    },
+    async steer(userText) {
+      if (!bridge?.steer) throw new Error('main-session-direct-input-unavailable');
+      if (!activeTurnId) throw new Error('The main-session turn has not started yet; try again in a moment.');
+      await bridge.steer(activeTurnId, prompt(userText));
+    },
+    ...(bridge?.interrupt
+      ? {
+          interrupt: async () => {
+            if (!activeTurnId) throw new Error('The main-session turn has not started yet; try again in a moment.');
+            await bridge.interrupt!(activeTurnId);
+          },
+        }
+      : {}),
+    async *proposeConclusion() {
+      const lastAssistant = [...thread.messages].reverse().find((message) => message.role === 'assistant');
+      yield { type: 'done', text: lastAssistant?.text ?? '' };
+    },
+    snapshot: () => thread.messages,
+  };
+}
+
+function mainSessionBusy(lease: MainSessionLease): Readonly<{ error: string; message: string }> {
+  return lease.kind === 'turn'
+    ? {
+        error: 'main-agent-busy',
+        message: `The main agent is still answering thread ${lease.threadId}; wait for that reply before starting another main-agent turn.`,
+      }
+    : {
+        error: 'main-session-busy',
+        message: 'The discussion has been handed back to the main session to finish.',
+      };
+}
+
+function rejectMainSessionLease(state: ServerState, res: ServerResponse): boolean {
+  const lease = state.mainSessionLease;
+  if (!lease) return false;
+  res.statusCode = 409;
+  res.setHeader('content-type', 'application/json');
+  res.end(JSON.stringify({ ok: false, ...mainSessionBusy(lease) }));
+  return true;
+}
+
+function acquireMainSessionLease(state: ServerState, res: ServerResponse, lease: MainSessionLease): boolean {
+  if (guardApplying(state, res) || rejectMainSessionLease(state, res)) return false;
+  state.mainSessionLease = lease;
+  return true;
+}
+
+function releaseMainSessionLease(state: ServerState, lease: MainSessionLease): void {
+  if (state.mainSessionLease === lease) state.mainSessionLease = null;
+}
+
+function releaseMainSessionTurn(state: ServerState, threadId: string): void {
+  const lease = state.mainSessionLease;
+  if (lease?.kind === 'turn' && lease.threadId === threadId) state.mainSessionLease = null;
+}
+
+function rejectActiveMainAgentThread(state: ServerState, res: ServerResponse, threadId: string): boolean {
+  const lease = state.mainSessionLease;
+  if (lease?.kind !== 'turn' || lease.threadId !== threadId) return false;
+  res.statusCode = 409;
+  res.setHeader('content-type', 'application/json');
+  res.end(JSON.stringify({
+    ok: false,
+    error: 'main-agent-reply-active',
+    message: 'Interrupt or wait for the main agent reply before changing this thread.',
+  }));
+  return true;
 }
 
 function replaceThreadAgent(state: ServerState, threadId: string): void {
@@ -897,13 +1000,15 @@ function finishHandoffPrompt(resultPath: string): string {
 }
 
 function mainAgentMessagePrompt(input: {
+  threadId: string;
   documentPath: string;
   anchor: { blockId: string; quote?: string; occurrence?: number };
   message: string;
 }): string {
   return [
-    'The user sent you a message directly from an inline-discussion composer.',
+    `The user sent you a message directly from inline-discussion thread ${input.threadId}.`,
     'Treat it as a request in this main session, not as a thread-agent handoff.',
+    'Your final answer for this turn streams back into that thread card, so answer the message directly.',
     `Document: ${input.documentPath}`,
     `Anchor block: ${input.anchor.blockId}`,
     ...(input.anchor.quote ? [`Selected text: ${input.anchor.quote}`] : []),
@@ -1038,7 +1143,7 @@ async function handle(state: ServerState, req: IncomingMessage, res: ServerRespo
       applyProgress: state.applyProgress,
       applyTasks: state.applyTasks,
       hasMainSession: state.hasMainSession,
-      canSendToMainSession: state.mainSession !== null,
+      canSendToMainSession: state.mainSession?.stream !== undefined,
       applyAvailable: applyAvailable(state),
       applyCount: applyCount(state),
       targetLine: rendered.targetLine,
@@ -1196,45 +1301,30 @@ async function handle(state: ServerState, req: IncomingMessage, res: ServerRespo
       res.end(JSON.stringify({ ok: false, error: 'documentPath must reference a Markdown document' }));
       return;
     }
-    if (body.recipient === 'main-agent') {
-      if (!state.mainSession) {
-        res.statusCode = 409;
-        res.setHeader('content-type', 'application/json');
-        res.end(JSON.stringify({ ok: false, error: 'main-session-direct-input-unavailable' }));
-        return;
-      }
-      try {
-        await state.mainSession.send(mainAgentMessagePrompt({
-          documentPath,
-          anchor: body.anchor,
-          message: body.message ?? '',
-        }));
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        res.statusCode = 502;
-        res.setHeader('content-type', 'application/json');
-        res.end(JSON.stringify({ ok: false, error: 'main-session-message-failed', message }));
-        return;
-      }
+    const kind: ThreadKind = body.kind === 'note' ? 'note' : 'thread';
+    const toMainAgent = kind === 'thread' && body.recipient === 'main-agent';
+    if (toMainAgent && !state.mainSession?.stream) {
+      res.statusCode = 409;
       res.setHeader('content-type', 'application/json');
-      res.end(JSON.stringify({ recipient: 'main-agent' }));
+      res.end(JSON.stringify({ ok: false, error: 'main-session-direct-input-unavailable' }));
       return;
     }
-    const kind: ThreadKind = body.kind === 'note' ? 'note' : 'thread';
     state.nextThreadSeq += 1;
     const seq = state.nextThreadSeq;
     const threadId = `t-${seq}`;
+    if (toMainAgent && !acquireMainSessionLease(state, res, { kind: 'turn', threadId })) return;
     const now = new Date().toISOString();
     const thread: Thread = {
       id: threadId,
       kind,
+      ...(toMainAgent ? { recipient: 'main-agent' as const } : {}),
       documentPath,
       anchor: body.anchor,
       status: 'open',
       messages: [],
       createdAt: now,
       colorIndex: (seq - 1) % 8,
-      inferenceSettings: kind === 'thread' ? snapshotDefaultInferenceSettings(state) : undefined,
+      inferenceSettings: kind === 'thread' && !toMainAgent ? snapshotDefaultInferenceSettings(state) : undefined,
     };
     state.liveThreads.set(threadId, thread);
     writeLiveSession(state);
@@ -1269,7 +1359,7 @@ async function handle(state: ServerState, req: IncomingMessage, res: ServerRespo
     const threadId = inferenceSettingsMatch[1]!;
     const thread = state.liveThreads.get(threadId);
     const agent = state.agents.get(threadId);
-    if (!thread || thread.kind !== 'thread' || thread.status !== 'open' || !agent) {
+    if (!thread || thread.kind !== 'thread' || thread.status !== 'open' || thread.recipient === 'main-agent' || !agent) {
       res.statusCode = 404;
       res.end('thread not found');
       return;
@@ -1310,6 +1400,16 @@ async function handle(state: ServerState, req: IncomingMessage, res: ServerRespo
     const body = await readJson(req) as { message: string };
 
     const active = state.activeReplies.get(threadId);
+    const thread = state.liveThreads.get(threadId);
+    if (thread?.recipient === 'main-agent' && !active) {
+      if (thread.status !== 'open') {
+        res.statusCode = 409;
+        res.setHeader('content-type', 'application/json');
+        res.end(JSON.stringify({ ok: false, error: 'thread-closed' }));
+        return;
+      }
+      if (!acquireMainSessionLease(state, res, { kind: 'turn', threadId })) return;
+    }
     if (active) {
       if (!agent.steer) { res.statusCode = 501; res.end('agent does not support steering'); return; }
       try {
@@ -1537,6 +1637,7 @@ async function handle(state: ServerState, req: IncomingMessage, res: ServerRespo
     const documentPath = threadDocumentPath(state, thread);
     if (!requireJsonContentType(req, res)) return;
     const body = await readJson(req) as { conclusion: string };
+    if (rejectActiveMainAgentThread(state, res, threadId)) return;
     if (thread.status === 'closed') {
       res.statusCode = 409;
       res.setHeader('content-type', 'application/json');
@@ -1598,6 +1699,7 @@ async function handle(state: ServerState, req: IncomingMessage, res: ServerRespo
     // have their just-written <details data-thread-id="..."> removed.
     const live = state.liveThreads.get(threadId);
     if (live) {
+      if (rejectActiveMainAgentThread(state, res, threadId)) return;
       const documentPath = threadDocumentPath(state, live);
       if (live.status === 'closed') {
         try {
@@ -1822,6 +1924,7 @@ async function handle(state: ServerState, req: IncomingMessage, res: ServerRespo
     }
 
     if (to === 'note') {
+      if (rejectActiveMainAgentThread(state, res, threadId)) return;
       // thread → note: collapse transcript to a single user message.
       const lastAssistant = [...thread.messages].reverse().find((m) => m.role === 'assistant');
       const lastUser = [...thread.messages].reverse().find((m) => m.role === 'user');
@@ -1830,6 +1933,7 @@ async function handle(state: ServerState, req: IncomingMessage, res: ServerRespo
       if (agent?.close) await agent.close().catch(() => {});
       state.agents.delete(threadId);
       thread.kind = 'note';
+      thread.recipient = undefined;
       thread.inferenceSettings = undefined;
       thread.messages = [{ role: 'user', text: collapsedText, ts: new Date().toISOString() }];
       writeLiveSession(state);
@@ -1870,6 +1974,7 @@ async function handle(state: ServerState, req: IncomingMessage, res: ServerRespo
     // body so callers that POST nothing keep the legacy "keep threads" default.
     const applyBody = await readJson(req).catch(() => ({})) as { removeThreads?: unknown };
     const removeThreads = applyBody?.removeThreads === true;
+    if (rejectMainSessionLease(state, res)) return;
     if (state.applying) {
       res.statusCode = 409;
       res.setHeader('content-type', 'application/json');
@@ -2118,7 +2223,15 @@ async function handle(state: ServerState, req: IncomingMessage, res: ServerRespo
 
   if (req.method === 'POST' && url.pathname === '/api/finish') {
     if (guardApplying(state, res)) return;
-    const conclusions = await archiveAllOpenThreads(state);
+    const finishLease: MainSessionLease = { kind: 'finish' };
+    if (!acquireMainSessionLease(state, res, finishLease)) return;
+    let conclusions: FinishResult['conclusions'];
+    try {
+      conclusions = await archiveAllOpenThreads(state);
+    } catch (error) {
+      releaseMainSessionLease(state, finishLease);
+      throw error;
+    }
     const result: FinishResult = {
       mode: 'finish',
       docPath: state.docPath,
@@ -2136,6 +2249,7 @@ async function handle(state: ServerState, req: IncomingMessage, res: ServerRespo
       try {
         await state.mainSession.send(finishHandoffPrompt(resultPath));
       } catch (error) {
+        releaseMainSessionLease(state, finishLease);
         const message = error instanceof Error ? error.message : String(error);
         pushEvent(state, 'server.error', { err: `Main session handoff failed: ${message}` });
         res.statusCode = 502;
@@ -2622,6 +2736,7 @@ function runStreamReply(
     }
   }).finally(() => {
     if (state.activeReplies.get(threadId) === active) state.activeReplies.delete(threadId);
+    releaseMainSessionTurn(state, threadId);
     if (state.pendingAgentReplacements.has(threadId)) replaceThreadAgent(state, threadId);
   });
 }

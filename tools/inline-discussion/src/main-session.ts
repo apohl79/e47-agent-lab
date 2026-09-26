@@ -2,6 +2,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { createConnection, type Socket } from 'node:net';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import type { StreamChunk } from './agent.ts';
 
 const DEFAULT_TIMEOUT_MS = 10_000;
 const MAX_MESSAGE_BYTES = 128 * 1024 * 1024;
@@ -9,6 +10,9 @@ const WEBSOCKET_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 
 export interface MainSessionBridge {
   send(prompt: string): Promise<void>;
+  stream?(prompt: string, onTurnStarted?: (turnId: string) => void): AsyncIterable<StreamChunk>;
+  steer?(turnId: string, prompt: string): Promise<void>;
+  interrupt?(turnId: string): Promise<void>;
   close?(): Promise<void>;
 }
 
@@ -78,6 +82,48 @@ class AppServerSessionBridge implements MainSessionBridge {
   constructor(private readonly options: AppServerSessionBridgeOptions) {}
 
   async send(prompt: string): Promise<void> {
+    const client = await this.connect();
+    try {
+      await this.submit(client, prompt);
+    } finally {
+      await client.close();
+    }
+  }
+
+  async *stream(prompt: string, onTurnStarted?: (turnId: string) => void): AsyncIterable<StreamChunk> {
+    const client = await this.connect();
+    try {
+      const turnId = await this.submit(client, prompt);
+      if (!turnId) throw new Error('app-server did not report the main-session turn id');
+      onTurnStarted?.(turnId);
+      client.disableTimeout();
+      yield* consumeMainSessionTurn(client, this.options.threadId, turnId);
+    } finally {
+      await client.close();
+    }
+  }
+
+  async steer(turnId: string, prompt: string): Promise<void> {
+    const client = await this.connect();
+    try {
+      const threadId = this.options.threadId;
+      await client.request('thread/resume', { threadId });
+      await client.request('turn/steer', { threadId, input: [{ type: 'text', text: prompt }], expectedTurnId: turnId });
+    } finally {
+      await client.close();
+    }
+  }
+
+  async interrupt(turnId: string): Promise<void> {
+    const client = await this.connect();
+    try {
+      await client.request('turn/interrupt', { threadId: this.options.threadId, turnId });
+    } finally {
+      await client.close();
+    }
+  }
+
+  private async connect(): Promise<AppServerRpcClient> {
     const client = new AppServerRpcClient(
       this.options.socketPath ?? appServerSocketPath(this.options.harness),
       this.options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
@@ -85,25 +131,99 @@ class AppServerSessionBridge implements MainSessionBridge {
     try {
       await client.connect();
       await initializeAppServerClient(client);
-      const resumed = await client.request('thread/resume', { threadId: this.options.threadId });
-      const thread = recordField(resumed, 'thread');
-      const activeTurn = arrayField(thread, 'turns')
-        .map(asRecord)
-        .find((turn) => turn?.['status'] === 'inProgress');
-      if (typeof activeTurn?.['id'] === 'string') {
-        await client.request('turn/steer', {
-          threadId: this.options.threadId,
-          input: [{ type: 'text', text: prompt }],
-          expectedTurnId: activeTurn['id'],
-        });
-      } else {
-        await client.request('turn/start', {
-          threadId: this.options.threadId,
-          input: [{ type: 'text', text: prompt }],
-        });
-      }
-    } finally {
+      return client;
+    } catch (error) {
       await client.close();
+      throw error;
+    }
+  }
+
+  private async submit(client: AppServerRpcClient, prompt: string): Promise<string | null> {
+    const threadId = this.options.threadId;
+    const input = [{ type: 'text', text: prompt }];
+    const resumed = await client.request('thread/resume', { threadId });
+    const thread = recordField(resumed, 'thread');
+    const activeTurn = arrayField(thread, 'turns')
+      .map(asRecord)
+      .find((turn) => turn?.['status'] === 'inProgress');
+    if (typeof activeTurn?.['id'] === 'string') {
+      await client.request('turn/steer', { threadId, input, expectedTurnId: activeTurn['id'] });
+      return activeTurn['id'];
+    }
+    const started = await client.request('turn/start', { threadId, input });
+    const turnId = recordField(started, 'turn')?.['id'];
+    return typeof turnId === 'string' ? turnId : null;
+  }
+}
+
+async function* consumeMainSessionTurn(
+  client: AppServerRpcClient,
+  threadId: string,
+  turnId: string,
+): AsyncIterable<StreamChunk> {
+  const items = new Map<string, { live: string; completed: string | null; commentary: boolean; started: boolean }>();
+  let liveText = '';
+  const itemState = (itemId: string) => {
+    const existing = items.get(itemId);
+    if (existing) return existing;
+    const created = { live: '', completed: null as string | null, commentary: false, started: false };
+    items.set(itemId, created);
+    return created;
+  };
+  const displayAnswer = (itemId: string, text: string): string => {
+    const entry = itemState(itemId);
+    const separator = entry.live.length === 0 && liveText.length > 0 && !liveText.endsWith('\n\n') ? '\n\n' : '';
+    entry.live += text;
+    liveText += separator + text;
+    return separator + text;
+  };
+  const answerText = (): string => [...items.values()]
+    .filter((entry) => !entry.commentary)
+    .map((entry) => entry.completed ?? entry.live)
+    .filter((text) => text.length > 0)
+    .join('\n\n');
+  while (true) {
+    const notification = await client.nextNotification();
+    const method = notification['method'];
+    const params = asRecord(notification['params']) ?? {};
+    if (typeof params['threadId'] === 'string' && params['threadId'] !== threadId) continue;
+    const turn = asRecord(params['turn']);
+    const eventTurnId = typeof params['turnId'] === 'string' ? params['turnId'] : turn?.['id'];
+    if (eventTurnId !== turnId) continue;
+    const item = asRecord(params['item']);
+    const itemId = typeof item?.['id'] === 'string'
+      ? item['id']
+      : typeof params['itemId'] === 'string' ? params['itemId'] : '';
+    if (method === 'item/started' && item?.['type'] === 'agentMessage') {
+      const entry = itemState(itemId);
+      entry.started = true;
+      entry.commentary = item['phase'] === 'commentary';
+    } else if (method === 'item/agentMessage/delta' && typeof params['delta'] === 'string') {
+      const entry = itemState(itemId);
+      if (!entry.started || entry.commentary) continue;
+      yield { type: 'delta', text: displayAnswer(itemId, params['delta']) };
+    } else if (method === 'item/completed' && item?.['type'] === 'agentMessage') {
+      const entry = itemState(itemId);
+      const text = typeof item['text'] === 'string' ? item['text'] : '';
+      entry.completed = text;
+      if (item['phase'] === 'commentary') entry.commentary = true;
+      if (!text) continue;
+      if (entry.commentary) {
+        yield { type: 'activity', activity: { kind: 'commentary', title: 'Commentary', text } };
+      } else if (entry.live.length === 0) {
+        yield { type: 'delta', text: displayAnswer(itemId, text) };
+      }
+    } else if (method === 'turn/completed') {
+      if (turn?.['status'] === 'interrupted') {
+        yield { type: 'interrupted' };
+      } else if (turn?.['status'] === 'failed') {
+        throw new Error(String(asRecord(turn['error'])?.['message'] ?? 'main-session turn failed'));
+      } else {
+        yield { type: 'done', text: answerText() };
+      }
+      return;
+    } else if (method === 'error' && params['willRetry'] !== true) {
+      throw new Error(String(asRecord(params['error'])?.['message'] ?? 'main-session turn failed'));
     }
   }
 }
@@ -125,6 +245,7 @@ class AppServerRpcClient {
   private buffer = Buffer.alloc(0);
   private chunks: Buffer[] = [];
   private waiters: Array<(chunk: Buffer) => void> = [];
+  private notifications: Record<string, unknown>[] = [];
   private failure: Error | null = null;
   private nextRequestId = 1;
 
@@ -158,12 +279,28 @@ class AppServerRpcClient {
     this.sendJson({ method, id, params });
     while (true) {
       const message = asRecord(JSON.parse((await this.readMessage()).toString('utf8')));
-      if (typeof message?.['method'] === 'string') continue;
+      if (typeof message?.['method'] === 'string') {
+        if (message['id'] === undefined) this.notifications.push(message);
+        continue;
+      }
       if (message?.['id'] !== id) continue;
       const error = asRecord(message['error']);
       if (error) throw new Error(String(error['message'] ?? 'app-server request failed'));
       return asRecord(message['result']) ?? {};
     }
+  }
+
+  async nextNotification(): Promise<Record<string, unknown>> {
+    while (true) {
+      const queued = this.notifications.shift();
+      if (queued) return queued;
+      const message = asRecord(JSON.parse((await this.readMessage()).toString('utf8')));
+      if (typeof message?.['method'] === 'string' && message['id'] === undefined) return message;
+    }
+  }
+
+  disableTimeout(): void {
+    this.socket?.setTimeout(0);
   }
 
   notify(method: string, params: Record<string, unknown>): void {

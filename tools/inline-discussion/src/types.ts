@@ -72,6 +72,7 @@ export type ThreadRecipient = 'thread-agent' | 'main-agent';
 export interface Thread {
   id: string;
   kind: ThreadKind;
+  recipient?: ThreadRecipient;
   /** Absolute Markdown document path that owns this annotation. */
   documentPath?: string;
   anchor: Anchor;

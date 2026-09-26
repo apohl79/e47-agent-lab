@@ -73,7 +73,88 @@ test('app-server bridge steers an active paginated thread from resume data', asy
   }
 });
 
-function serveAppServer(socket: Socket, onRequest: (request: Record<string, unknown>) => void = () => undefined): void {
+test('app-server bridge steers the explicit main-session turn', async () => {
+  const socketPath = join(mkdtempSync(join(tmpdir(), 'ind-app-server-')), 'control.sock');
+  const requests: Record<string, unknown>[] = [];
+  const server = createServer((socket) => serveAppServer(socket, (request) => requests.push(request)));
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(socketPath, () => resolve());
+  });
+
+  try {
+    await createAppServerSessionBridge({ threadId: 'thread-1', socketPath, timeoutMs: 1_000 })
+      .steer!('turn-7', 'Follow-up.');
+    assert.deepEqual(requests.map((request) => request['method']), ['initialize', 'thread/resume', 'turn/steer']);
+    assert.deepEqual(requests.at(-1)?.['params'], {
+      threadId: 'thread-1',
+      input: [{ type: 'text', text: 'Follow-up.' }],
+      expectedTurnId: 'turn-7',
+    });
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test('app-server bridge streams the started main-session turn back', async () => {
+  const socketPath = join(mkdtempSync(join(tmpdir(), 'ind-app-server-')), 'control.sock');
+  const requests: Record<string, unknown>[] = [];
+  const server = createServer((socket) => serveAppServer(socket, (request) => requests.push(request), 'idle'));
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(socketPath, () => resolve());
+  });
+
+  try {
+    const startedTurns: string[] = [];
+    const bridge = createAppServerSessionBridge({ threadId: 'thread-1', socketPath, timeoutMs: 1_000 });
+    const chunks = [];
+    for await (const chunk of bridge.stream!('Explain this selection.', (turnId) => startedTurns.push(turnId))) {
+      chunks.push(chunk);
+    }
+
+    assert.deepEqual(requests.map((request) => request['method']), ['initialize', 'thread/resume', 'turn/start']);
+    assert.deepEqual(startedTurns, ['turn-2']);
+    assert.deepEqual(chunks, [
+      { type: 'delta', text: 'Hel' },
+      { type: 'activity', activity: { kind: 'commentary', title: 'Commentary', text: 'Checking' } },
+      { type: 'delta', text: 'lo' },
+      { type: 'done', text: 'Hello' },
+    ]);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test('app-server bridge persists authoritative text when joining an active turn mid-item', async () => {
+  const socketPath = join(mkdtempSync(join(tmpdir(), 'ind-app-server-')), 'control.sock');
+  const server = createServer((socket) => serveAppServer(socket, () => undefined, 'active-stream'));
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(socketPath, () => resolve());
+  });
+
+  try {
+    const bridge = createAppServerSessionBridge({ threadId: 'thread-1', socketPath, timeoutMs: 1_000 });
+    const chunks = [];
+    for await (const chunk of bridge.stream!('Continue here.')) chunks.push(chunk);
+    assert.deepEqual(chunks, [
+      { type: 'activity', activity: { kind: 'commentary', title: 'Commentary', text: 'thinking' } },
+      { type: 'delta', text: 'prefix tail' },
+      { type: 'done', text: 'prefix tail' },
+    ]);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+type AppServerScenario = 'active' | 'active-stream' | 'idle';
+
+function serveAppServer(
+  socket: Socket,
+  onRequest: (request: Record<string, unknown>) => void = () => undefined,
+  scenario: AppServerScenario = 'active',
+): void {
   let buffer = Buffer.alloc(0);
   let upgraded = false;
   socket.on('data', (chunk: Buffer) => {
@@ -96,7 +177,7 @@ function serveAppServer(socket: Socket, onRequest: (request: Record<string, unkn
     while (upgraded) {
       const message = readClientFrame();
       if (!message) return;
-      handleRequest(message, socket, onRequest);
+      handleRequest(message, socket, onRequest, scenario);
     }
   });
   socket.on('error', () => undefined);
@@ -128,6 +209,7 @@ function handleRequest(
   message: Record<string, unknown>,
   socket: Socket,
   onRequest: (request: Record<string, unknown>) => void,
+  scenario: AppServerScenario,
 ): void {
   const id = message['id'];
   const method = message['method'];
@@ -148,17 +230,62 @@ function handleRequest(
       result: {
         thread: {
           id: 'thread-1',
-          turns: [{ id: 'turn-1', status: 'inProgress' }],
+          turns: [{ id: 'turn-1', status: scenario === 'idle' ? 'completed' : 'inProgress' }],
         },
       },
     });
   }
-  if (method === 'turn/steer') return send(socket, { id, result: {} });
+  if (method === 'turn/steer') {
+    send(socket, { id, result: {} });
+    if (scenario !== 'active-stream') return;
+    const threadId = 'thread-1';
+    const turnId = 'turn-1';
+    send(socket, { method: 'item/agentMessage/delta', params: { threadId, turnId, itemId: 'm0', delta: 'tail' } });
+    send(socket, { method: 'item/agentMessage/delta', params: { threadId, turnId, itemId: 'c0', delta: 'thinking' } });
+    send(socket, {
+      method: 'item/completed',
+      params: { threadId, turnId, item: { type: 'agentMessage', id: 'c0', text: 'thinking', phase: 'commentary' } },
+    });
+    send(socket, {
+      method: 'item/completed',
+      params: { threadId, turnId, item: { type: 'agentMessage', id: 'm0', text: 'prefix tail', phase: 'final_answer' } },
+    });
+    return send(socket, { method: 'turn/completed', params: { threadId, turn: { id: turnId, status: 'completed' } } });
+  }
+  if (method === 'turn/start') {
+    const threadId = 'thread-1';
+    const turnId = 'turn-2';
+    send(socket, {
+      method: 'item/started',
+      params: { threadId, turnId, item: { type: 'agentMessage', id: 'm1', text: '', phase: 'final_answer' } },
+    });
+    send(socket, { method: 'item/agentMessage/delta', params: { threadId, turnId, itemId: 'm1', delta: 'Hel' } });
+    send(socket, { id, result: { turn: { id: turnId, status: 'inProgress' } } });
+    send(socket, { method: 'item/agentMessage/delta', params: { threadId, turnId: 'turn-x', itemId: 'x1', delta: 'Other' } });
+    send(socket, {
+      method: 'item/started',
+      params: { threadId, turnId, item: { type: 'agentMessage', id: 'c1', text: '', phase: 'commentary' } },
+    });
+    send(socket, { method: 'item/agentMessage/delta', params: { threadId, turnId, itemId: 'c1', delta: 'Checking' } });
+    send(socket, {
+      method: 'item/completed',
+      params: { threadId, turnId, item: { type: 'agentMessage', id: 'c1', text: 'Checking', phase: 'commentary' } },
+    });
+    send(socket, { method: 'item/agentMessage/delta', params: { threadId, turnId, itemId: 'm1', delta: 'lo' } });
+    send(socket, {
+      method: 'item/completed',
+      params: { threadId, turnId, item: { type: 'agentMessage', id: 'm1', text: 'Hello', phase: 'final_answer' } },
+    });
+    return send(socket, { method: 'turn/completed', params: { threadId, turn: { id: turnId, status: 'completed' } } });
+  }
   send(socket, { id, error: { message: `unexpected method: ${String(method)}` } });
 }
 
 function send(socket: Socket, message: Record<string, unknown>): void {
   const payload = Buffer.from(JSON.stringify(message), 'utf8');
-  if (payload.length >= 126) throw new Error('test response unexpectedly large');
-  socket.write(Buffer.concat([Buffer.from([0x81, payload.length]), payload]));
+  if (payload.length > 0xffff) throw new Error('test response unexpectedly large');
+  const header = payload.length < 126
+    ? Buffer.from([0x81, payload.length])
+    : Buffer.from([0x81, 126, payload.length >> 8, payload.length & 0xff]);
+  socket.write(Buffer.concat([header, payload]));
 }

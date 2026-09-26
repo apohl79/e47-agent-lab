@@ -107,8 +107,13 @@ inline-discussion wait  --session-dir <path> [--idle-exit-seconds <seconds>]
   repository, discussion-document, or project-context write access.
 - New-thread composers default to a focused thread-agent discussion. When a
   live Codex or Xedoc main-session bridge is available, their recipient picker
-  also offers **Main agent**, which sends the anchored message directly to the
-  current main session instead of creating a child discussion thread.
+  also offers **Main agent**, which opens an anchored thread whose messages go
+  to the current main session and whose replies stream back into the card.
+  Replies while the main turn is running steer that turn, and Interrupt stops it.
+  The main session serves one Main agent thread at a time: while a reply
+  streams, other Main agent messages, Apply, and Finish are refused, and that
+  thread cannot be closed, deleted, or converted. Once Finish hands the
+  discussion back, no further Main agent turns start.
 
 ## HTTP surface (relevant subset)
 
