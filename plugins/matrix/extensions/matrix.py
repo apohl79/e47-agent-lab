@@ -2348,6 +2348,52 @@ def run_persistent() -> int:
                     break
                 deferred_inbound.append(message)
             if deferred_inbound:
+                # A prompt notification carries the single-use response lease.
+                # Answer it before refreshing the snapshot: script/read is a
+                # state projection and must not become the gate for consuming
+                # the notification-owned lease.
+                while deferred_inbound and pending_prompts:
+                    message = deferred_inbound[0]
+                    matched = match_pending_prompt(message, pending_prompts)
+                    if matched is None:
+                        break
+                    deferred_inbound.popleft()
+                    prompt_id, state, prefix, text = matched
+                    try:
+                        accepted = submit_prompt_response(
+                            client,
+                            registered["registrationId"],
+                            prompt_id,
+                            state["prompt"],
+                            prefix,
+                            text,
+                        )
+                    except RpcError:
+                        agent_matrix.send_text(
+                            room_id, "Xedoc could not accept that answer."
+                        )
+                        post_host_message(
+                            registration_id,
+                            "warning",
+                            "Xedoc could not accept the Matrix prompt answer.",
+                        )
+                        continue
+                    if accepted:
+                        pending_prompts.pop(prompt_id, None)
+                    else:
+                        agent_matrix.send_text(
+                            room_id,
+                            (
+                                "That response could not be mapped. "
+                                + (
+                                    "Reply with one of the listed numbers."
+                                    if prefix == "approval"
+                                    else "Reply with the listed number or answer."
+                                )
+                            ),
+                        )
+                if not deferred_inbound:
+                    continue
                 try:
                     latest = client.read(registered["registrationId"])
                 except RpcError:
