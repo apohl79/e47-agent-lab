@@ -46,4 +46,4 @@ For a document with several major sections, add a concise table of contents afte
 
 ## Diagram preference
 
-Prefer a fenced `mermaid` diagram over an SVG or PNG when expressing structure, flow, sequence, state, or relationships. Keep screenshots and other images whose exact visual appearance is the evidence.
+Always prefer a fenced `mermaid` diagram over prose when expressing structure, flow, sequence, state, or relationships. Prefer Mermaid over an SVG or PNG as well. Keep prose for explanation that a diagram cannot express, and keep screenshots or other images whose exact visual appearance is the evidence.
