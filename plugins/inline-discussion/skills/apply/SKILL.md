@@ -72,6 +72,13 @@ child reaping cannot terminate the browser session while the user reviews.
    reporting. Update context before moving to the next verified finding, and do
    not wait for a later turn.
 
+   Validate each completed follow-up against its requested outcome and
+   repository evidence. Treat an already-present equivalent change as complete.
+   Do not require an exact phrase, heading, or prior wording when a rewrite
+   replaces it. Call `/api/apply/failed` only when a required action cannot be
+   completed or its outcome is semantically unmet; do not fail solely because a
+   brittle text match is absent.
+
 6. Before completion, send `post_progress '{"status":"Reloading updated document","percent":95}'`, then run `curl --fail --silent --show-error --request POST "${BASE_URL%/}/api/apply/done" >/dev/null`. Require a successful response from the done request as well.
 7. If any Apply handling step fails after the URL is known, send `POST "${BASE_URL%/}/api/apply/failed"` with JSON `{"error":"<short error>"}`. Do not leave the browser in applying state. The progress helper already does this for progress-request failures.
 
