@@ -5,6 +5,15 @@ description: "Basic Markdown conventions for inline-discussion documents: linkin
 
 # Inline-discussion writing conventions
 
+## Writing style and evidence
+
+Use simple, human-understandable language. Prefer short sentences and concrete words.
+Avoid encouragement, praise, and motivational language.
+Never add unverified information. If a claim cannot be checked, leave it out.
+List the references used for factual claims, with links to the source files or external sources.
+Keep content as brief as possible. Add extra context or prose only when asked.
+Prefer a diagram over prose whenever the content can be represented visually.
+
 ## Local file links
 
 Use ordinary Markdown links whose target ends in one of these suffixes:
