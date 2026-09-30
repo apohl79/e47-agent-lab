@@ -18,8 +18,10 @@ import { ALLOWED_URI_REGEXP } from '../uri-policy.ts';
 import {
   composerKeyAction,
   composerNoteModifierActive,
+  composerRecipientToggleRequested,
   detectComposerPlatform,
 } from './composer-shortcuts.ts';
+import { replaceComposerError } from './composer-errors.ts';
 import { dismissModal, modalChoice, modalConfirm, modalStatus, type ModalStatusHandle } from './modal.ts';
 import { installInDocumentNavigation, scrollToFragment } from './navigation.ts';
 import { calculateOverlayPlacement } from './overlay-position.ts';
@@ -47,6 +49,11 @@ import { toolApprovalModalOptions, type ToolApprovalPrompt } from './tool-approv
 import { createInferenceSelectors, setInferenceSelectorsDisabled } from './inference-selectors.ts';
 import { focusSourceRange } from './source-navigation.ts';
 import { installLinkTargetPreview } from './link-target-preview.ts';
+import {
+  createSelectionComments,
+  selectionCommentError,
+  type SelectionCommentTarget,
+} from './selection-comments.ts';
 
 // Dedicated marked instance for rendering thread messages. GFM on so tables +
 // fenced code work. `breaks: true` so assistant single-newlines survive as
@@ -1271,7 +1278,7 @@ function installRangeSelection(): void {
 // can span them. Whitespace-only segments are dropped — those happen at the
 // edges of a multi-block selection when the range starts/ends on a block
 // boundary.
-interface SelectionSegment { blockId: string; quote: string; occurrence: number }
+type SelectionSegment = SelectionCommentTarget & { quote: string };
 
 function blockText(block: HTMLElement): string {
   const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT, {
@@ -1328,8 +1335,8 @@ function computeSelectionSegments(range: Range): SelectionSegment[] {
 let floating: HTMLElement | null = null;
 
 // Show the selection actions popup with two buttons: Comment (opens the
-// composer for a note/thread on the first selected block) and Highlight
-// (creates a session-only highlight per touched block, convertible later).
+// composer for a note/thread on every selected block) and Highlight (creates
+// a session-only highlight per touched block, convertible later).
 function showFloatingSelectionActions(range: Range, segments: SelectionSegment[]): void {
   floating?.remove();
   const rect = range.getBoundingClientRect();
@@ -1346,9 +1353,7 @@ function showFloatingSelectionActions(range: Range, segments: SelectionSegment[]
     '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 6a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H9l-3 3v-3H6a2 2 0 0 1-2-2V6z" fill="currentColor"/></svg>' +
     '<span>Comment</span>';
   comment.addEventListener('click', () => {
-    // Threads/notes anchor to a single block. For a multi-block selection
-    // the composer uses the first segment; the user can edit the seed text.
-    openComposer(primary.blockId, primary.quote, primary.occurrence);
+    openComposer(primary.blockId, primary.quote, primary.occurrence, segments);
     dismissFloating();
   });
 
@@ -1601,11 +1606,19 @@ function insertQuoteIntoReply(card: HTMLElement, text: string): void {
   autogrowTextarea(ta);
 }
 
-function openComposer(blockId: string, quote: string | undefined, occurrence = 1): void {
+function openComposer(
+  blockId: string,
+  quote: string | undefined,
+  occurrence = 1,
+  selectionTargets: readonly SelectionCommentTarget[] = [],
+): void {
   const anchor = document.querySelector<HTMLElement>(`[data-block-id="${blockId}"]`);
   if (!anchor) return;
   const existing = document.querySelector<HTMLElement>(`.composer-overlay[data-composer-anchor-block-id="${blockId}"]`);
   if (existing) return;
+  const targets = selectionTargets.length > 0
+    ? selectionTargets
+    : [{ blockId, quote, occurrence }];
   const platform = detectComposerPlatform(navigator.platform);
   const noteShortcut = platform === 'macos' ? '⌘+Enter' : 'Ctrl+Enter';
   const box = document.createElement('div');
@@ -1640,6 +1653,12 @@ function openComposer(blockId: string, quote: string | undefined, occurrence = 1
   const noteBtn = box.querySelector('.note') as HTMLButtonElement;
   const cancelBtn = box.querySelector('.cancel') as HTMLButtonElement;
   const recipient = box.querySelector<HTMLSelectElement>('.composer-recipient select')!;
+  const toggleRecipient = (event: KeyboardEvent): void => {
+    if (!composerRecipientToggleRequested({ key: event.key, repeat: event.repeat }, platform)) return;
+    if (recipient.querySelector('option[value="main-agent"]')?.hasAttribute('disabled')) return;
+    recipient.value = recipient.value === 'main-agent' ? 'thread-agent' : 'main-agent';
+  };
+  box.addEventListener('keydown', toggleRecipient);
   // While the platform's note modifier is held (Cmd on macOS, Ctrl elsewhere),
   // Enter adds a note instead of sending. Highlight the "Add note" button so
   // the alternate action is visible before the key is released. Ctrl+Enter is
@@ -1663,28 +1682,34 @@ function openComposer(blockId: string, quote: string | undefined, occurrence = 1
   ta.addEventListener('blur', () => setNoteArmed(false));
   const submit = async (kind: 'thread' | 'note'): Promise<void> => {
     const message = ta.value.trim(); if (!message) return;
+    const prevError = box.querySelector('.composer-error');
+    if (prevError) prevError.remove();
+    const selectedRecipient = kind === 'thread' ? recipient.value as ThreadRecipient : 'thread-agent';
+    const selectionError = selectionCommentError(selectedRecipient, targets.length);
+    if (selectionError) {
+      replaceComposerError(box, selectionError);
+      return;
+    }
     sendBtn.disabled = true;
     noteBtn.disabled = true;
     cancelBtn.disabled = true;
     ta.disabled = true;
-    const prevError = box.querySelector('.composer-error');
-    if (prevError) prevError.remove();
     try {
-      await createThread(
-        blockId,
-        quote,
-        message,
-        kind,
-        kind === 'thread' ? recipient.value as ThreadRecipient : 'thread-agent',
-        occurrence,
+      await createSelectionComments(
+        targets,
+        (target) => createThread(
+          target.blockId,
+          target.quote,
+          message,
+          kind,
+          selectedRecipient,
+          target.occurrence,
+        ),
       );
       box.remove();
       positionNoteOverlays();
     } catch (err) {
-      const errDiv = document.createElement('div');
-      errDiv.className = 'composer-error';
-      errDiv.textContent = `⚠ Failed to send: ${err instanceof Error ? err.message : String(err)}`;
-      box.appendChild(errDiv);
+      replaceComposerError(box, `⚠ Failed to send: ${err instanceof Error ? err.message : String(err)}`);
       positionNoteOverlays();
       sendBtn.disabled = false;
       noteBtn.disabled = false;

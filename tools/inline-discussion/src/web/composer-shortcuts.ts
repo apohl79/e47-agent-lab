@@ -3,6 +3,7 @@ export interface ComposerKeyInput {
   shiftKey: boolean;
   metaKey: boolean;
   ctrlKey: boolean;
+  repeat: boolean;
   isComposing: boolean;
 }
 
@@ -31,4 +32,11 @@ export function composerNoteModifierActive(
   platform: ComposerPlatform,
 ): boolean {
   return platform === 'macos' ? event.metaKey && !event.ctrlKey : event.metaKey || event.ctrlKey;
+}
+
+export function composerRecipientToggleRequested(
+  event: Pick<ComposerKeyInput, 'key' | 'repeat'>,
+  platform: ComposerPlatform,
+): boolean {
+  return platform === 'macos' && event.key === 'Alt' && !event.repeat;
 }

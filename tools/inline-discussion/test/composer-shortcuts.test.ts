@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   composerKeyAction,
   composerNoteModifierActive,
+  composerRecipientToggleRequested,
   detectComposerPlatform,
   type ComposerKeyInput,
 } from '../src/web/composer-shortcuts.ts';
@@ -13,6 +14,7 @@ function key(overrides: Partial<ComposerKeyInput> = {}): ComposerKeyInput {
     shiftKey: false,
     metaKey: false,
     ctrlKey: false,
+    repeat: false,
     isComposing: false,
     ...overrides,
   };
@@ -60,6 +62,18 @@ test('combined macOS Meta+Ctrl does not arm the note button', () => {
 
 test('other platforms arm the note button for Ctrl', () => {
   assert.equal(composerNoteModifierActive({ metaKey: false, ctrlKey: true }, 'other'), true);
+});
+
+test('macOS Option requests a recipient toggle', () => {
+  assert.equal(composerRecipientToggleRequested({ key: 'Alt', repeat: false }, 'macos'), true);
+});
+
+test('repeated macOS Option keydown does not toggle the recipient again', () => {
+  assert.equal(composerRecipientToggleRequested({ key: 'Alt', repeat: true }, 'macos'), false);
+});
+
+test('Option does not toggle the recipient on other platforms', () => {
+  assert.equal(composerRecipientToggleRequested({ key: 'Alt', repeat: false }, 'other'), false);
 });
 
 test('MacIntel is detected as macOS', () => {
