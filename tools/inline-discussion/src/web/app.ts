@@ -48,6 +48,7 @@ import { HOVER_ACTION_DISMISS_MS, SELECTION_ACTION_DISMISS_MS } from './action-h
 import { toolApprovalModalOptions, type ToolApprovalPrompt } from './tool-approval.ts';
 import { createInferenceSelectors, setInferenceSelectorsDisabled } from './inference-selectors.ts';
 import { focusSourceRange } from './source-navigation.ts';
+import { canFinishThread } from '../main-agent-thread.ts';
 import { installLinkTargetPreview } from './link-target-preview.ts';
 import {
   createSelectionComments,
@@ -1975,6 +1976,11 @@ function renderThread(thread: Thread): void {
     appendThreadCardAfterAnchor(card, anchor);
   }
   card.classList.remove('resolved');
+  const finishAction = canFinishThread(thread.recipient)
+    ? `<div class="thread-close-actions">
+        <button class="btn btn-ghost close-with-last-btn">Finish</button>
+      </div>`
+    : '';
   card.innerHTML = `
     <div class="thread-header">
       <div class="thread-label"><span class="thread-icon">💬</span> <strong>${thread.recipient === 'main-agent' ? 'Main agent' : 'Thread'}</strong> <span class="anchor-quote">${thread.anchor.quote ? `“${escapeHtml(thread.anchor.quote)}”` : 'entire block'}</span></div>
@@ -1988,9 +1994,7 @@ function renderThread(thread: Thread): void {
     <div class="reply-row">
       <textarea class="reply" rows="1" placeholder="Reply…  Enter to send, Shift+Enter for newline"></textarea>
       <button class="btn btn-primary send">Send</button>
-      <div class="thread-close-actions">
-        <button class="btn btn-ghost close-with-last-btn">Finish</button>
-      </div>
+      ${finishAction}
       <button class="btn btn-ghost delete-btn">Delete</button>
     </div>`;
   const inferenceHost = card.querySelector<HTMLElement>('.thread-inference');
@@ -2091,9 +2095,9 @@ function renderThread(thread: Thread): void {
       deleteBtn.disabled = false;
     }
   });
-  const closeWithLastBtn = card.querySelector('.close-with-last-btn') as HTMLButtonElement;
+  const closeWithLastBtn = card.querySelector<HTMLButtonElement>('.close-with-last-btn');
   syncCloseWithLastButton(card, thread);
-  closeWithLastBtn.addEventListener('click', async () => {
+  closeWithLastBtn?.addEventListener('click', async () => {
     const current = state.threads.get(thread.id) ?? thread;
     const lastAssistant = getLastAssistantMessage(current);
     if (!lastAssistant) {

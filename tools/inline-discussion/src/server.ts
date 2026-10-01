@@ -20,6 +20,7 @@ import { createAppServerSessionBridge, type AppServerHarness, type MainSessionBr
 import { logDiagnostic } from './diagnostics.ts';
 import { resolvedInferenceSettings, validInferenceSettings } from './inference-settings.ts';
 import { formatDocumentAnnotations } from './document-annotations.ts';
+import { recoverMainAgentThreadAnchor } from './main-agent-thread.ts';
 import {
   persistMcpToolApproval,
   readDiscussionProjectSettings,
@@ -951,9 +952,21 @@ function refreshDocFromDisk(state: ServerState, emit: boolean): boolean {
     return false;
   }
   if (next === state.docMd) return false;
+  const previousBlockIds = renderDoc(state.docMd, state.docPath).blockIds;
+  const nextBlockIds = renderDoc(next, state.docPath).blockIds;
+  const recoveredThreads = [...state.liveThreads.entries()]
+    .map(([threadId, thread]) => [threadId, recoverMainAgentThreadAnchor(thread, previousBlockIds, nextBlockIds)] as const)
+    .filter(([threadId, thread]) => state.liveThreads.get(threadId) !== thread);
+  for (const [threadId, thread] of recoveredThreads) state.liveThreads.set(threadId, thread);
   state.docMd = next;
   state.archivedThreads = parseArchivedThreads(state.docMd, state.docPath);
-  if (emit) pushDocumentEvent(state, 'doc.updated', state.docPath, renderCurrentDoc(state));
+  if (recoveredThreads.length > 0) writeLiveSession(state);
+  if (emit) {
+    for (const [threadId, thread] of recoveredThreads) {
+      pushDocumentEvent(state, 'thread.updated', state.docPath, { threadId, thread: structuredClone(thread) });
+    }
+    pushDocumentEvent(state, 'doc.updated', state.docPath, renderCurrentDoc(state));
+  }
   return true;
 }
 
