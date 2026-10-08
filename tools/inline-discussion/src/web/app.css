@@ -384,7 +384,7 @@ button.primary:hover {
   width: 1.15em;
   height: 1.15em;
   margin: 0 0.45em 0 -2.2em;
-  vertical-align: -0.17em;
+  vertical-align: middle;
   place-content: center;
   color: var(--accent-fg);
   background: var(--bg-elev);
