@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import sys
+import time
 from unittest.mock import Mock
 
 import pytest
@@ -59,7 +61,8 @@ def test_session_search_numbers_only_approved_project_paths(tmp_path: Path) -> N
     chat.roots = {"work": tmp_path}
     chat.matches = []
     result = chat.handle("/sessions first")
-    assert result == "1 First (`2023-11-14 22:13:20 UTC`)\n`  work/one`"
+    timestamp = host_chat.update_timestamp({"updatedAt": 1_700_000_000})
+    assert result == f"1 First\n`  {timestamp}`\n`  work/one`"
     assert [row["id"] for row in chat.matches] == ["first"]
     assert chat.handle("/attach 2") == "Use a number from the last /sessions result."
 
@@ -107,23 +110,23 @@ def test_sessions_without_search_lists_all_approved_project_paths(tmp_path: Path
 
     result = chat.handle("/sessions")
     assert result == (
-        "1 Alpha (`2023-11-14 22:13:20 UTC`)\n"
+        f"1 Alpha\n`  {host_chat.update_timestamp({'updatedAt': 1_700_000_000})}`\n"
         "`  other/project-a`\n"
-        "2 Alpha (`2023-11-14 22:13:20 UTC`)\n"
+        f"2 Alpha\n`  {host_chat.update_timestamp({'updatedAt': 1_700_000_000})}`\n"
         "`  work/project-a`\n"
-        "3 Zulu (`2023-11-14 22:13:20 UTC`)\n"
+        f"3 Zulu\n`  {host_chat.update_timestamp({'updatedAt': 1_700_000_000})}`\n"
         "`  work/project-a`\n"
-        "4 Beta (`2023-11-14 22:13:20 UTC`)\n"
+        f"4 Beta\n`  {host_chat.update_timestamp({'updatedAt': 1_700_000_000})}`\n"
         "`  work/project-b`"
     )
     assert matrix.matrix_formatted_body(result) == (
-        "<p>1 Alpha (<code>2023-11-14 22:13:20 UTC</code>)<br>"
+        f"<p>1 Alpha<br><code>  {host_chat.update_timestamp({'updatedAt': 1_700_000_000})}</code><br>"
         "<code>  other/project-a</code><br>"
-        "2 Alpha (<code>2023-11-14 22:13:20 UTC</code>)<br>"
+        f"2 Alpha<br><code>  {host_chat.update_timestamp({'updatedAt': 1_700_000_000})}</code><br>"
         "<code>  work/project-a</code><br>"
-        "3 Zulu (<code>2023-11-14 22:13:20 UTC</code>)<br>"
+        f"3 Zulu<br><code>  {host_chat.update_timestamp({'updatedAt': 1_700_000_000})}</code><br>"
         "<code>  work/project-a</code><br>"
-        "4 Beta (<code>2023-11-14 22:13:20 UTC</code>)<br>"
+        f"4 Beta<br><code>  {host_chat.update_timestamp({'updatedAt': 1_700_000_000})}</code><br>"
         "<code>  work/project-b</code></p>"
     )
     assert [row["id"] for row in chat.matches] == ["other", "alpha", "zulu", "beta"]
@@ -131,6 +134,20 @@ def test_sessions_without_search_lists_all_approved_project_paths(tmp_path: Path
         "thread/list",
         {"sortKey": "updated_at", "limit": 100},
     )
+
+
+def test_update_timestamp_uses_machine_local_timezone(monkeypatch: pytest.MonkeyPatch) -> None:
+    previous_tz = os.environ.get("TZ")
+    monkeypatch.setenv("TZ", "Etc/GMT-2")
+    time.tzset()
+    try:
+        assert host_chat.update_timestamp({"updatedAt": 0}) == "1970-01-01 02:00:00 +02"
+    finally:
+        if previous_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous_tz
+        time.tzset()
 
 
 def test_attach_requires_approved_extension() -> None:

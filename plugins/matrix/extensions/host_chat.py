@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime
 import json
 import os
 from pathlib import Path
@@ -113,8 +113,8 @@ def update_timestamp(row: dict[str, Any]) -> str:
     if not isinstance(updated_at, (int, float)) or isinstance(updated_at, bool):
         return "unknown"
     try:
-        return datetime.fromtimestamp(updated_at, timezone.utc).strftime(
-            "%Y-%m-%d %H:%M:%S UTC"
+        return datetime.fromtimestamp(updated_at).astimezone().strftime(
+            "%Y-%m-%d %H:%M:%S %Z"
         )
     except (OverflowError, OSError, ValueError):
         return "unknown"
@@ -267,7 +267,8 @@ class HostChat:
                 )
             )
             return "\n".join(
-                f"{number} {session_name(row)} (`{update_timestamp(row)}`)\n"
+                f"{number} {session_name(row)}\n"
+                f"`  {update_timestamp(row)}`\n"
                 f"`  {workspace_project(self.roots, row['cwd'])}`"
                 for number, row in enumerate(self.matches, 1)
             ) or "No resumable sessions found."
