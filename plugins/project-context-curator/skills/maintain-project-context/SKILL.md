@@ -34,6 +34,12 @@ XDG. Local mode's saved project visibility is `local` (Git-excluded) or
   remote's `main` before writing, and creates and pushes one Conventional Commit
   directly to `main` when curator-managed files changed. No-op writes do not
   create empty commits.
+- Git-store reads (`status`, `search`, `audit`, `graph`, `domain-list`,
+  `git-store-status`, `pattern-category list`, and `global-update`) check a
+  checkout-local sync timestamp. If more than 15 minutes have passed, they
+  pull/rebase the configured remote before reading; passive reads never commit
+  or push. A dirty Git store blocks a stale passive sync rather than reading
+  potentially outdated data.
 - Automatic synchronization requires the store checkout on `main` and an exact
   push remote. Unrelated dirty files block mutation; a rejected post-write push
   keeps the local commit and returns an error for retry.

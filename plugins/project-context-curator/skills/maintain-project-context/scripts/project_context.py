@@ -90,8 +90,20 @@ GIT_STORE_MUTATING_COMMANDS = frozenset(
         "update",
     }
 )
+GIT_STORE_READ_COMMANDS = frozenset(
+    {
+        "audit",
+        "domain-list",
+        "git-store-status",
+        "global-update",
+        "graph",
+        "search",
+        "status",
+    }
+)
 GIT_STORE_LOCK_TIMEOUT_SECONDS = 30
 GIT_STORE_NETWORK_TIMEOUT_SECONDS = 30
+GIT_STORE_READ_SYNC_INTERVAL_SECONDS = 15 * 60
 GLOBAL_INDEX_SCHEMA_VERSION = 3
 GLOBAL_RELATIONSHIP_GRAPH_SCHEMA_VERSION = 1
 GLOBAL_LEGACY_RECORD_CATALOG_SCHEMA_VERSION = 1
@@ -1957,6 +1969,47 @@ def prepare_git_store(root: Path, upstream: GitUpstream) -> None:
         rebase_git_store(root, upstream)
     if git_head_exists(root):
         push_git_store_commit(root, upstream)
+    mark_git_store_synced(root)
+
+
+def git_store_sync_marker(root: Path) -> Path:
+    git_dir = git_path(root, "--git-dir")
+    if git_dir is None:
+        raise SystemExit(f"Git context store has no Git directory: {root}")
+    return git_dir / "project-context-curator-last-sync"
+
+
+def mark_git_store_synced(root: Path) -> None:
+    try:
+        git_store_sync_marker(root).touch()
+    except OSError as exc:
+        raise SystemExit(f"Git context store sync timestamp failed: {exc}") from exc
+
+
+def sync_git_store_for_read(root: Path, upstream: GitUpstream) -> bool:
+    marker = git_store_sync_marker(root)
+    try:
+        if time.time() - marker.stat().st_mtime < GIT_STORE_READ_SYNC_INTERVAL_SECONDS:
+            return False
+    except FileNotFoundError:
+        pass
+
+    status = git_status_for_paths(root, (".",))
+    if status:
+        raise SystemExit(
+            "Git context store has uncommitted changes; refusing passive sync: "
+            + safe_display_field(status, DIAGNOSTIC_OUTPUT_LIMIT)
+        )
+    remote_exists = git_remote_branch_exists(root, upstream)
+    local_exists = git_head_exists(root)
+    if remote_exists and not local_exists:
+        raise SystemExit(
+            "Git context store upstream has history but the local branch has no commit."
+        )
+    if remote_exists:
+        rebase_git_store(root, upstream)
+    mark_git_store_synced(root)
+    return remote_exists
 
 
 @contextmanager
@@ -5823,6 +5876,19 @@ def git_store_mutation_root(args: argparse.Namespace) -> Path | None:
     return validate_git_store_root(candidate) if candidate is not None else None
 
 
+def git_store_read_root(args: argparse.Namespace) -> Path | None:
+    if not is_git_store_read_command(args):
+        return None
+    candidate = configured_git_store_root()
+    return validate_git_store_root(candidate) if candidate is not None else None
+
+
+def is_git_store_read_command(args: argparse.Namespace) -> bool:
+    if args.command == "pattern-category":
+        return args.category_action == "list"
+    return args.command in GIT_STORE_READ_COMMANDS
+
+
 def storage_plan_workspace_roots(args: argparse.Namespace) -> tuple[Path, ...]:
     configured_roots = workspace_roots(global_config())
     return (
@@ -5852,22 +5918,32 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     root = git_store_mutation_root(args)
     if root is None:
+        root = git_store_read_root(args)
+    if root is None:
         args.func(args)
         return 0
     with git_store_lock(root):
         validate_git_store_approval(args, root)
         upstream = git_store_upstream(root)
-        prepare_git_store(root, upstream)
-        args.func(args)
-        changed = commit_git_store_changes(
-            root,
-            f"chore(context): apply {args.command}",
-        )
-        if changed:
-            push_git_store_commit(root, upstream)
-    remote = safe_display_field(upstream.remote, GLOBAL_LABEL_OUTPUT_LIMIT)
-    branch = safe_display_field(upstream.branch, GLOBAL_LABEL_OUTPUT_LIMIT)
-    print(f"Git context store synchronized: {remote}/{branch}")
+        if is_git_store_read_command(args):
+            if sync_git_store_for_read(root, upstream):
+                remote = safe_display_field(upstream.remote, GLOBAL_LABEL_OUTPUT_LIMIT)
+                branch = safe_display_field(upstream.branch, GLOBAL_LABEL_OUTPUT_LIMIT)
+                print(f"Git context store refreshed: {remote}/{branch}")
+            args.func(args)
+        else:
+            prepare_git_store(root, upstream)
+            args.func(args)
+            changed = commit_git_store_changes(
+                root,
+                f"chore(context): apply {args.command}",
+            )
+            if changed:
+                push_git_store_commit(root, upstream)
+    if not is_git_store_read_command(args):
+        remote = safe_display_field(upstream.remote, GLOBAL_LABEL_OUTPUT_LIMIT)
+        branch = safe_display_field(upstream.branch, GLOBAL_LABEL_OUTPUT_LIMIT)
+        print(f"Git context store synchronized: {remote}/{branch}")
     return 0
 
 

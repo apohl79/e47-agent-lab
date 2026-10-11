@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import time
 from pathlib import Path
 
 from scope_test_support import (
@@ -117,6 +119,20 @@ def advance_remote_manifest(tmp_path: Path, remote: Path) -> str:
     return run_git(clone, "rev-parse", "HEAD").stdout.strip()
 
 
+def sync_marker(store: Path) -> Path:
+    git_dir = Path(run_git(store, "rev-parse", "--git-dir").stdout.strip())
+    if not git_dir.is_absolute():
+        git_dir = store / git_dir
+    return git_dir / "project-context-curator-last-sync"
+
+
+def age_sync_marker(store: Path) -> None:
+    marker = sync_marker(store)
+    marker.touch()
+    old_time = time.time() - 901
+    os.utime(marker, (old_time, old_time))
+
+
 def test_changed_git_store_command_commits_and_pushes(tmp_path: Path) -> None:
     env, repo, store, remote = configure_store(tmp_path)
     before = run_git(store, "rev-parse", "HEAD").stdout.strip()
@@ -146,6 +162,62 @@ def test_remote_advance_is_preserved_before_record_update(tmp_path: Path) -> Non
         read_json(store / "project-context-store.json")["remote_marker"],
         run_git(store, "status", "--short").stdout,
     ) == (0, local, "preserved", "")
+
+
+def test_read_pulls_remote_updates_after_sync_window(tmp_path: Path) -> None:
+    env, repo, store, remote = configure_store(tmp_path)
+    remote_commit = advance_remote_manifest(tmp_path, remote)
+    age_sync_marker(store)
+
+    result = run_context("status", repo=repo, env=env)
+
+    assert (
+        result.returncode,
+        "Git context store refreshed: origin/main" in result.stdout,
+        run_git(store, "rev-parse", "HEAD").stdout.strip(),
+        read_json(store / "project-context-store.json")["remote_marker"],
+        run_git(store, "status", "--short").stdout,
+    ) == (0, True, remote_commit, "preserved", "")
+
+
+def test_read_skips_pull_within_sync_window(tmp_path: Path) -> None:
+    env, repo, store, remote = configure_store(tmp_path)
+    remote_commit = advance_remote_manifest(tmp_path, remote)
+    marker = sync_marker(store)
+    marker.touch()
+    recent_time = time.time() - 899
+    os.utime(marker, (recent_time, recent_time))
+    local_commit = run_git(store, "rev-parse", "HEAD").stdout.strip()
+
+    result = run_context("status", repo=repo, env=env)
+
+    assert (
+        result.returncode,
+        "Git context store refreshed:" in result.stdout,
+        run_git(store, "rev-parse", "HEAD").stdout.strip(),
+        run_git(remote, "rev-parse", "refs/heads/main").stdout.strip(),
+        read_json(store / "project-context-store.json").get("remote_marker"),
+    ) == (0, False, local_commit, remote_commit, None)
+
+
+def test_stale_read_rejects_dirty_git_store_without_modifying_it(
+    tmp_path: Path,
+) -> None:
+    env, repo, store, remote = configure_store(tmp_path)
+    advance_remote_manifest(tmp_path, remote)
+    age_sync_marker(store)
+    readme = store / "README.md"
+    readme.write_text("local changes\n", encoding="utf-8")
+    local_commit = run_git(store, "rev-parse", "HEAD").stdout.strip()
+
+    result = run_context("status", repo=repo, env=env)
+
+    assert (
+        result.returncode,
+        "refusing passive sync" in result.stderr,
+        run_git(store, "rev-parse", "HEAD").stdout.strip(),
+        readme.read_text(encoding="utf-8"),
+    ) == (1, True, local_commit, "local changes\n")
 
 
 def test_unchanged_update_does_not_create_empty_commit(tmp_path: Path) -> None:
