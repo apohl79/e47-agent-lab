@@ -267,8 +267,8 @@ class HostChat:
                 )
             )
             return "\n".join(
-                f"{number} {session_name(row)} ({update_timestamp(row)})\n"
-                f"  {workspace_project(self.roots, row['cwd'])}"
+                f"{number} {session_name(row)} (`{update_timestamp(row)}`)\n"
+                f"`  {workspace_project(self.roots, row['cwd'])}`"
                 for number, row in enumerate(self.matches, 1)
             ) or "No resumable sessions found."
         if command == "/attach":

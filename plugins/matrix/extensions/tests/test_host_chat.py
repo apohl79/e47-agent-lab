@@ -8,6 +8,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import host_chat
+import matrix
 
 
 def test_project_path_rejects_traversal_and_symlink(tmp_path: Path) -> None:
@@ -58,7 +59,7 @@ def test_session_search_numbers_only_approved_project_paths(tmp_path: Path) -> N
     chat.roots = {"work": tmp_path}
     chat.matches = []
     result = chat.handle("/sessions first")
-    assert result == "1 First (2023-11-14 22:13:20 UTC)\n  work/one"
+    assert result == "1 First (`2023-11-14 22:13:20 UTC`)\n`  work/one`"
     assert [row["id"] for row in chat.matches] == ["first"]
     assert chat.handle("/attach 2") == "Use a number from the last /sessions result."
 
@@ -104,15 +105,26 @@ def test_sessions_without_search_lists_all_approved_project_paths(tmp_path: Path
     chat.roots = {"work": workspace, "other": other_workspace}
     chat.matches = []
 
-    assert chat.handle("/sessions") == (
-        "1 Alpha (2023-11-14 22:13:20 UTC)\n"
-        "  other/project-a\n"
-        "2 Alpha (2023-11-14 22:13:20 UTC)\n"
-        "  work/project-a\n"
-        "3 Zulu (2023-11-14 22:13:20 UTC)\n"
-        "  work/project-a\n"
-        "4 Beta (2023-11-14 22:13:20 UTC)\n"
-        "  work/project-b"
+    result = chat.handle("/sessions")
+    assert result == (
+        "1 Alpha (`2023-11-14 22:13:20 UTC`)\n"
+        "`  other/project-a`\n"
+        "2 Alpha (`2023-11-14 22:13:20 UTC`)\n"
+        "`  work/project-a`\n"
+        "3 Zulu (`2023-11-14 22:13:20 UTC`)\n"
+        "`  work/project-a`\n"
+        "4 Beta (`2023-11-14 22:13:20 UTC`)\n"
+        "`  work/project-b`"
+    )
+    assert matrix.matrix_formatted_body(result) == (
+        "<p>1 Alpha (<code>2023-11-14 22:13:20 UTC</code>)<br>"
+        "<code>  other/project-a</code><br>"
+        "2 Alpha (<code>2023-11-14 22:13:20 UTC</code>)<br>"
+        "<code>  work/project-a</code><br>"
+        "3 Zulu (<code>2023-11-14 22:13:20 UTC</code>)<br>"
+        "<code>  work/project-a</code><br>"
+        "4 Beta (<code>2023-11-14 22:13:20 UTC</code>)<br>"
+        "<code>  work/project-b</code></p>"
     )
     assert [row["id"] for row in chat.matches] == ["other", "alpha", "zulu", "beta"]
     client.request.assert_called_once_with(
