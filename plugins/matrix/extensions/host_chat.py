@@ -254,12 +254,29 @@ class HostChat:
         if command == "/list":
             if not argument:
                 return "\n".join(self.roots) or "No approved workspaces."
-            root = self.roots.get(argument)
+            workspace, separator, relative = argument.partition("/")
+            root = self.roots.get(workspace)
             if root is None:
                 return "Unknown workspace."
-            return "\n".join(sorted(
-                item.name for item in root.iterdir() if item.is_dir() and not item.is_symlink()
-            )) or "No project directories."
+            directory = root
+            if separator:
+                if (
+                    not relative
+                    or "\\" in relative
+                    or "\x00" in relative
+                    or ".." in Path(relative).parts
+                ):
+                    return "Directory path must stay inside its workspace."
+                directory = (root / relative).resolve()
+                if not directory.is_relative_to(root) or not directory.is_dir():
+                    return "Directory does not exist in that workspace."
+            return "\n".join(
+                sorted(
+                    item.name
+                    for item in directory.iterdir()
+                    if item.is_dir() and not item.is_symlink()
+                )
+            ) or "No project directories."
         if command == "/sessions":
             self.matches = [
                 row for row in session_rows(self.client, argument)

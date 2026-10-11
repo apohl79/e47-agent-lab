@@ -193,9 +193,11 @@ def test_host_commands_and_regular_message(tmp_path: Path) -> None:
     chat.thread_id = "home"
     chat.active_turn_id = None
     chat.matches = []
-    (tmp_path / "project").mkdir()
+    (tmp_path / "project" / "nested-project").mkdir(parents=True)
     assert chat.handle("/list") == "work"
     assert chat.handle("/list work") == "project"
+    assert chat.handle("/list work/project") == "nested-project"
+    assert chat.handle("/list work/../project") == "Directory path must stay inside its workspace."
     assert chat.handle("/help") == host_chat.HELP
     assert chat.handle("/unknown").startswith("Unknown command")
     assert chat.handle("hello") is None
