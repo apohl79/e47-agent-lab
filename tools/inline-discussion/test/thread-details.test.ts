@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import type { Thread } from '../src/types.ts';
-import { findThreadDetails } from '../src/web/thread-details.ts';
+import { findThreadDetails, scrollThreadToTop } from '../src/web/thread-details.ts';
 
 function makeThread(overrides: Partial<Thread> = {}): Thread {
   return {
@@ -30,5 +30,19 @@ test('finds a details element by its persisted thread id', () => {
   const details = dom.window.document.querySelectorAll<HTMLDetailsElement>('details');
 
   assert.equal(findThreadDetails(details, makeThread()), details[0]);
+  dom.window.close();
+});
+
+test('scrolls a finished thread to the top of the viewport', () => {
+  const dom = new JSDOM('<details><summary>Thread</summary></details>');
+  const details = dom.window.document.querySelector('details')!;
+  let block = '';
+  details.scrollIntoView = (options) => {
+    block = typeof options === 'object' ? options.block ?? '' : '';
+  };
+
+  scrollThreadToTop(details);
+
+  assert.equal(block, 'start');
   dom.window.close();
 });

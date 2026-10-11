@@ -29,7 +29,7 @@ import { quoteOccurrence } from './quote-position.ts';
 import { appendQuoteToTextarea } from './quote-insertion.ts';
 import { updateWholeBlockNoteIndicators } from './block-note-indicator.ts';
 import { isArchivedThreadDuplicate } from './thread-dedup.ts';
-import { findThreadDetails } from './thread-details.ts';
+import { findThreadDetails, scrollThreadToTop } from './thread-details.ts';
 import { installImageViewer } from './image-viewer.ts';
 import { blockPlusHost } from './block-plus-host.ts';
 import { bindTaskCheckboxes, type TaskCheckboxChange } from './task-checkboxes.ts';
@@ -2617,6 +2617,11 @@ function onClosed(evt: { threadId: string; conclusion?: string }): void {
   if (evt.conclusion !== undefined) t.conclusion = evt.conclusion;
   renderThread(t);
   decorateResolvedThreadDetails();
+  const details = findThreadDetails(
+    document.querySelectorAll<HTMLDetailsElement>('#doc details'),
+    t,
+  );
+  if (details) scrollThreadToTop(details);
   recomputeApplyEnabled();
 }
 

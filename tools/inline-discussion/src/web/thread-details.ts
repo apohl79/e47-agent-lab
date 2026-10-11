@@ -25,3 +25,7 @@ export function findThreadDetails(
     );
   });
 }
+
+export function scrollThreadToTop(details: HTMLDetailsElement): void {
+  details.scrollIntoView?.({ block: 'start' });
+}
