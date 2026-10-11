@@ -59,6 +59,7 @@ def test_session_search_numbers_only_approved_project_paths(tmp_path: Path) -> N
     chat = host_chat.HostChat.__new__(host_chat.HostChat)
     chat.client = client
     chat.roots = {"work": tmp_path}
+    chat.thread_id = "host-chat"
     chat.matches = []
     result = chat.handle("/sessions first")
     timestamp = host_chat.update_timestamp({"updatedAt": 1_700_000_000})
@@ -99,6 +100,12 @@ def test_sessions_without_search_lists_all_approved_project_paths(tmp_path: Path
                 "cwd": str(workspace / "project-a"),
                 "updatedAt": 1_700_000_000,
             },
+            {
+                "id": "host-chat",
+                "name": "Matrix Host Chat Session",
+                "cwd": str(workspace / "project-a"),
+                "updatedAt": 1_700_000_001,
+            },
             {"id": "outside", "name": "Other", "cwd": "/tmp/outside"},
         ],
         "nextCursor": None,
@@ -106,6 +113,7 @@ def test_sessions_without_search_lists_all_approved_project_paths(tmp_path: Path
     chat = host_chat.HostChat.__new__(host_chat.HostChat)
     chat.client = client
     chat.roots = {"work": workspace, "other": other_workspace}
+    chat.thread_id = "host-chat"
     chat.matches = []
 
     result = chat.handle("/sessions")
@@ -158,6 +166,23 @@ def test_attach_requires_approved_extension() -> None:
     client.request.assert_called_once_with("sessionExtension/list", {"threadId": "thread-id"})
 
 
+def test_attach_resumes_without_loading_thread_history() -> None:
+    client = Mock()
+    client.request.side_effect = [
+        {},
+        {"commands": [{"extensionId": "matrix:matrix", "name": "matrix"}]},
+        {},
+    ]
+    chat = host_chat.HostChat.__new__(host_chat.HostChat)
+    chat.client = client
+    chat.matches = [{"id": "thread-id"}]
+
+    assert chat.handle("/attach 1") == "Matrix enabled in that session."
+    client.request.assert_any_call(
+        "thread/resume", {"threadId": "thread-id", "excludeTurns": True}
+    )
+
+
 def test_host_commands_and_regular_message(tmp_path: Path) -> None:
     chat = host_chat.HostChat.__new__(host_chat.HostChat)
     chat.client = Mock()
@@ -199,6 +224,9 @@ def test_detach_requests_disable_only_named_session(tmp_path: Path, monkeypatch:
     chat.thread_id = "home"
     chat.process_detach_requests()
     assert not (tmp_path / "request.json").exists()
+    chat.client.request.assert_any_call(
+        "thread/resume", {"threadId": "session", "excludeTurns": True}
+    )
     chat.client.request.assert_any_call(
         "sessionExtension/command/invoke",
         {

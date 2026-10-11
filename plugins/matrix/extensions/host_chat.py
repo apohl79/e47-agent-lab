@@ -168,6 +168,12 @@ def extension_command(client: SessionScriptClient, thread_id: str, action: str) 
     )
 
 
+def resume_session(client: SessionScriptClient, thread_id: str) -> dict[str, Any]:
+    return client.request(
+        "thread/resume", {"threadId": thread_id, "excludeTurns": True}
+    )
+
+
 class HostChat:
     def __init__(self, client: SessionScriptClient) -> None:
         self.client = client
@@ -200,7 +206,7 @@ class HostChat:
             state = json.loads(HOST_STATE.read_text())
             thread_id = state.get("threadId")
             if isinstance(thread_id, str) and thread_id:
-                self.client.request("thread/resume", {"threadId": thread_id})
+                resume_session(self.client, thread_id)
                 return thread_id
         except (OSError, ValueError, RpcError):
             pass
@@ -257,7 +263,8 @@ class HostChat:
         if command == "/sessions":
             self.matches = [
                 row for row in session_rows(self.client, argument)
-                if isinstance(row.get("cwd"), str)
+                if row.get("id") != self.thread_id
+                and isinstance(row.get("cwd"), str)
                 and workspace_project(self.roots, row["cwd"]) is not None
             ]
             self.matches.sort(
@@ -276,7 +283,7 @@ class HostChat:
             if not argument.isdecimal() or not 1 <= int(argument) <= len(self.matches):
                 return "Use a number from the last /sessions result."
             thread_id = self.matches[int(argument) - 1]["id"]
-            self.client.request("thread/resume", {"threadId": thread_id})
+            resume_session(self.client, thread_id)
             extension_command(self.client, thread_id, "on")
             return "Matrix enabled in that session."
         if command == "/detach":
@@ -365,7 +372,7 @@ class HostChat:
                 request = json.loads(path.read_text())
                 thread_id = request.get("threadId")
                 if isinstance(thread_id, str) and thread_id != self.thread_id:
-                    self.client.request("thread/resume", {"threadId": thread_id})
+                    resume_session(self.client, thread_id)
                     extension_command(self.client, thread_id, "off")
                     path.unlink()
             except (OSError, ValueError, RpcError, KeyError):
