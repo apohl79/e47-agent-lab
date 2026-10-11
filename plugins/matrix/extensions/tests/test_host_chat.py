@@ -41,7 +41,14 @@ def test_session_search_numbers_only_approved_project_paths(tmp_path: Path) -> N
     client = Mock()
     client.request.return_value = {
         "data": [
-            {"thread": {"id": "first", "name": "First", "cwd": str(tmp_path / "one")}},
+            {
+                "thread": {
+                    "id": "first",
+                    "name": "First",
+                    "cwd": str(tmp_path / "one"),
+                    "updatedAt": 1_700_000_000,
+                }
+            },
             {"thread": {"id": "outside", "name": "Other", "cwd": "/tmp/outside"}},
         ],
         "nextCursor": None,
@@ -51,28 +58,63 @@ def test_session_search_numbers_only_approved_project_paths(tmp_path: Path) -> N
     chat.roots = {"work": tmp_path}
     chat.matches = []
     result = chat.handle("/sessions first")
-    assert result == "1 First\n  one"
+    assert result == "1 First (2023-11-14 22:13:20 UTC)\n  work/one"
     assert [row["id"] for row in chat.matches] == ["first"]
     assert chat.handle("/attach 2") == "Use a number from the last /sessions result."
 
 
 def test_sessions_without_search_lists_all_approved_project_paths(tmp_path: Path) -> None:
+    workspace = tmp_path / "work"
+    other_workspace = tmp_path / "other-workspace"
+    workspace.mkdir()
+    other_workspace.mkdir()
     client = Mock()
     client.request.return_value = {
         "data": [
-            {"id": "first", "name": "First", "cwd": str(tmp_path / "one")},
-            {"id": "second", "name": "Second", "cwd": str(tmp_path / "two")},
+            {
+                "id": "beta",
+                "name": "Beta",
+                "cwd": str(workspace / "project-b"),
+                "updatedAt": 1_700_000_000,
+            },
+            {
+                "id": "zulu",
+                "name": "Zulu",
+                "cwd": str(workspace / "project-a"),
+                "updatedAt": 1_700_000_000,
+            },
+            {
+                "id": "other",
+                "name": "Alpha",
+                "cwd": str(other_workspace / "project-a"),
+                "updatedAt": 1_700_000_000,
+            },
+            {
+                "id": "alpha",
+                "name": "Alpha",
+                "cwd": str(workspace / "project-a"),
+                "updatedAt": 1_700_000_000,
+            },
             {"id": "outside", "name": "Other", "cwd": "/tmp/outside"},
         ],
         "nextCursor": None,
     }
     chat = host_chat.HostChat.__new__(host_chat.HostChat)
     chat.client = client
-    chat.roots = {"work": tmp_path}
+    chat.roots = {"work": workspace, "other": other_workspace}
     chat.matches = []
 
-    assert chat.handle("/sessions") == "1 First\n  one\n2 Second\n  two"
-    assert [row["id"] for row in chat.matches] == ["first", "second"]
+    assert chat.handle("/sessions") == (
+        "1 Alpha (2023-11-14 22:13:20 UTC)\n"
+        "  other/project-a\n"
+        "2 Alpha (2023-11-14 22:13:20 UTC)\n"
+        "  work/project-a\n"
+        "3 Zulu (2023-11-14 22:13:20 UTC)\n"
+        "  work/project-a\n"
+        "4 Beta (2023-11-14 22:13:20 UTC)\n"
+        "  work/project-b"
+    )
+    assert [row["id"] for row in chat.matches] == ["other", "alpha", "zulu", "beta"]
     client.request.assert_called_once_with(
         "thread/list",
         {"sortKey": "updated_at", "limit": 100},

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from collections import deque
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -94,13 +95,29 @@ def project_path(roots: dict[str, Path], text: str) -> Path:
     return path
 
 
-def relative_project(roots: dict[str, Path], cwd: str) -> str | None:
+def workspace_project(roots: dict[str, Path], cwd: str) -> str | None:
     path = Path(cwd).resolve()
-    for name, root in roots.items():
+    for workspace, root in roots.items():
         if path.is_relative_to(root):
             relative = path.relative_to(root)
-            return str(relative) if relative.parts else "."
+            return f"{workspace}/{relative}" if relative.parts else f"{workspace}/."
     return None
+
+
+def session_name(row: dict[str, Any]) -> str:
+    return row.get("name") or row.get("preview") or row["id"]
+
+
+def update_timestamp(row: dict[str, Any]) -> str:
+    updated_at = row.get("updatedAt")
+    if not isinstance(updated_at, (int, float)) or isinstance(updated_at, bool):
+        return "unknown"
+    try:
+        return datetime.fromtimestamp(updated_at, timezone.utc).strftime(
+            "%Y-%m-%d %H:%M:%S UTC"
+        )
+    except (OverflowError, OSError, ValueError):
+        return "unknown"
 
 
 def session_rows(client: SessionScriptClient, search: str) -> list[dict[str, Any]]:
@@ -241,11 +258,17 @@ class HostChat:
             self.matches = [
                 row for row in session_rows(self.client, argument)
                 if isinstance(row.get("cwd"), str)
-                and relative_project(self.roots, row["cwd"]) is not None
+                and workspace_project(self.roots, row["cwd"]) is not None
             ]
+            self.matches.sort(
+                key=lambda row: (
+                    (workspace_project(self.roots, row["cwd"]) or "").casefold(),
+                    session_name(row).casefold(),
+                )
+            )
             return "\n".join(
-                f"{number} {row.get('name') or row.get('preview') or row['id']}\n"
-                f"  {relative_project(self.roots, row['cwd'])}"
+                f"{number} {session_name(row)} ({update_timestamp(row)})\n"
+                f"  {workspace_project(self.roots, row['cwd'])}"
                 for number, row in enumerate(self.matches, 1)
             ) or "No resumable sessions found."
         if command == "/attach":
