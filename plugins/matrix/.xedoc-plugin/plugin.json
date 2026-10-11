@@ -1,7 +1,7 @@
 {
   "name": "matrix",
-  "version": "0.12.5",
-  "description": "Connect enabled Xedoc sessions to private Matrix rooms through OAuth.",
+  "version": "0.13.0",
+  "description": "Connect Xedoc sessions and an always-on host chat to private Matrix rooms through OAuth.",
   "author": {
     "name": "apohl79"
   },

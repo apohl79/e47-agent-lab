@@ -7,10 +7,13 @@ well as the session-script registration helpers, so a script does not need a
 separate client implementation for either surface.
 """
 
+from __future__ import annotations
+
 import base64
 from collections.abc import Callable
 import hashlib
 import json
+import os
 import secrets
 import socket
 import struct
@@ -59,6 +62,40 @@ class WebSocketTransport:
             or expected.encode() not in response
         ):
             raise RpcError("app-server rejected the websocket handshake")
+
+    @classmethod
+    def connect_unix_socket(
+        cls, socket_path: str | os.PathLike[str], timeout: float
+    ) -> "WebSocketTransport":
+        if not hasattr(socket, "AF_UNIX"):
+            raise RpcError("Unix controller transport is unavailable")
+        connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        connection.settimeout(timeout)
+        try:
+            connection.connect(os.fspath(socket_path))
+            transport = cls.__new__(cls)
+            transport.socket = connection
+            transport.buffer = b""
+            key = base64.b64encode(secrets.token_bytes(16)).decode("ascii")
+            connection.sendall(
+                (
+                    "GET /rpc HTTP/1.1\r\nHost: localhost\r\n"
+                    "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+                    f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n"
+                ).encode("ascii")
+            )
+            response = transport._read_until(b"\r\n\r\n")
+            expected = base64.b64encode(
+                hashlib.sha1(
+                    (key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()
+                ).digest()
+            ).decode("ascii")
+            if not response.startswith(b"HTTP/1.1 101") or expected.encode() not in response:
+                raise RpcError("app-server rejected the websocket handshake")
+            return transport
+        except BaseException:
+            connection.close()
+            raise
 
     def close(self) -> None:
         try:
@@ -191,6 +228,12 @@ class SessionScriptClient:
     @classmethod
     def connect_websocket(cls, endpoint: str, timeout: float) -> "SessionScriptClient":
         return cls(WebSocketTransport(endpoint, timeout))
+
+    @classmethod
+    def connect_unix_socket(
+        cls, socket_path: str | os.PathLike[str], timeout: float
+    ) -> "SessionScriptClient":
+        return cls(WebSocketTransport.connect_unix_socket(socket_path, timeout))
 
     @classmethod
     def from_host_child(cls) -> "SessionScriptClient":

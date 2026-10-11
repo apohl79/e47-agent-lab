@@ -595,7 +595,7 @@ def write_test_home(
     responses: FakeResponses,
     models: Path,
 ) -> None:
-    plugin_root = home / "plugins" / "cache" / "local-test" / "matrix" / "0.12.5"
+    plugin_root = home / "plugins" / "cache" / "local-test" / "matrix" / "0.13.0"
     shutil.copytree(PLUGIN_ROOT, plugin_root)
     manifest_path = plugin_root / ".xedoc-plugin" / "plugin.json"
     manifest = json.loads(manifest_path.read_text())

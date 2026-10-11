@@ -39,7 +39,7 @@ except ModuleNotFoundError:
 
 
 PROTOCOL = "xedoc.script/v1"
-PLUGIN_VERSION = "0.12.5"
+PLUGIN_VERSION = "0.13.0"
 LEGACY_CONFIG_ROOT = (
     Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
     / "xedoc"
@@ -52,6 +52,7 @@ CONFIG_ROOT = (
 )
 CONFIG_PATH = CONFIG_ROOT / "config.json"
 ROOMS_ROOT = CONFIG_ROOT / "rooms"
+DETACH_ROOT = CONFIG_ROOT / "detach-requests"
 LEGACY_CONFIG_PATH = LEGACY_CONFIG_ROOT / "config.json"
 LEGACY_ROOMS_ROOT = LEGACY_CONFIG_ROOT / "rooms"
 MATRIX_API_PREFIX = "/_matrix/client/v3"
@@ -2346,6 +2347,15 @@ def run_persistent() -> int:
                     message = inbound.get_nowait()
                 except queue.Empty:
                     break
+                if message.strip() == "/detach":
+                    write_private_json(
+                        DETACH_ROOT / f"{hashlib.sha256(thread_id.encode()).hexdigest()}.json",
+                        {"threadId": thread_id},
+                    )
+                    agent_matrix.send_text(
+                        room_id, "Matrix detach requested for this session."
+                    )
+                    continue
                 deferred_inbound.append(message)
             if deferred_inbound:
                 # A prompt notification carries the single-use response lease.

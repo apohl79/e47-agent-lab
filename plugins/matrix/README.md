@@ -1,6 +1,6 @@
 # Matrix (Element)
 
-Matrix is an Xedoc-only session extension. After approval and setup, it creates
+Matrix is an Xedoc-only session extension and host chat. After approval and setup, it creates
 one private Matrix room for each enabled root session, invites a configured
 target account, mirrors Xedoc user and completed model messages into the room,
 accepts messages sent from that account in Element as ordinary turns, and
@@ -63,6 +63,38 @@ Rooms created by this version are private and invite-only, but they are not
 end-to-end encrypted. This keeps the dependency-free bridge interoperable with
 Element without storing Matrix device keys. Use a homeserver and accounts whose
 security policy permits unencrypted private rooms.
+
+## Host chat
+
+Installing the plugin with `install.sh --xedoc` also installs a per-user
+launchd (macOS) or systemd (Linux) service. It starts the managed Xedoc
+app-server when needed and reconnects after an app-server restart. Once
+`/matrix setup` has completed, the service creates a private room named
+`Xedoc: <hostname> (host)` and a durable Xedoc session in the user's home
+directory. It keeps the same room and session after restarts. The service
+starts at user login on macOS; on Linux, enable systemd user lingering if it
+must start before login.
+
+Send `/help` in the host room for the supported commands:
+
+- `/list` lists approved remote-agent workspaces.
+- `/list <workspace>` lists immediate project directories in that workspace.
+- `/sessions <search string>` lists matching stored sessions with numbered
+  workspace-relative directories.
+- `/attach <num>` resumes the numbered session and enables its Matrix bridge.
+- `/start <project dir>` starts a session in an approved project directory and
+  enables its Matrix bridge. Prefix with `<workspace>/` when there are multiple
+  approved workspaces.
+- `/detach` in a session room disables that session's Matrix bridge. The host
+  room remains connected; `/detach` there explains where to use it.
+
+Other messages in the host room are forwarded to the home session. Unknown
+slash commands are rejected rather than sent to the model. Session bridges
+still require the normal Xedoc approval and Matrix setup; the host chat does
+not bypass extension approval. If no remote-agent workspaces are configured,
+the host room still works, but project commands are unavailable.
+Element handles some slash commands itself (notably `/help`); enter
+`/plain /help` to send the literal command to the host bridge.
 
 `request_user_input` responses use Xedoc's leased responder capability and
 retain the host's 10-second window. Matrix approval replies receive a

@@ -355,6 +355,7 @@ remove_codex_plugins() {
 remove_xedoc_plugins() {
     require_xedoc
 
+    matrix_host_chat_service uninstall
     info "Removing existing Xedoc plugins..."
     local entry plugin_name marketplace_name
     for marketplace_name in "${ALL_MARKETPLACE_NAMES[@]}"; do
@@ -420,6 +421,24 @@ install_xedoc_plugins() {
         xedoc plugin add "${plugin_name}@${MARKETPLACE_NAME}" >/dev/null
         ok "Xedoc plugin installed: ${plugin_name}@${MARKETPLACE_NAME}"
     done
+    matrix_host_chat_service install
+}
+
+matrix_host_chat_service() {
+    local action="$1" version script
+    version="$(xedoc plugin list --json | python3 -c '
+import json, sys
+for plugin in json.load(sys.stdin).get("installed", []):
+    if plugin.get("pluginId") == "matrix@e47":
+        print(plugin["version"])
+        break
+' 2>/dev/null)" || true
+    [ -n "$version" ] || return 0
+    script="${XEDOC_HOME:-$HOME/.xedoc}/plugins/cache/e47/matrix/$version/extensions/host_chat_service.py"
+    [ -f "$script" ] || return 0
+    if ! python3 "$script" "$action"; then
+        warn "Matrix host chat service $action failed; run python3 $script $action manually."
+    fi
 }
 
 # Pick the target bin dir for CLI tool symlinks. Preference: ~/bin if it
