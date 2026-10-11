@@ -213,6 +213,35 @@ def test_host_commands_and_regular_message(tmp_path: Path) -> None:
     assert payload["expectedTurnId"] == "turn-1"
 
 
+def test_short_command_prefixes_and_ambiguity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    chat = host_chat.HostChat.__new__(host_chat.HostChat)
+    chat.client = Mock()
+    chat.client.request.return_value = {"thread": {"id": "new-thread"}}
+    chat.roots = {"work": tmp_path}
+    chat.thread_id = "home"
+    chat.active_turn_id = None
+    chat.matches = []
+    enabled: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        host_chat,
+        "extension_command",
+        lambda client, thread_id, action: enabled.append((thread_id, action)),
+    )
+
+    assert chat.handle("/l") == "work"
+    assert chat.handle("/s") == "Ambiguous command. Use /sessions or /start."
+    assert chat.handle("/st project") == "Started project and enabled Matrix."
+    assert enabled == [("new-thread", "on")]
+    chat.client.request.assert_called_once_with(
+        "thread/start", {"cwd": str(project)}
+    )
+    assert chat.handle("/unknown").startswith("Unknown command")
+
+
 def test_detach_requests_disable_only_named_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(host_chat, "DETACH_ROOT", tmp_path)
     (tmp_path / "request.json").write_text('{"threadId":"session"}')

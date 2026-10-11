@@ -36,6 +36,7 @@ from session_script_sdk import RpcError, SessionScriptClient
 
 
 HOST_STATE = CONFIG_ROOT / "host-chat.json"
+COMMANDS = ("/help", "/list", "/sessions", "/attach", "/detach", "/start")
 CONTROL_SOCKET = Path(
     os.environ.get(
         "XEDOC_APP_SERVER_CONTROL_SOCKET",
@@ -249,6 +250,12 @@ class HostChat:
     def handle(self, message: str) -> str | None:
         command, _, argument = message.strip().partition(" ")
         argument = argument.strip()
+        if command.startswith("/"):
+            matches = [candidate for candidate in COMMANDS if candidate.startswith(command)]
+            if len(matches) == 1:
+                command = matches[0]
+            elif len(matches) > 1:
+                return f"Ambiguous command. Use {' or '.join(matches)}."
         if command == "/help":
             return HELP
         if command == "/list":
