@@ -56,6 +56,29 @@ def test_session_search_numbers_only_approved_project_paths(tmp_path: Path) -> N
     assert chat.handle("/attach 2") == "Use a number from the last /sessions result."
 
 
+def test_sessions_without_search_lists_all_approved_project_paths(tmp_path: Path) -> None:
+    client = Mock()
+    client.request.return_value = {
+        "data": [
+            {"id": "first", "name": "First", "cwd": str(tmp_path / "one")},
+            {"id": "second", "name": "Second", "cwd": str(tmp_path / "two")},
+            {"id": "outside", "name": "Other", "cwd": "/tmp/outside"},
+        ],
+        "nextCursor": None,
+    }
+    chat = host_chat.HostChat.__new__(host_chat.HostChat)
+    chat.client = client
+    chat.roots = {"work": tmp_path}
+    chat.matches = []
+
+    assert chat.handle("/sessions") == "1 First\n  one\n2 Second\n  two"
+    assert [row["id"] for row in chat.matches] == ["first", "second"]
+    client.request.assert_called_once_with(
+        "thread/list",
+        {"sortKey": "updated_at", "limit": 100},
+    )
+
+
 def test_attach_requires_approved_extension() -> None:
     client = Mock()
     client.request.return_value = {"commands": []}

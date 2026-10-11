@@ -49,7 +49,7 @@ HELP = "\n".join(
         "/help — show commands",
         "/list — list approved workspaces",
         "/list <workspace> — list project directories",
-        "/sessions <search string> — find resumable sessions",
+        "/sessions [search string] — list resumable sessions",
         "/attach <num> — enable Matrix in a listed session",
         "/detach — disable Matrix in this session",
         "/start <project dir> — create and enable a session (prefix workspace when needed)",
@@ -106,19 +106,25 @@ def relative_project(roots: dict[str, Path], cwd: str) -> str | None:
 def session_rows(client: SessionScriptClient, search: str) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     cursor: str | None = None
+    method = "thread/search" if search else "thread/list"
     for _ in range(10):
-        params: dict[str, Any] = {"searchTerm": search, "sortKey": "updated_at", "limit": 100}
+        params: dict[str, Any] = {"sortKey": "updated_at", "limit": 100}
+        if search:
+            params["searchTerm"] = search
         if cursor:
             params["cursor"] = cursor
-        page = client.request("thread/search", params)
+        page = client.request(method, params)
         data = page.get("data")
         if not isinstance(data, list):
             raise RpcError("invalid session search response")
-        rows.extend(
-            row["thread"]
-            for row in data
-            if isinstance(row, dict) and isinstance(row.get("thread"), dict)
-        )
+        if method == "thread/list":
+            rows.extend(row for row in data if isinstance(row, dict))
+        else:
+            rows.extend(
+                row["thread"]
+                for row in data
+                if isinstance(row, dict) and isinstance(row.get("thread"), dict)
+            )
         cursor = page.get("nextCursor")
         if not isinstance(cursor, str) or not cursor:
             break
@@ -232,8 +238,6 @@ class HostChat:
                 item.name for item in root.iterdir() if item.is_dir() and not item.is_symlink()
             )) or "No project directories."
         if command == "/sessions":
-            if not argument:
-                return "Usage: /sessions <search string>"
             self.matches = [
                 row for row in session_rows(self.client, argument)
                 if isinstance(row.get("cwd"), str)
