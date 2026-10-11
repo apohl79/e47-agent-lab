@@ -566,7 +566,9 @@ def test_matrix_client_does_not_retry_room_creation_on_transient_failure(
 
 
 def test_matrix_client_uses_bearer_header_and_json_body(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(matrix.socket, "gethostname", lambda: "leda.example.org")
     opener = FakeOpener({"room_id": "!room:example.org"})
     client = matrix.MatrixClient(
         matrix.normalize_config(valid_values()), opener=opener
@@ -584,13 +586,14 @@ def test_matrix_client_uses_bearer_header_and_json_body(
     assert json.loads(request.data) == {
         "invite": ["@andreas:example.org"],
         "is_direct": True,
-        "name": "Xedoc: A session",
+        "name": "leda: A session",
         "preset": "trusted_private_chat",
         "topic": "Private Xedoc session bridge used from Element.",
     }
 
 
-def test_matrix_client_updates_room_name() -> None:
+def test_matrix_client_updates_room_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(matrix.socket, "gethostname", lambda: "leda.example.org")
     opener = FakeOpener({})
     client = matrix.MatrixClient(
         matrix.normalize_config(valid_values()), opener=opener
@@ -603,7 +606,7 @@ def test_matrix_client_updates_room_name() -> None:
         == "https://matrix.example.org/_matrix/client/v3/rooms/"
         "%21room%3Aexample.org/state/m.room.name"
     )
-    assert json.loads(opener.request.data) == {"name": "Xedoc: Renamed session"}
+    assert json.loads(opener.request.data) == {"name": "leda: Renamed session"}
 
 
 def test_matrix_client_joins_room_as_the_user_account() -> None:
@@ -828,14 +831,18 @@ def test_ensure_room_reuses_private_thread_mapping_across_restart(
             self.update_calls: list[tuple[str, str]] = []
             self.targets: list[str] = []
 
-        def create_room(self, title: str, target_user_id: str) -> str:
+        def create_room(
+            self, title: str, target_user_id: str, _display_name: str
+        ) -> str:
             self.create_calls += 1
             assert title == "Session"
             self.targets.append(target_user_id)
             return "!room:example.org"
 
-        def update_room_name(self, room_id: str, title: str) -> None:
-            self.update_calls.append((room_id, title))
+        def update_room_name(
+            self, room_id: str, _title: str, display_name: str
+        ) -> None:
+            self.update_calls.append((room_id, display_name))
 
     first_process = FakeClient()
     config = matrix.normalize_config(valid_values())
@@ -858,6 +865,7 @@ def test_ensure_room_reuses_private_thread_mapping_across_restart(
     assert matrix.load_json(stored) == {
         "roomId": "!room:example.org",
         "title": "Session",
+        "displayName": matrix.room_name("Session"),
         "homeserver": "https://matrix.example.org",
         "agentUserId": "@xedoc:example.org",
         "targetUserId": "@andreas:example.org",
@@ -878,11 +886,18 @@ def test_ensure_room_migrates_legacy_thread_binding(
     isolated_config: Path,
 ) -> None:
     class FakeClient:
-        def create_room(self, _title: str, _target_user_id: str) -> str:
+        def __init__(self) -> None:
+            self.update_calls: list[tuple[str, str]] = []
+
+        def create_room(
+            self, _title: str, _target_user_id: str, _display_name: str
+        ) -> str:
             raise AssertionError("existing room binding must be reused")
 
-        def update_room_name(self, _room_id: str, _title: str) -> None:
-            raise AssertionError("unchanged room title must not be updated")
+        def update_room_name(
+            self, room_id: str, _title: str, display_name: str
+        ) -> None:
+            self.update_calls.append((room_id, display_name))
 
     config = matrix.normalize_config(valid_values())
     binding = {
@@ -894,10 +909,17 @@ def test_ensure_room_migrates_legacy_thread_binding(
     }
     matrix.write_private_json(matrix.legacy_room_path("thread/1"), binding)
 
-    assert matrix.ensure_room(FakeClient(), config, "thread/1", "Session") == (
+    client = FakeClient()
+    assert matrix.ensure_room(client, config, "thread/1", "Session") == (
         "!room:example.org"
     )
-    assert matrix.load_json(matrix.room_path("thread/1")) == binding
+    assert client.update_calls == [
+        ("!room:example.org", matrix.room_name("Session"))
+    ]
+    assert matrix.load_json(matrix.room_path("thread/1")) == {
+        **binding,
+        "displayName": matrix.room_name("Session"),
+    }
 
 
 def test_ensure_room_updates_name_without_replacing_persistent_binding(
@@ -908,12 +930,16 @@ def test_ensure_room_updates_name_without_replacing_persistent_binding(
             self.create_calls = 0
             self.update_calls: list[tuple[str, str]] = []
 
-        def create_room(self, _title: str, _target_user_id: str) -> str:
+        def create_room(
+            self, _title: str, _target_user_id: str, _display_name: str
+        ) -> str:
             self.create_calls += 1
             return "!room:example.org"
 
-        def update_room_name(self, room_id: str, title: str) -> None:
-            self.update_calls.append((room_id, title))
+        def update_room_name(
+            self, room_id: str, _title: str, display_name: str
+        ) -> None:
+            self.update_calls.append((room_id, display_name))
 
     client = FakeClient()
     config = matrix.normalize_config(valid_values())
@@ -932,11 +958,13 @@ def test_ensure_room_updates_name_without_replacing_persistent_binding(
     )
 
     assert client.create_calls == 1
-    assert client.update_calls == [("!room:example.org", "After")]
+    assert client.update_calls == [
+        ("!room:example.org", matrix.room_name("After"))
+    ]
     assert matrix.load_json(matrix.room_path("thread/1"))["title"] == "After"
     assert lifecycle == [
-        "Matrix room created as 'Xedoc: Before'.",
-        "Matrix room renamed to 'Xedoc: After'.",
+        f"Matrix room created as '{matrix.room_name('Before')}'.",
+        f"Matrix room renamed to '{matrix.room_name('After')}'.",
     ]
 
 

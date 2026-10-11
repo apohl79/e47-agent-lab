@@ -17,6 +17,7 @@ from pathlib import Path
 import queue
 import re
 import select
+import socket
 import sys
 import threading
 import time
@@ -460,14 +461,16 @@ class MatrixClient:
             raise MatrixError("Matrix whoami response did not include user_id")
         return user_id
 
-    def create_room(self, title: str, target_user_id: str) -> str:
+    def create_room(
+        self, title: str, target_user_id: str, display_name: str | None = None
+    ) -> str:
         result = self.request(
             "POST",
             "/createRoom",
             {
                 "invite": [target_user_id],
                 "is_direct": True,
-                "name": room_name(title),
+                "name": display_name if display_name is not None else room_name(title),
                 "preset": "trusted_private_chat",
                 "topic": "Private Xedoc session bridge used from Element.",
             },
@@ -477,11 +480,13 @@ class MatrixClient:
             raise MatrixError("Matrix createRoom response did not include room_id")
         return room_id
 
-    def update_room_name(self, room_id: str, title: str) -> None:
+    def update_room_name(
+        self, room_id: str, title: str, display_name: str | None = None
+    ) -> None:
         self.request(
             "PUT",
             f"/rooms/{quote(room_id, safe='')}/state/m.room.name",
-            {"name": room_name(title)},
+            {"name": display_name if display_name is not None else room_name(title)},
         )
 
     def join_room(self, room_id: str) -> None:
@@ -810,7 +815,8 @@ def load_room_binding(thread_id: str) -> dict[str, Any]:
 
 
 def room_name(title: str) -> str:
-    return f"Xedoc: {title}"[:255]
+    hostname = socket.gethostname().split(".", 1)[0]
+    return f"{hostname}: {title}"[:255]
 
 
 def ensure_room(
@@ -819,10 +825,16 @@ def ensure_room(
     thread_id: str,
     title: str,
     lifecycle: Callable[[str], None] | None = None,
+    display_name: str | None = None,
 ) -> str:
     path = room_path(thread_id)
     stored = load_room_binding(thread_id)
     room_id = stored.get("roomId")
+    effective_display_name = (
+        display_name
+        if display_name is not None
+        else room_name(title or thread_id)
+    )
     binding = {
         "homeserver": config["homeserver"],
         "agentUserId": config["agentUserId"],
@@ -833,16 +845,39 @@ def ensure_room(
         and room_id
         and all(stored.get(key) == value for key, value in binding.items())
     ):
-        if stored.get("title") != title:
-            client.update_room_name(room_id, title)
-            write_private_json(path, {"roomId": room_id, "title": title, **binding})
+        if (
+            stored.get("title") != title
+            or stored.get("displayName") != effective_display_name
+        ):
+            client.update_room_name(room_id, title, effective_display_name)
+            write_private_json(
+                path,
+                {
+                    "roomId": room_id,
+                    "title": title,
+                    "displayName": effective_display_name,
+                    **binding,
+                },
+            )
             if lifecycle:
-                lifecycle(f"Matrix room renamed to {room_name(title)!r}.")
+                lifecycle(f"Matrix room renamed to {effective_display_name!r}.")
         return room_id
-    room_id = client.create_room(title or thread_id, str(config["targetUserId"]))
-    write_private_json(path, {"roomId": room_id, "title": title, **binding})
+    room_id = client.create_room(
+        title or thread_id,
+        str(config["targetUserId"]),
+        effective_display_name,
+    )
+    write_private_json(
+        path,
+        {
+            "roomId": room_id,
+            "title": title,
+            "displayName": effective_display_name,
+            **binding,
+        },
+    )
     if lifecycle:
-        lifecycle(f"Matrix room created as {room_name(title or thread_id)!r}.")
+        lifecycle(f"Matrix room created as {effective_display_name!r}.")
     return room_id
 
 

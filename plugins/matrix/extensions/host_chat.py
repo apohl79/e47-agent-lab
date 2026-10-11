@@ -190,8 +190,14 @@ class HostChat:
         self.user = MatrixClient(raw, role="user")
         verify_access_token(config, self.agent)
         verify_access_token(config, self.user, "targetUserId")
+        hostname = socket.gethostname()
+        short_hostname = hostname.split(".", 1)[0]
         self.room_id = ensure_room(
-            self.agent, config, f"host:{socket.gethostname()}", f"{socket.gethostname()} (host)"
+            self.agent,
+            config,
+            f"host:{hostname}",
+            short_hostname,
+            display_name=short_hostname,
         )
         self.user.join_room(self.room_id)
         self.target_user_id = config["targetUserId"]

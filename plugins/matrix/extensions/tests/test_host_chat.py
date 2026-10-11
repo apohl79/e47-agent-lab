@@ -40,6 +40,33 @@ def test_workspaces_use_host_config_only(tmp_path: Path) -> None:
         host_chat.workspaces(client)
 
 
+def test_host_room_uses_short_hostname(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(host_chat.socket, "gethostname", lambda: "leda.example.org")
+    agent = Mock()
+    user = Mock()
+    config = {"targetUserId": "@user:example.org"}
+    monkeypatch.setattr(host_chat, "workspaces", lambda _client: {})
+    monkeypatch.setattr(host_chat.HostChat, "_home_session", lambda _self: "home")
+    monkeypatch.setattr(host_chat, "load_settings", lambda: {})
+    monkeypatch.setattr(host_chat, "has_stored_config", lambda _raw: True)
+    monkeypatch.setattr(host_chat, "stored_config", lambda _raw: config)
+    monkeypatch.setattr(host_chat, "MatrixClient", Mock(side_effect=[agent, user]))
+    monkeypatch.setattr(host_chat, "verify_access_token", Mock())
+    ensure_room = Mock(return_value="!host:example.org")
+    monkeypatch.setattr(host_chat, "ensure_room", ensure_room)
+
+    host_chat.HostChat(Mock())
+
+    ensure_room.assert_called_once_with(
+        agent,
+        config,
+        "host:leda.example.org",
+        "leda",
+        display_name="leda",
+    )
+    user.join_room.assert_called_once_with("!host:example.org")
+
+
 def test_session_search_numbers_only_approved_project_paths(tmp_path: Path) -> None:
     client = Mock()
     client.request.return_value = {
