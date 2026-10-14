@@ -9,9 +9,7 @@ import json
 import os
 from pathlib import Path
 import queue
-import shutil
 import socket
-import subprocess
 import sys
 import threading
 import time
@@ -409,29 +407,32 @@ class HostChat:
                 continue
 
 
+def connect_app_server() -> SessionScriptClient | None:
+    try:
+        return SessionScriptClient.connect_unix_socket(CONTROL_SOCKET, 30)
+    except (OSError, RpcError):
+        return None
+
+
 def main() -> int:
+    idle_reported = False
     while True:
-        client: SessionScriptClient | None = None
+        client = connect_app_server()
+        if client is None:
+            if not idle_reported:
+                print("Matrix host chat idle: Xedoc app-server is not running", file=sys.stderr, flush=True)
+                idle_reported = True
+            time.sleep(10)
+            continue
+        idle_reported = False
         try:
-            binary = os.environ.get("XEDOC_BIN") or shutil.which("xedoc")
-            if not binary:
-                raise ValueError("Xedoc CLI is not installed")
-            subprocess.run(
-                [binary, "app-server", "daemon", "start"],
-                check=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=30,
-            )
-            client = SessionScriptClient.connect_unix_socket(CONTROL_SOCKET, 30)
             client.initialize("matrix-host-chat", "Matrix host chat", "0.13.0")
             HostChat(client).run()
-        except (OSError, RpcError, MatrixError, ValueError, subprocess.SubprocessError) as error:
+        except (OSError, RpcError, MatrixError, ValueError) as error:
             print(f"Matrix host chat waiting: {error}", file=sys.stderr, flush=True)
             time.sleep(10)
         finally:
-            if client is not None:
-                client.close()
+            client.close()
 
 
 if __name__ == "__main__":

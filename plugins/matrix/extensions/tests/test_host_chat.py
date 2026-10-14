@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import subprocess
 import sys
 import time
 from unittest.mock import Mock
@@ -294,3 +295,33 @@ def test_detach_requests_disable_only_named_session(tmp_path: Path, monkeypatch:
             "arguments": ["off"],
         },
     )
+
+
+class StopLoop(Exception):
+    pass
+
+
+def test_main_without_app_server_waits_without_starting_it(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    trace: list[str] = []
+    monkeypatch.setattr(host_chat, "CONTROL_SOCKET", tmp_path / "missing.sock")
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: trace.append("spawn"))
+    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: trace.append("spawn"))
+
+    def sleep(seconds: float) -> None:
+        trace.append(f"sleep {seconds}")
+        if len(trace) == 2:
+            raise StopLoop
+
+    monkeypatch.setattr(host_chat.time, "sleep", sleep)
+    with pytest.raises(StopLoop):
+        host_chat.main()
+    assert trace == ["sleep 10", "sleep 10"]
+
+
+def test_main_with_running_app_server_connects_to_control_socket(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = Mock()
+    monkeypatch.setattr(host_chat.SessionScriptClient, "connect_unix_socket", lambda path, timeout: client)
+    monkeypatch.setattr(host_chat, "HostChat", Mock(side_effect=StopLoop))
+    with pytest.raises(StopLoop):
+        host_chat.main()
+    client.initialize.assert_called_once_with("matrix-host-chat", "Matrix host chat", "0.13.0")

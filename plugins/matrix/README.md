@@ -67,8 +67,9 @@ security policy permits unencrypted private rooms.
 ## Host chat
 
 Installing the plugin with `install.sh --xedoc` also installs a per-user
-launchd (macOS) or systemd (Linux) service. It starts the managed Xedoc
-app-server when needed and reconnects after an app-server restart. Once
+launchd (macOS) or systemd (Linux) service. It never starts the Xedoc
+app-server itself: while no app-server is running it stays idle, and it
+connects (or reconnects after a restart) once one is available. Once
 `/matrix setup` has completed, the service creates a private room named
 `Xedoc: <hostname> (host)` and a durable Xedoc session in the user's home
 directory. It keeps the same room and session after restarts. The service
