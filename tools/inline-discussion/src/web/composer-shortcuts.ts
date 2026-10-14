@@ -1,8 +1,11 @@
+import type { ThreadRecipient } from '../types.ts';
+
 export interface ComposerKeyInput {
   key: string;
   shiftKey: boolean;
   metaKey: boolean;
   ctrlKey: boolean;
+  altKey: boolean;
   repeat: boolean;
   isComposing: boolean;
 }
@@ -34,9 +37,19 @@ export function composerNoteModifierActive(
   return platform === 'macos' ? event.metaKey && !event.ctrlKey : event.metaKey || event.ctrlKey;
 }
 
-export function composerRecipientToggleRequested(
-  event: Pick<ComposerKeyInput, 'key' | 'repeat'>,
+export function composerRecipientModifierActive(
+  event: Pick<ComposerKeyInput, 'altKey'>,
   platform: ComposerPlatform,
 ): boolean {
-  return platform === 'macos' && event.key === 'Alt' && !event.repeat;
+  return platform === 'macos' && event.altKey;
+}
+
+export function composerRecipientForModifier(
+  selectedRecipient: ThreadRecipient,
+  modifierActive: boolean,
+  mainAgentAvailable: boolean,
+): ThreadRecipient {
+  return modifierActive && mainAgentAvailable
+    ? selectedRecipient === 'main-agent' ? 'thread-agent' : 'main-agent'
+    : selectedRecipient;
 }

@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import {
   composerKeyAction,
   composerNoteModifierActive,
-  composerRecipientToggleRequested,
+  composerRecipientForModifier,
+  composerRecipientModifierActive,
   detectComposerPlatform,
   type ComposerKeyInput,
 } from '../src/web/composer-shortcuts.ts';
@@ -14,6 +15,7 @@ function key(overrides: Partial<ComposerKeyInput> = {}): ComposerKeyInput {
     shiftKey: false,
     metaKey: false,
     ctrlKey: false,
+    altKey: false,
     repeat: false,
     isComposing: false,
     ...overrides,
@@ -64,16 +66,32 @@ test('other platforms arm the note button for Ctrl', () => {
   assert.equal(composerNoteModifierActive({ metaKey: false, ctrlKey: true }, 'other'), true);
 });
 
-test('macOS Option requests a recipient toggle', () => {
-  assert.equal(composerRecipientToggleRequested({ key: 'Alt', repeat: false }, 'macos'), true);
+test('macOS Option modifier is active while held', () => {
+  assert.equal(composerRecipientModifierActive({ altKey: true }, 'macos'), true);
 });
 
-test('repeated macOS Option keydown does not toggle the recipient again', () => {
-  assert.equal(composerRecipientToggleRequested({ key: 'Alt', repeat: true }, 'macos'), false);
+test('macOS Option modifier is inactive after release', () => {
+  assert.equal(composerRecipientModifierActive({ altKey: false }, 'macos'), false);
 });
 
 test('Option does not toggle the recipient on other platforms', () => {
-  assert.equal(composerRecipientToggleRequested({ key: 'Alt', repeat: false }, 'other'), false);
+  assert.equal(composerRecipientModifierActive({ altKey: true }, 'other'), false);
+});
+
+test('holding macOS Option temporarily switches from thread agent to main agent', () => {
+  assert.equal(composerRecipientForModifier('thread-agent', true, true), 'main-agent');
+});
+
+test('holding macOS Option temporarily switches from main agent to thread agent', () => {
+  assert.equal(composerRecipientForModifier('main-agent', true, true), 'thread-agent');
+});
+
+test('releasing Option restores the selected recipient', () => {
+  assert.equal(composerRecipientForModifier('thread-agent', false, true), 'thread-agent');
+});
+
+test('Option leaves the recipient unchanged when the main agent is unavailable', () => {
+  assert.equal(composerRecipientForModifier('thread-agent', true, false), 'thread-agent');
 });
 
 test('MacIntel is detected as macOS', () => {

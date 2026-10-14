@@ -18,7 +18,8 @@ import { ALLOWED_URI_REGEXP } from '../uri-policy.ts';
 import {
   composerKeyAction,
   composerNoteModifierActive,
-  composerRecipientToggleRequested,
+  composerRecipientForModifier,
+  composerRecipientModifierActive,
   detectComposerPlatform,
 } from './composer-shortcuts.ts';
 import { replaceComposerError } from './composer-errors.ts';
@@ -1654,12 +1655,22 @@ function openComposer(
   const noteBtn = box.querySelector('.note') as HTMLButtonElement;
   const cancelBtn = box.querySelector('.cancel') as HTMLButtonElement;
   const recipient = box.querySelector<HTMLSelectElement>('.composer-recipient select')!;
-  const toggleRecipient = (event: KeyboardEvent): void => {
-    if (!composerRecipientToggleRequested({ key: event.key, repeat: event.repeat }, platform)) return;
-    if (recipient.querySelector('option[value="main-agent"]')?.hasAttribute('disabled')) return;
-    recipient.value = recipient.value === 'main-agent' ? 'thread-agent' : 'main-agent';
+  let selectedRecipient = recipient.value as ThreadRecipient;
+  let recipientModifierActive = false;
+  const mainAgentDisabled = recipient.querySelector('option[value="main-agent"]')?.hasAttribute('disabled') ?? true;
+  const setRecipientModifierActive = (active: boolean): void => {
+    recipientModifierActive = active;
+    recipient.value = composerRecipientForModifier(selectedRecipient, active, !mainAgentDisabled);
   };
-  box.addEventListener('keydown', toggleRecipient);
+  recipient.addEventListener('change', () => {
+    if (!recipientModifierActive) selectedRecipient = recipient.value as ThreadRecipient;
+  });
+  box.addEventListener('keydown', (event) => {
+    setRecipientModifierActive(composerRecipientModifierActive(event, platform));
+  });
+  box.addEventListener('keyup', (event) => {
+    setRecipientModifierActive(composerRecipientModifierActive(event, platform));
+  });
   // While the platform's note modifier is held (Cmd on macOS, Ctrl elsewhere),
   // Enter adds a note instead of sending. Highlight the "Add note" button so
   // the alternate action is visible before the key is released. Ctrl+Enter is
