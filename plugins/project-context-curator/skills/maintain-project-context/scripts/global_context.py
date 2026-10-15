@@ -2,6 +2,7 @@
 # requires-python = ">=3.10,<3.13"
 # dependencies = [
 #   "fastembed==0.8.0",
+#   "onnxruntime==1.23.2; sys_platform == 'darwin' and platform_machine == 'x86_64'",
 #   "qdrant-client==1.19.0",
 # ]
 # ///
