@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections import deque
 from html import escape
 import hashlib
+import http.client
 import json
 import os
 from pathlib import Path
@@ -40,7 +41,7 @@ except ModuleNotFoundError:
 
 
 PROTOCOL = "xedoc.script/v1"
-PLUGIN_VERSION = "0.13.0"
+PLUGIN_VERSION = "0.13.4"
 LEGACY_CONFIG_ROOT = (
     Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
     / "xedoc"
@@ -440,6 +441,8 @@ class MatrixClient:
                 ) from error
             except URLError as error:
                 raise MatrixError(f"Matrix request failed: {error.reason}") from error
+            except (OSError, http.client.HTTPException) as error:
+                raise MatrixError(f"Matrix request failed: {error}") from error
         if len(raw) > MAX_RESPONSE_BYTES:
             raise MatrixError("Matrix response exceeds the size limit")
         if not raw:

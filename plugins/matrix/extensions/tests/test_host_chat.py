@@ -324,4 +324,6 @@ def test_main_with_running_app_server_connects_to_control_socket(monkeypatch: py
     monkeypatch.setattr(host_chat, "HostChat", Mock(side_effect=StopLoop))
     with pytest.raises(StopLoop):
         host_chat.main()
-    client.initialize.assert_called_once_with("matrix-host-chat", "Matrix host chat", "0.13.0")
+    client.initialize.assert_called_once_with(
+        "matrix-host-chat", "Matrix host chat", host_chat.PLUGIN_VERSION
+    )

@@ -20,6 +20,7 @@ from matrix import (
     DETACH_ROOT,
     MatrixClient,
     MatrixError,
+    PLUGIN_VERSION,
     ensure_room,
     events_for_sync,
     has_stored_config,
@@ -426,7 +427,7 @@ def main() -> int:
             continue
         idle_reported = False
         try:
-            client.initialize("matrix-host-chat", "Matrix host chat", "0.13.0")
+            client.initialize("matrix-host-chat", "Matrix host chat", PLUGIN_VERSION)
             HostChat(client).run()
         except (OSError, RpcError, MatrixError, ValueError) as error:
             print(f"Matrix host chat waiting: {error}", file=sys.stderr, flush=True)

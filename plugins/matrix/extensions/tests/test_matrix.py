@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import http.client
 import io
 import json
 import os
@@ -528,6 +529,94 @@ def test_matrix_client_retries_transient_introspection_failures(
 
     assert client.whoami() == "@xedoc:example.org"
     assert opener.calls == 3
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        ConnectionResetError("network changed"),
+        http.client.IncompleteRead(b"partial response"),
+    ],
+)
+def test_matrix_sync_recovers_after_response_read_disconnect(
+    failure: Exception,
+) -> None:
+    class StopAfterSync:
+        stopped = False
+
+        def is_set(self) -> bool:
+            return self.stopped
+
+        def wait(self, _timeout: float) -> bool:
+            return self.stopped
+
+        def set(self) -> None:
+            self.stopped = True
+
+    stop = StopAfterSync()
+    payload = {
+        "next_batch": "recovered",
+        "rooms": {
+            "join": {
+                "!room:example.org": {
+                    "timeline": {
+                        "events": [
+                            {
+                                "event_id": "$recovered",
+                                "type": "m.room.message",
+                                "sender": "@andreas:example.org",
+                                "content": {
+                                    "msgtype": "m.text",
+                                    "body": "still connected",
+                                },
+                            }
+                        ]
+                    }
+                }
+            }
+        },
+    }
+
+    class BrokenResponse(FakeResponse):
+        def read(self, _limit: int) -> bytes:
+            raise failure
+
+    class RecoveryResponse(FakeResponse):
+        def read(self, limit: int) -> bytes:
+            body = super().read(limit)
+            stop.set()
+            return body
+
+    class RecoveringOpener:
+        calls = 0
+
+        def open(self, _request: Any, timeout: float) -> FakeResponse:
+            self.calls += 1
+            if self.calls == 1:
+                return BrokenResponse({})
+            return RecoveryResponse(payload)
+
+    opener = RecoveringOpener()
+    client = matrix.MatrixClient(
+        matrix.normalize_config(valid_values()), opener=opener
+    )
+    inbound: queue.Queue[str] = queue.Queue()
+
+    matrix.receive_messages(
+        client,
+        "!room:example.org",
+        "@andreas:example.org",
+        "before-disconnect",
+        inbound,
+        queue.Queue(),
+        lambda: False,
+        set(),
+        threading.Lock(),
+        stop,
+    )
+
+    assert opener.calls == 2
+    assert inbound.get_nowait() == "still connected"
 
 
 def test_matrix_client_does_not_retry_invalid_token(
@@ -1703,10 +1792,7 @@ def test_repository_registers_matrix_and_removes_signal() -> None:
     )
     names = {entry["name"] for entry in marketplace["plugins"]}
 
-    assert versions["plugins"]["matrix"] == {
-        "version": "0.13.0",
-        "hosts": ["xedoc"],
-    }
+    assert versions["plugins"]["matrix"]["hosts"] == ["xedoc"]
     assert matrix.PLUGIN_VERSION == versions["plugins"]["matrix"]["version"]
     assert "signal" not in versions["plugins"]
     assert "matrix" in names
