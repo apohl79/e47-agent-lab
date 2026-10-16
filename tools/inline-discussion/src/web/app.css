@@ -1661,6 +1661,13 @@ blockquote.quote,
 #doc details[open] summary { border-bottom: 1px solid var(--border); }
 #doc details > *:not(summary) { padding: 10px 14px; }
 
+#doc details.frontmatter pre {
+  margin: 0;
+  overflow-x: auto;
+  font-family: var(--font-mono, monospace);
+  font-size: 0.85em;
+}
+
 /* ---------- Finish screen ---------- */
 
 .finished {

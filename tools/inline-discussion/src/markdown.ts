@@ -55,13 +55,28 @@ export function normalizeDetailsSpacing(md: string): string {
 }
 
 export function parseDoc(markdown: string): RawParsedDoc {
-  const normalizedMarkdown = normalizeDetailsSpacing(markdown);
+  const normalizedSource = normalizeDetailsSpacing(markdown).replace(/\r\n/g, '\n');
+  const frontmatter = normalizedSource.match(/^---[ \t]*\r?\n(?=[^\r\n]*[A-Za-z_][\w-]*:[ \t]*)[\s\S]*?\r?\n---[ \t]*(?=\r?\n|$)/)?.[0];
+  const normalizedMarkdown = frontmatter
+    ? frontmatter.replace(/[^\r\n]/g, ' ') + normalizedSource.slice(frontmatter.length)
+    : normalizedSource;
   const insertedNewlineOffsets = detailsSpacingInsertions(markdown);
   const tokens = marked.lexer(normalizedMarkdown) as TokensList;
   const links = tokens.links ?? {};
   const usedIds = new Map<string, number>();
   const blocks: Block[] = [];
   let sourceOffset = 0;
+
+  if (frontmatter) {
+    blocks.push({
+      id: hashKey('html', frontmatter.trim()),
+      kind: 'html',
+      markdown: frontmatter,
+      html: `<details class="frontmatter"><summary>Frontmatter</summary><pre><code>${escapeHtml(frontmatter)}</code></pre></details>`,
+      sourceStartLine: 1,
+      sourceEndLine: newlineCount(frontmatter) + 1,
+    });
+  }
 
   for (const token of tokens) {
     const raw = token.raw ?? '';

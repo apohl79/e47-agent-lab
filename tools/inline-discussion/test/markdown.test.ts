@@ -13,6 +13,53 @@ test('parseDoc assigns stable block IDs per top-level block', () => {
   assert.equal(result.blocks.every((block) => /^[0-9a-f]{10}$/.test(block.id)), true);
 });
 
+test('renderDoc collapses leading YAML frontmatter without shifting source lines', () => {
+  const md = '---\ntitle: Weekly <Activity>\nmetrics:\n  meetings: 36.6\n---\n\n# Weekly Activity\n';
+  const { blocks, html } = renderDoc(md);
+  assert.equal(blocks.length, 2);
+  assert.equal(blocks[0]?.kind, 'html');
+  assert.equal(blocks[0]?.sourceStartLine, 1);
+  assert.equal(blocks[0]?.sourceEndLine, 5);
+  assert.equal(blocks[0]?.markdown, md.slice(0, md.indexOf('\n\n#')));
+  assert.equal(blocks[1]?.kind, 'heading');
+  assert.equal(blocks[1]?.sourceStartLine, 7);
+  assert.equal(blocks[1]?.markdown, '# Weekly Activity\n');
+  assert.match(html, /<details[^>]*class="frontmatter"[^>]*><summary>Frontmatter<\/summary><pre><code>/);
+  assert.doesNotMatch(html, /<details[^>]*\sopen(?:=|[\s>])/);
+  assert.match(html, /title: Weekly &lt;Activity&gt;/);
+  assert.match(html, /meetings: 36\.6/);
+  assert.match(html, /Weekly Activity/);
+});
+
+test('renderDoc retains source lines after CRLF frontmatter', () => {
+  const { blocks } = renderDoc('---\r\ntitle: X\r\n---\r\n# H\r\n');
+  assert.equal(blocks[0]?.sourceEndLine, 3);
+  assert.equal(blocks[1]?.markdown.trim(), '# H');
+  assert.equal(blocks[1]?.sourceStartLine, 4);
+  assert.equal(blocks[1]?.sourceEndLine, 4);
+});
+
+test('parseDoc retains source lines after mixed-newline frontmatter', () => {
+  const { blocks } = parseDoc('---\r\ntitle: X\r\n---\r\n# H\n\n# I\n');
+  assert.equal(blocks[1]?.sourceStartLine, 4);
+  assert.equal(blocks[2]?.sourceStartLine, 6);
+  assert.equal(blocks[2]?.sourceEndLine, 6);
+});
+
+test('parseDoc retains ordinary horizontal rules and unclosed frontmatter', () => {
+  assert.equal(parseDoc('---\n\n# Heading\n').blocks[0]?.kind, 'hr');
+  assert.equal(parseDoc('---\ntitle: Open\n').blocks[0]?.kind, 'hr');
+  assert.equal(parseDoc('# Heading\n\n---\n').blocks.at(-1)?.kind, 'hr');
+  assert.deepEqual(
+    parseDoc('---\n\n# First\n\n---\n\n# Last\n').blocks.filter((block) => block.kind === 'heading').map((block) => block.markdown.trim()),
+    ['# First', '# Last'],
+  );
+  const nonleading = parseDoc('# Intro\n\n---\ntitle: Visible\n---\n\n# Outro\n').blocks;
+  assert.equal(nonleading[0]?.markdown.trim(), '# Intro');
+  assert.ok(nonleading.some((block) => block.markdown.includes('title: Visible')));
+  assert.equal(nonleading.at(-1)?.markdown.trim(), '# Outro');
+});
+
 test('parseDoc block IDs are stable for unchanged content', () => {
   const md = '# Same\n\nSame paragraph.\n';
   const a = parseDoc(md);
