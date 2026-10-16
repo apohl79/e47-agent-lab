@@ -5,6 +5,27 @@ import { JSDOM } from 'jsdom';
 
 const stylesheet = readFileSync(new URL('../src/web/app.css', import.meta.url), 'utf8');
 
+test('frontmatter uses one outer disclosure border without an inset code card', () => {
+  const dom = new JSDOM(`
+    <style>${stylesheet}</style>
+    <main id="doc">
+      <details class="frontmatter" open>
+        <summary>Frontmatter</summary><pre><code>title: Example</code></pre>
+      </details>
+    </main>
+  `);
+  const details = dom.window.document.querySelector<HTMLElement>('details');
+  const pre = dom.window.document.querySelector<HTMLElement>('pre');
+
+  assert.ok(details);
+  assert.ok(pre);
+  assert.match(stylesheet, /#doc details \{[^}]*border: 1px solid var\(--border\)/);
+  assert.equal(dom.window.getComputedStyle(pre).border, '0px');
+  assert.equal(dom.window.getComputedStyle(pre).borderRadius, '0');
+  assert.equal(dom.window.getComputedStyle(pre).backgroundColor, 'rgba(0, 0, 0, 0)');
+  assert.equal(dom.window.getComputedStyle(pre).boxShadow, 'none');
+});
+
 test('thread annotation styles preserve active response bubble geometry', () => {
   const dom = new JSDOM(`
     <style>${stylesheet}</style>

@@ -1663,6 +1663,10 @@ blockquote.quote,
 
 #doc details.frontmatter pre {
   margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
   overflow-x: auto;
   font-family: var(--font-mono, monospace);
   font-size: 0.85em;
