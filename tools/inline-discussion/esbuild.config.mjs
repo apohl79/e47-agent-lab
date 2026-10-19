@@ -56,5 +56,6 @@ await build({
 // Static files
 await copyFile(join(__dirname, 'src/web/index.html'), join(distDir, 'index.html'));
 await copyFile(join(__dirname, 'src/web/app.css'), join(distDir, 'app.css'));
+await copyFile(join(__dirname, 'src/web/favicon.svg'), join(distDir, 'favicon.svg'));
 
 console.log('dist/ rebuilt');

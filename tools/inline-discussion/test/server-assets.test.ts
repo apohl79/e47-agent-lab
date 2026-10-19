@@ -1,10 +1,42 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from '../src/server.ts';
 import { mockAgentFactory } from '../src/agent.ts';
+
+test('serves the adaptive website favicon as a same-origin SVG asset', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ind-favicon-'));
+  mkdirSync(join(root, '.git'));
+  const docPath = join(root, 'note.md');
+  writeFileSync(docPath, '# Note\n');
+  const staticDir = join(root, 'static');
+  mkdirSync(staticDir);
+  writeFileSync(join(staticDir, 'index.html'), '<link rel="icon" type="image/svg+xml" href="/favicon.svg">');
+  writeFileSync(join(staticDir, 'favicon.svg'), readFileSync(new URL('../src/web/favicon.svg', import.meta.url)));
+  const transcriptPath = join(root, 'session.jsonl');
+  writeFileSync(transcriptPath, JSON.stringify({ type: 'user', text: 'hi' }));
+
+  const { port, close } = await createServer({
+    docPath,
+    sessionDir: join(root, 'session'),
+    mainJsonlPath: transcriptPath,
+    prefsPath: join(root, 'prefs.json'),
+    staticDir,
+    agentFactory: mockAgentFactory({ reply: 'r', conclusion: 'c' }),
+    shutdownOnFinish: false,
+  });
+  const page = await fetch(`http://127.0.0.1:${port}/`);
+  const favicon = await fetch(`http://127.0.0.1:${port}/favicon.svg`);
+
+  assert.equal(page.status, 200);
+  assert.match(await page.text(), /href="\/favicon\.svg"/);
+  assert.equal(favicon.status, 200);
+  assert.equal(favicon.headers.get('content-type'), 'image/svg+xml');
+  assert.match(await favicon.text(), /prefers-color-scheme: dark/);
+  await close();
+});
 
 test('serves media stored beside a converted discussion document', async () => {
   const root = mkdtempSync(join(tmpdir(), 'ind-assets-'));
