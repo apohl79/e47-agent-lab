@@ -50,12 +50,13 @@ HELP = "\n".join(
         "/help — show commands",
         "/list — list approved workspaces",
         "/list <workspace> — list project directories",
-        "/sessions [search string] — list resumable sessions",
+        "/sessions [project-path filter] — list matching sessions newest first",
         "/attach <num> — enable Matrix in a listed session",
         "/detach — disable Matrix in this session",
         "/start <project dir> — create and enable a session (prefix workspace when needed)",
     ]
 )
+MAX_SESSION_TITLE_LENGTH = 64
 
 
 def workspaces(client: SessionScriptClient) -> dict[str, Path]:
@@ -108,6 +109,13 @@ def session_name(row: dict[str, Any]) -> str:
     return row.get("name") or row.get("preview") or row["id"]
 
 
+def display_session_name(row: dict[str, Any]) -> str:
+    name = session_name(row)
+    if len(name) > MAX_SESSION_TITLE_LENGTH:
+        return f"{name[: MAX_SESSION_TITLE_LENGTH - 1]}…"
+    return name
+
+
 def update_timestamp(row: dict[str, Any]) -> str:
     updated_at = row.get("updatedAt")
     if not isinstance(updated_at, (int, float)) or isinstance(updated_at, bool):
@@ -120,32 +128,22 @@ def update_timestamp(row: dict[str, Any]) -> str:
         return "unknown"
 
 
-def session_rows(client: SessionScriptClient, search: str) -> list[dict[str, Any]]:
+def session_rows(client: SessionScriptClient) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     cursor: str | None = None
-    method = "thread/search" if search else "thread/list"
     for _ in range(10):
         params: dict[str, Any] = {
             "sortKey": "updated_at",
             "sortDirection": "desc",
             "limit": 100,
         }
-        if search:
-            params["searchTerm"] = search
         if cursor:
             params["cursor"] = cursor
-        page = client.request(method, params)
+        page = client.request("thread/list", params)
         data = page.get("data")
         if not isinstance(data, list):
-            raise RpcError("invalid session search response")
-        if method == "thread/list":
-            rows.extend(row for row in data if isinstance(row, dict))
-        else:
-            rows.extend(
-                row["thread"]
-                for row in data
-                if isinstance(row, dict) and isinstance(row.get("thread"), dict)
-            )
+            raise RpcError("invalid session list response")
+        rows.extend(row for row in data if isinstance(row, dict))
         cursor = page.get("nextCursor")
         if not isinstance(cursor, str) or not cursor:
             break
@@ -294,14 +292,17 @@ class HostChat:
                 )
             ) or "No project directories."
         if command == "/sessions":
-            self.matches = [
-                row for row in session_rows(self.client, argument)
-                if row.get("id") != self.thread_id
-                and isinstance(row.get("cwd"), str)
-                and workspace_project(self.roots, row["cwd"]) is not None
-            ]
+            search = argument.casefold()
+            self.matches = []
+            for row in session_rows(self.client):
+                cwd = row.get("cwd")
+                if row.get("id") == self.thread_id or not isinstance(cwd, str):
+                    continue
+                project = workspace_project(self.roots, cwd)
+                if project is not None and (not search or search in project.casefold()):
+                    self.matches.append(row)
             return "\n".join(
-                f"{number} {session_name(row)}\n"
+                f"{number} {display_session_name(row)}\n"
                 f"`  {update_timestamp(row)}`\n"
                 f"`  {workspace_project(self.roots, row['cwd'])}`"
                 for number, row in enumerate(self.matches, 1)

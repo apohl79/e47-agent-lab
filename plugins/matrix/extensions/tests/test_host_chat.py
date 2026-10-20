@@ -68,26 +68,40 @@ def test_host_room_uses_short_hostname(monkeypatch: pytest.MonkeyPatch) -> None:
     user.join_room.assert_called_once_with("!host:example.org")
 
 
-def test_session_search_matches_content_and_numbers_only_approved_paths(
+def test_session_search_matches_project_paths_not_titles_or_transcripts(
     tmp_path: Path,
 ) -> None:
     client = Mock()
     client.request.return_value = {
         "data": [
             {
-                "thread": {
-                    "id": "first",
-                    "name": "Unrelated title",
-                    "cwd": str(tmp_path / "one"),
-                    "updatedAt": 1_700_000_000,
-                }
+                "id": "folder-match",
+                "name": "Unrelated title",
+                "cwd": str(tmp_path / "code" / "e47-agent-lab"),
+                "updatedAt": 1_700_000_000,
             },
             {
-                "thread": {
-                    "id": "outside",
-                    "name": "Unrelated title",
-                    "cwd": "/tmp/outside",
-                }
+                "id": "title-only",
+                "name": "e47 appears only in the title",
+                "cwd": str(tmp_path / "random"),
+                "updatedAt": 1_700_000_001,
+            },
+            {
+                "id": "codex",
+                "name": "Session Name Generation",
+                "cwd": str(tmp_path / "code" / "codex"),
+                "updatedAt": 1_700_000_002,
+            },
+            {
+                "id": "host-chat",
+                "name": "Matrix host chat",
+                "cwd": str(tmp_path / "code" / "e47-agent-lab"),
+                "updatedAt": 1_700_000_003,
+            },
+            {
+                "id": "outside",
+                "name": "e47 elsewhere",
+                "cwd": "/tmp/e47",
             },
         ],
         "nextCursor": None,
@@ -97,18 +111,19 @@ def test_session_search_matches_content_and_numbers_only_approved_paths(
     chat.roots = {"work": tmp_path}
     chat.thread_id = "host-chat"
     chat.matches = []
-    result = chat.handle("/sessions unique-term")
+    result = chat.handle("/sessions e47")
     timestamp = host_chat.update_timestamp({"updatedAt": 1_700_000_000})
-    assert result == f"1 Unrelated title\n`  {timestamp}`\n`  work/one`"
-    assert [row["id"] for row in chat.matches] == ["first"]
+    assert result == (
+        f"1 Unrelated title\n`  {timestamp}`\n`  work/code/e47-agent-lab`"
+    )
+    assert [row["id"] for row in chat.matches] == ["folder-match"]
     assert chat.handle("/attach 2") == "Use a number from the last /sessions result."
     client.request.assert_called_once_with(
-        "thread/search",
+        "thread/list",
         {
             "sortKey": "updated_at",
             "sortDirection": "desc",
             "limit": 100,
-            "searchTerm": "unique-term",
         },
     )
 
@@ -121,20 +136,16 @@ def test_session_search_preserves_newest_first_order_across_pages(
         {
             "data": [
                 {
-                    "thread": {
-                        "id": "newest",
-                        "name": "Zebra title",
-                        "cwd": str(tmp_path / "project-a"),
-                        "updatedAt": 1_700_000_003,
-                    }
+                    "id": "newest",
+                    "name": "Zebra title",
+                    "cwd": str(tmp_path / "e47-project-a"),
+                    "updatedAt": 1_700_000_003,
                 },
                 {
-                    "thread": {
-                        "id": "host-chat",
-                        "name": "Matrix Host Chat Session",
-                        "cwd": str(tmp_path / "project-a"),
-                        "updatedAt": 1_700_000_004,
-                    }
+                    "id": "unmatched",
+                    "name": "Session Name Generation",
+                    "cwd": str(tmp_path / "code" / "codex"),
+                    "updatedAt": 1_700_000_004,
                 },
             ],
             "nextCursor": "page-two",
@@ -142,12 +153,10 @@ def test_session_search_preserves_newest_first_order_across_pages(
         {
             "data": [
                 {
-                    "thread": {
-                        "id": "older",
-                        "name": "Alpha title",
-                        "cwd": str(tmp_path / "project-b"),
-                        "updatedAt": 1_700_000_001,
-                    }
+                    "id": "older",
+                    "name": "Alpha title",
+                    "cwd": str(tmp_path / "e47-project-b"),
+                    "updatedAt": 1_700_000_001,
                 }
             ],
             "nextCursor": None,
@@ -159,30 +168,55 @@ def test_session_search_preserves_newest_first_order_across_pages(
     chat.thread_id = "host-chat"
     chat.matches = []
 
-    result = chat.handle("/sess unique-term")
+    result = chat.handle("/sess e47")
 
     assert [row["id"] for row in chat.matches] == ["newest", "older"]
     assert result.startswith("1 Zebra title\n")
     assert "\n2 Alpha title\n" in result
     assert client.request.call_args_list[0].args == (
-        "thread/search",
+        "thread/list",
         {
             "sortKey": "updated_at",
             "sortDirection": "desc",
             "limit": 100,
-            "searchTerm": "unique-term",
         },
     )
     assert client.request.call_args_list[1].args == (
-        "thread/search",
+        "thread/list",
         {
             "sortKey": "updated_at",
             "sortDirection": "desc",
             "limit": 100,
-            "searchTerm": "unique-term",
             "cursor": "page-two",
         },
     )
+
+
+def test_session_titles_are_truncated_to_64_characters(tmp_path: Path) -> None:
+    client = Mock()
+    client.request.return_value = {
+        "data": [
+            {
+                "id": "long-title",
+                "name": "e47 " + "prompt " * 20,
+                "cwd": str(tmp_path / "e47-project"),
+                "updatedAt": 1_700_000_000,
+            }
+        ],
+        "nextCursor": None,
+    }
+    chat = host_chat.HostChat.__new__(host_chat.HostChat)
+    chat.client = client
+    chat.roots = {"work": tmp_path}
+    chat.thread_id = "host-chat"
+    chat.matches = []
+
+    result = chat.handle("/sessions e47")
+
+    title = result.splitlines()[0][2:]
+    assert len(title) == 64
+    assert title.endswith("…")
+    assert chat.matches[0]["name"] == "e47 " + "prompt " * 20
 
 
 def test_sessions_without_search_lists_all_approved_project_paths(tmp_path: Path) -> None:
