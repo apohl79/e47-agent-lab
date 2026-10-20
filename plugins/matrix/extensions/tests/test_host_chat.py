@@ -73,14 +73,13 @@ def test_session_search_numbers_only_approved_project_paths(tmp_path: Path) -> N
     client.request.return_value = {
         "data": [
             {
-                "thread": {
                     "id": "first",
                     "name": "First",
                     "cwd": str(tmp_path / "one"),
                     "updatedAt": 1_700_000_000,
-                }
             },
-            {"thread": {"id": "outside", "name": "Other", "cwd": "/tmp/outside"}},
+            {"id": "outside", "name": "First outside", "cwd": "/tmp/outside"},
+            {"id": "unrelated", "name": "Other", "cwd": str(tmp_path / "other")},
         ],
         "nextCursor": None,
     }
@@ -94,6 +93,37 @@ def test_session_search_numbers_only_approved_project_paths(tmp_path: Path) -> N
     assert result == f"1 First\n`  {timestamp}`\n`  work/one`"
     assert [row["id"] for row in chat.matches] == ["first"]
     assert chat.handle("/attach 2") == "Use a number from the last /sessions result."
+    client.request.assert_called_once_with(
+        "thread/list", {"sortKey": "updated_at", "limit": 100}
+    )
+
+
+def test_session_prefix_filters_names_and_paths_across_pages(tmp_path: Path) -> None:
+    client = Mock()
+    client.request.side_effect = [
+        {"data": [{"id": "other", "name": "Other", "cwd": str(tmp_path / "other")}],
+         "nextCursor": "page-two"},
+        {"data": [
+            {"id": "path", "name": "Path match", "cwd": str(tmp_path / "e47-agent-lab")},
+            {"id": "name", "name": "E47 work", "cwd": str(tmp_path / "another")},
+            {"id": "host-chat", "name": "E47 host", "cwd": str(tmp_path / "e47")},
+        ], "nextCursor": None},
+    ]
+    chat = host_chat.HostChat.__new__(host_chat.HostChat)
+    chat.client = client
+    chat.roots = {"work": tmp_path}
+    chat.thread_id = "host-chat"
+    chat.matches = []
+
+    result = chat.handle("/sess e47")
+
+    assert [row["id"] for row in chat.matches] == ["name", "path"]
+    assert "1 E47 work" in result
+    assert "2 Path match" in result
+    assert "Other" not in result
+    assert client.request.call_args_list[1].args == (
+        "thread/list", {"sortKey": "updated_at", "limit": 100, "cursor": "page-two"}
+    )
 
 
 def test_sessions_without_search_lists_all_approved_project_paths(tmp_path: Path) -> None:
