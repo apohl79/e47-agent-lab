@@ -120,18 +120,32 @@ def update_timestamp(row: dict[str, Any]) -> str:
         return "unknown"
 
 
-def session_rows(client: SessionScriptClient) -> list[dict[str, Any]]:
+def session_rows(client: SessionScriptClient, search: str) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     cursor: str | None = None
+    method = "thread/search" if search else "thread/list"
     for _ in range(10):
-        params: dict[str, Any] = {"sortKey": "updated_at", "limit": 100}
+        params: dict[str, Any] = {
+            "sortKey": "updated_at",
+            "sortDirection": "desc",
+            "limit": 100,
+        }
+        if search:
+            params["searchTerm"] = search
         if cursor:
             params["cursor"] = cursor
-        page = client.request("thread/list", params)
+        page = client.request(method, params)
         data = page.get("data")
         if not isinstance(data, list):
             raise RpcError("invalid session search response")
-        rows.extend(row for row in data if isinstance(row, dict))
+        if method == "thread/list":
+            rows.extend(row for row in data if isinstance(row, dict))
+        else:
+            rows.extend(
+                row["thread"]
+                for row in data
+                if isinstance(row, dict) and isinstance(row.get("thread"), dict)
+            )
         cursor = page.get("nextCursor")
         if not isinstance(cursor, str) or not cursor:
             break
@@ -281,23 +295,11 @@ class HostChat:
             ) or "No project directories."
         if command == "/sessions":
             self.matches = [
-                row for row in session_rows(self.client)
+                row for row in session_rows(self.client, argument)
                 if row.get("id") != self.thread_id
                 and isinstance(row.get("cwd"), str)
                 and workspace_project(self.roots, row["cwd"]) is not None
-                and (
-                    argument.casefold() in session_name(row).casefold()
-                    or argument.casefold() in (
-                        workspace_project(self.roots, row["cwd"]) or ""
-                    ).casefold()
-                )
             ]
-            self.matches.sort(
-                key=lambda row: (
-                    (workspace_project(self.roots, row["cwd"]) or "").casefold(),
-                    session_name(row).casefold(),
-                )
-            )
             return "\n".join(
                 f"{number} {session_name(row)}\n"
                 f"`  {update_timestamp(row)}`\n"

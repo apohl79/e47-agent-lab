@@ -68,18 +68,27 @@ def test_host_room_uses_short_hostname(monkeypatch: pytest.MonkeyPatch) -> None:
     user.join_room.assert_called_once_with("!host:example.org")
 
 
-def test_session_search_numbers_only_approved_project_paths(tmp_path: Path) -> None:
+def test_session_search_matches_content_and_numbers_only_approved_paths(
+    tmp_path: Path,
+) -> None:
     client = Mock()
     client.request.return_value = {
         "data": [
             {
+                "thread": {
                     "id": "first",
-                    "name": "First",
+                    "name": "Unrelated title",
                     "cwd": str(tmp_path / "one"),
                     "updatedAt": 1_700_000_000,
+                }
             },
-            {"id": "outside", "name": "First outside", "cwd": "/tmp/outside"},
-            {"id": "unrelated", "name": "Other", "cwd": str(tmp_path / "other")},
+            {
+                "thread": {
+                    "id": "outside",
+                    "name": "Unrelated title",
+                    "cwd": "/tmp/outside",
+                }
+            },
         ],
         "nextCursor": None,
     }
@@ -88,26 +97,61 @@ def test_session_search_numbers_only_approved_project_paths(tmp_path: Path) -> N
     chat.roots = {"work": tmp_path}
     chat.thread_id = "host-chat"
     chat.matches = []
-    result = chat.handle("/sessions first")
+    result = chat.handle("/sessions unique-term")
     timestamp = host_chat.update_timestamp({"updatedAt": 1_700_000_000})
-    assert result == f"1 First\n`  {timestamp}`\n`  work/one`"
+    assert result == f"1 Unrelated title\n`  {timestamp}`\n`  work/one`"
     assert [row["id"] for row in chat.matches] == ["first"]
     assert chat.handle("/attach 2") == "Use a number from the last /sessions result."
     client.request.assert_called_once_with(
-        "thread/list", {"sortKey": "updated_at", "limit": 100}
+        "thread/search",
+        {
+            "sortKey": "updated_at",
+            "sortDirection": "desc",
+            "limit": 100,
+            "searchTerm": "unique-term",
+        },
     )
 
 
-def test_session_prefix_filters_names_and_paths_across_pages(tmp_path: Path) -> None:
+def test_session_search_preserves_newest_first_order_across_pages(
+    tmp_path: Path,
+) -> None:
     client = Mock()
     client.request.side_effect = [
-        {"data": [{"id": "other", "name": "Other", "cwd": str(tmp_path / "other")}],
-         "nextCursor": "page-two"},
-        {"data": [
-            {"id": "path", "name": "Path match", "cwd": str(tmp_path / "e47-agent-lab")},
-            {"id": "name", "name": "E47 work", "cwd": str(tmp_path / "another")},
-            {"id": "host-chat", "name": "E47 host", "cwd": str(tmp_path / "e47")},
-        ], "nextCursor": None},
+        {
+            "data": [
+                {
+                    "thread": {
+                        "id": "newest",
+                        "name": "Zebra title",
+                        "cwd": str(tmp_path / "project-a"),
+                        "updatedAt": 1_700_000_003,
+                    }
+                },
+                {
+                    "thread": {
+                        "id": "host-chat",
+                        "name": "Matrix Host Chat Session",
+                        "cwd": str(tmp_path / "project-a"),
+                        "updatedAt": 1_700_000_004,
+                    }
+                },
+            ],
+            "nextCursor": "page-two",
+        },
+        {
+            "data": [
+                {
+                    "thread": {
+                        "id": "older",
+                        "name": "Alpha title",
+                        "cwd": str(tmp_path / "project-b"),
+                        "updatedAt": 1_700_000_001,
+                    }
+                }
+            ],
+            "nextCursor": None,
+        },
     ]
     chat = host_chat.HostChat.__new__(host_chat.HostChat)
     chat.client = client
@@ -115,14 +159,29 @@ def test_session_prefix_filters_names_and_paths_across_pages(tmp_path: Path) -> 
     chat.thread_id = "host-chat"
     chat.matches = []
 
-    result = chat.handle("/sess e47")
+    result = chat.handle("/sess unique-term")
 
-    assert [row["id"] for row in chat.matches] == ["name", "path"]
-    assert "1 E47 work" in result
-    assert "2 Path match" in result
-    assert "Other" not in result
+    assert [row["id"] for row in chat.matches] == ["newest", "older"]
+    assert result.startswith("1 Zebra title\n")
+    assert "\n2 Alpha title\n" in result
+    assert client.request.call_args_list[0].args == (
+        "thread/search",
+        {
+            "sortKey": "updated_at",
+            "sortDirection": "desc",
+            "limit": 100,
+            "searchTerm": "unique-term",
+        },
+    )
     assert client.request.call_args_list[1].args == (
-        "thread/list", {"sortKey": "updated_at", "limit": 100, "cursor": "page-two"}
+        "thread/search",
+        {
+            "sortKey": "updated_at",
+            "sortDirection": "desc",
+            "limit": 100,
+            "searchTerm": "unique-term",
+            "cursor": "page-two",
+        },
     )
 
 
@@ -138,31 +197,31 @@ def test_sessions_without_search_lists_all_approved_project_paths(tmp_path: Path
                 "id": "beta",
                 "name": "Beta",
                 "cwd": str(workspace / "project-b"),
-                "updatedAt": 1_700_000_000,
+                "updatedAt": 1_700_000_003,
             },
             {
                 "id": "zulu",
                 "name": "Zulu",
                 "cwd": str(workspace / "project-a"),
-                "updatedAt": 1_700_000_000,
+                "updatedAt": 1_700_000_002,
+            },
+            {
+                "id": "host-chat",
+                "name": "Matrix Host Chat Session",
+                "cwd": str(workspace / "project-a"),
+                "updatedAt": 1_700_000_004,
+            },
+            {
+                "id": "alpha",
+                "name": "Alpha",
+                "cwd": str(workspace / "project-a"),
+                "updatedAt": 1_700_000_001,
             },
             {
                 "id": "other",
                 "name": "Alpha",
                 "cwd": str(other_workspace / "project-a"),
                 "updatedAt": 1_700_000_000,
-            },
-            {
-                "id": "alpha",
-                "name": "Alpha",
-                "cwd": str(workspace / "project-a"),
-                "updatedAt": 1_700_000_000,
-            },
-            {
-                "id": "host-chat",
-                "name": "Matrix Host Chat Session",
-                "cwd": str(workspace / "project-a"),
-                "updatedAt": 1_700_000_001,
             },
             {"id": "outside", "name": "Other", "cwd": "/tmp/outside"},
         ],
@@ -175,30 +234,30 @@ def test_sessions_without_search_lists_all_approved_project_paths(tmp_path: Path
     chat.matches = []
 
     result = chat.handle("/sessions")
+    assert [row["id"] for row in chat.matches] == ["beta", "zulu", "alpha", "other"]
     assert result == (
-        f"1 Alpha\n`  {host_chat.update_timestamp({'updatedAt': 1_700_000_000})}`\n"
-        "`  other/project-a`\n"
-        f"2 Alpha\n`  {host_chat.update_timestamp({'updatedAt': 1_700_000_000})}`\n"
+        f"1 Beta\n`  {host_chat.update_timestamp({'updatedAt': 1_700_000_003})}`\n"
+        "`  work/project-b`\n"
+        f"2 Zulu\n`  {host_chat.update_timestamp({'updatedAt': 1_700_000_002})}`\n"
         "`  work/project-a`\n"
-        f"3 Zulu\n`  {host_chat.update_timestamp({'updatedAt': 1_700_000_000})}`\n"
+        f"3 Alpha\n`  {host_chat.update_timestamp({'updatedAt': 1_700_000_001})}`\n"
         "`  work/project-a`\n"
-        f"4 Beta\n`  {host_chat.update_timestamp({'updatedAt': 1_700_000_000})}`\n"
-        "`  work/project-b`"
+        f"4 Alpha\n`  {host_chat.update_timestamp({'updatedAt': 1_700_000_000})}`\n"
+        "`  other/project-a`"
     )
     assert matrix.matrix_formatted_body(result) == (
-        f"<p>1 Alpha<br><code>  {host_chat.update_timestamp({'updatedAt': 1_700_000_000})}</code><br>"
-        "<code>  other/project-a</code><br>"
-        f"2 Alpha<br><code>  {host_chat.update_timestamp({'updatedAt': 1_700_000_000})}</code><br>"
+        f"<p>1 Beta<br><code>  {host_chat.update_timestamp({'updatedAt': 1_700_000_003})}</code><br>"
+        "<code>  work/project-b</code><br>"
+        f"2 Zulu<br><code>  {host_chat.update_timestamp({'updatedAt': 1_700_000_002})}</code><br>"
         "<code>  work/project-a</code><br>"
-        f"3 Zulu<br><code>  {host_chat.update_timestamp({'updatedAt': 1_700_000_000})}</code><br>"
+        f"3 Alpha<br><code>  {host_chat.update_timestamp({'updatedAt': 1_700_000_001})}</code><br>"
         "<code>  work/project-a</code><br>"
-        f"4 Beta<br><code>  {host_chat.update_timestamp({'updatedAt': 1_700_000_000})}</code><br>"
-        "<code>  work/project-b</code></p>"
+        f"4 Alpha<br><code>  {host_chat.update_timestamp({'updatedAt': 1_700_000_000})}</code><br>"
+        "<code>  other/project-a</code></p>"
     )
-    assert [row["id"] for row in chat.matches] == ["other", "alpha", "zulu", "beta"]
     client.request.assert_called_once_with(
         "thread/list",
-        {"sortKey": "updated_at", "limit": 100},
+        {"sortKey": "updated_at", "sortDirection": "desc", "limit": 100},
     )
 
 
