@@ -41,6 +41,117 @@ def test_workspaces_use_host_config_only(tmp_path: Path) -> None:
         host_chat.workspaces(client)
 
 
+def test_start_substring_choices(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in ("project-abc-2", "project-abc-1", "other"):
+        (tmp_path / "code" / name).mkdir(parents=True)
+    chat = host_chat.HostChat.__new__(host_chat.HostChat)
+    chat.roots = {"work": tmp_path}
+    chat.client = Mock()
+    chat.client.request.return_value = {"thread": {"id": "new"}}
+    enable = Mock()
+    monkeypatch.setattr(host_chat, "extension_command", enable)
+
+    assert chat.handle("/start ABC") == (
+        "I found 2 directories matching your request, please choose:\n"
+        "1 project-abc-1\n2 project-abc-2"
+    )
+    for invalid in ("0", "3", "hello", "1 extra"):
+        assert chat.handle(invalid) == "Please choose a directory by number (1–2)."
+    chat.client.request.assert_not_called()
+    assert chat.handle("2") == "Started project-abc-2 and enabled Matrix."
+    chat.client.request.assert_called_once_with(
+        "thread/start", {"cwd": str(tmp_path / "code" / "project-abc-2")}
+    )
+    enable.assert_called_once_with(chat.client, "new", "on")
+    assert not chat.project_choices
+
+
+def test_start_exact_unique_missing_and_cancel(tmp_path: Path) -> None:
+    (tmp_path / "abc").mkdir()
+    (tmp_path / "abc-other").mkdir()
+    chat = host_chat.HostChat.__new__(host_chat.HostChat)
+    chat.roots = {"work": tmp_path}
+    chat.start_project = Mock(return_value="started")
+    assert chat.handle("/start abc") == "started"
+    chat.start_project.assert_called_with(tmp_path / "abc")
+    assert chat.handle("/start other") == "started"
+    chat.start_project.assert_called_with(tmp_path / "abc-other")
+    assert chat.handle("/start missing") == "No project directories match your request."
+    assert chat.handle("/start ab").startswith("I found 2 directories")
+    assert chat.handle("/help") == host_chat.HELP
+    assert not chat.project_choices
+
+
+def test_start_choices_revalidate_directory(tmp_path: Path) -> None:
+    for name in ("abc-1", "abc-2"):
+        (tmp_path / name).mkdir()
+    chat = host_chat.HostChat.__new__(host_chat.HostChat)
+    chat.roots = {"work": tmp_path}
+    chat.start_project = Mock()
+    chat.handle("/start abc")
+    (tmp_path / "abc-1").rmdir()
+    (tmp_path / "abc-1").symlink_to(tmp_path.parent, target_is_directory=True)
+    with pytest.raises(ValueError):
+        chat.handle("1")
+    chat.start_project.assert_not_called()
+
+
+def test_start_search_workspace_scope_and_boundaries(tmp_path: Path) -> None:
+    root = tmp_path / "work"
+    root.mkdir()
+    (root / "project-abc").mkdir()
+    (root / "escape-abc").symlink_to(tmp_path.parent, target_is_directory=True)
+    roots = {"work": root, "other": tmp_path / "missing"}
+    assert host_chat.matching_projects(roots, "work/abc") == [
+        ("work/project-abc", root / "project-abc")
+    ]
+    for argument in ("", "/tmp", "../abc", "work/../abc", "work/", "."):
+        with pytest.raises(ValueError):
+            host_chat.matching_projects(roots, argument)
+
+
+def test_start_duplicate_directory_names_show_full_paths(tmp_path: Path) -> None:
+    for path in ("one/project-abc", "two/project-abc"):
+        (tmp_path / path).mkdir(parents=True)
+    chat = host_chat.HostChat.__new__(host_chat.HostChat)
+    chat.roots = {"work": tmp_path}
+    chat.client = Mock()
+    chat.handle("/start abc")
+    assert chat.handle("/start abc") == (
+        "I found 2 directories matching your request, please choose:\n"
+        "1 work/one/project-abc\n2 work/two/project-abc"
+    )
+
+
+def test_start_choices_sort_by_display_name_not_parent_path(
+    tmp_path: Path,
+) -> None:
+    for path in ("one/z-abc", "two/a-abc"):
+        (tmp_path / path).mkdir(parents=True)
+    chat = host_chat.HostChat.__new__(host_chat.HostChat)
+    chat.roots = {"work": tmp_path}
+    chat.client = Mock()
+    result = chat.handle("/start abc")
+    assert result == (
+        "I found 2 directories matching your request, please choose:\n"
+        "1 a-abc\n2 z-abc"
+    )
+    assert [path.name for _label, path in chat.project_choices] == ["a-abc", "z-abc"]
+
+
+def test_start_selection_failure_clears_choice(tmp_path: Path) -> None:
+    for name in ("abc-1", "abc-2"):
+        (tmp_path / name).mkdir()
+    chat = host_chat.HostChat.__new__(host_chat.HostChat)
+    chat.roots = {"work": tmp_path}
+    chat.client = Mock()
+    chat.client.request.side_effect = host_chat.RpcError("start failed")
+    chat.handle("/start abc")
+    with pytest.raises(host_chat.RpcError, match="start failed"):
+        chat.handle("1")
+    assert not chat.project_choices
+
+
 def test_host_room_uses_short_hostname(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(host_chat.socket, "gethostname", lambda: "leda.example.org")
     agent = Mock()

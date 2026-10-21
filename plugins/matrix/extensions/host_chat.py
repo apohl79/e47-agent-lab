@@ -105,6 +105,39 @@ def workspace_project(roots: dict[str, Path], cwd: str) -> str | None:
     return None
 
 
+def matching_projects(roots: dict[str, Path], text: str) -> list[tuple[str, Path]]:
+    if not text or text.startswith("/") or "\\" in text or "\x00" in text or ".." in Path(text).parts:
+        raise ValueError("Use /start <project dir> inside an approved workspace.")
+    workspace, separator, relative = text.partition("/")
+    selected_roots = roots
+    if separator and workspace in roots:
+        selected_roots = {workspace: roots[workspace]}
+        text = relative
+    if not text or text == ".":
+        raise ValueError("Use /start <project dir> inside an approved workspace.")
+    exact = []
+    for name, root in selected_roots.items():
+        path = root / text
+        if path.is_dir() and path.resolve().is_relative_to(root):
+            exact.append((f"{name}/{text}", path))
+    if exact:
+        return sorted(exact)
+    matches = []
+    for name, root in selected_roots.items():
+        for directory, children, _files in os.walk(root):
+            children[:] = [
+                child for child in children
+                if not (Path(directory) / child).is_symlink()
+            ]
+            for child in children:
+                path = Path(directory) / child
+                relative_path = path.relative_to(root).as_posix()
+                entry = (f"{name}/{relative_path}", path)
+                if text.casefold() in relative_path.casefold():
+                    matches.append(entry)
+    return sorted(matches, key=lambda entry: (entry[0].casefold(), entry[0]))
+
+
 def session_name(row: dict[str, Any]) -> str:
     return row.get("name") or row.get("preview") or row["id"]
 
@@ -181,6 +214,7 @@ class HostChat:
         self.client = client
         self.roots = workspaces(client)
         self.matches: list[dict[str, Any]] = []
+        self.project_choices: list[tuple[str, Path]] = []
         self.thread_id = self._home_session()
         self.active_turn_id: str | None = None
         raw = load_settings()
@@ -257,6 +291,14 @@ class HostChat:
     def handle(self, message: str) -> str | None:
         command, _, argument = message.strip().partition(" ")
         argument = argument.strip()
+        choices = getattr(self, "project_choices", [])
+        if choices and not command.startswith("/"):
+            if not message.strip().isdecimal() or not 1 <= int(message.strip()) <= len(choices):
+                return f"Please choose a directory by number (1–{len(choices)})."
+            label, _path = choices[int(message.strip()) - 1]
+            self.project_choices = []
+            return self.start_project(project_path(self.roots, label))
+        self.project_choices = []
         if command.startswith("/"):
             matches = [candidate for candidate in COMMANDS if candidate.startswith(command)]
             if len(matches) == 1:
@@ -317,11 +359,29 @@ class HostChat:
         if command == "/detach":
             return "The host chat stays connected. Send /detach in a session room."
         if command == "/start":
-            path = project_path(self.roots, argument)
-            result = self.client.request("thread/start", {"cwd": str(path)})
-            thread_id = result["thread"]["id"]
-            extension_command(self.client, thread_id, "on")
-            return f"Started {path.name} and enabled Matrix."
+            choices = matching_projects(self.roots, argument)
+            if not choices:
+                return "No project directories match your request."
+            if len(choices) == 1:
+                return self.start_project(project_path(self.roots, choices[0][0]))
+            display_names = [path.name for _label, path in choices]
+            if len({name.casefold() for name in display_names}) != len(display_names):
+                choices = sorted(choices, key=lambda entry: (entry[0].casefold(), entry[0]))
+                display_names = [label for label, _path in choices]
+            else:
+                choices = sorted(
+                    choices,
+                    key=lambda entry: (entry[1].name.casefold(), entry[1].name),
+                )
+                display_names = [path.name for _label, path in choices]
+            self.project_choices = choices
+            return (
+                f"I found {len(choices)} directories matching your request, please choose:\n"
+                + "\n".join(
+                    f"{number} {name}"
+                    for number, name in enumerate(display_names, 1)
+                )
+            )
         if command.startswith("/"):
             return "Unknown command. Send /help for available commands."
         payload = {
@@ -338,6 +398,12 @@ class HostChat:
             if isinstance(turn, dict) and isinstance(turn.get("id"), str):
                 self.active_turn_id = turn["id"]
         return None
+
+    def start_project(self, path: Path) -> str:
+        result = self.client.request("thread/start", {"cwd": str(path)})
+        thread_id = result["thread"]["id"]
+        extension_command(self.client, thread_id, "on")
+        return f"Started {path.name} and enabled Matrix."
 
     def run(self) -> None:
         initial = self.user.sync(self.room_id, None, 0)
