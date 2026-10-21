@@ -41,6 +41,135 @@ def test_workspaces_use_host_config_only(tmp_path: Path) -> None:
         host_chat.workspaces(client)
 
 
+def test_start_substring_choices(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in ("project-abc-2", "project-abc-1", "other"):
+        (tmp_path / "code" / name).mkdir(parents=True)
+    chat = host_chat.HostChat.__new__(host_chat.HostChat)
+    chat.roots = {"work": tmp_path}
+    chat.client = Mock()
+    chat.client.request.return_value = {"thread": {"id": "new"}}
+    enable = Mock()
+    monkeypatch.setattr(host_chat, "extension_command", enable)
+
+    assert chat.handle("/start ABC") == (
+        "I found 2 directories matching your request, please choose:\n"
+        "1 project-abc-1\n2 project-abc-2"
+    )
+    for invalid in ("0", "3", "hello", "1 extra"):
+        assert chat.handle(invalid) == "Please choose a directory by number (1–2)."
+    chat.client.request.assert_not_called()
+    assert chat.handle("2") == "Started project-abc-2 and enabled Matrix."
+    chat.client.request.assert_called_once_with(
+        "thread/start", {"cwd": str(tmp_path / "code" / "project-abc-2")}
+    )
+    enable.assert_called_once_with(chat.client, "new", "on")
+    assert not chat.project_choices
+
+
+def test_start_exact_unique_missing_and_cancel(tmp_path: Path) -> None:
+    (tmp_path / "abc").mkdir()
+    (tmp_path / "abc-other").mkdir()
+    chat = host_chat.HostChat.__new__(host_chat.HostChat)
+    chat.roots = {"work": tmp_path}
+    chat.start_project = Mock(return_value="started")
+    assert chat.handle("/start abc") == "started"
+    chat.start_project.assert_called_with(tmp_path / "abc")
+    assert chat.handle("/start other") == "started"
+    chat.start_project.assert_called_with(tmp_path / "abc-other")
+    assert chat.handle("/start missing") == "No project directories match your request."
+    assert chat.handle("/start ab").startswith("I found 2 directories")
+    assert chat.handle("/help") == host_chat.HELP
+    assert not chat.project_choices
+
+
+def test_start_choices_revalidate_directory(tmp_path: Path) -> None:
+    for name in ("abc-1", "abc-2"):
+        (tmp_path / name).mkdir()
+    chat = host_chat.HostChat.__new__(host_chat.HostChat)
+    chat.roots = {"work": tmp_path}
+    chat.start_project = Mock()
+    chat.handle("/start abc")
+    (tmp_path / "abc-1").rmdir()
+    (tmp_path / "abc-1").symlink_to(tmp_path.parent, target_is_directory=True)
+    with pytest.raises(ValueError):
+        chat.handle("1")
+    chat.start_project.assert_not_called()
+
+
+def test_start_search_workspace_scope_and_boundaries(tmp_path: Path) -> None:
+    root = tmp_path / "work"
+    root.mkdir()
+    (root / "project-abc").mkdir()
+    (root / "escape-abc").symlink_to(tmp_path.parent, target_is_directory=True)
+    roots = {"work": root, "other": tmp_path / "missing"}
+    assert host_chat.matching_projects(roots, "work/abc") == [
+        ("work/project-abc", root / "project-abc")
+    ]
+    for argument in ("", "/tmp", "../abc", "work/../abc", "work/", "."):
+        with pytest.raises(ValueError):
+            host_chat.matching_projects(roots, argument)
+
+
+def test_start_search_matches_project_names_only(tmp_path: Path) -> None:
+    root = tmp_path / "work"
+    for path in (
+        "code/e47-agent-lab/node_modules/e47-pkg",
+        "code/e47-agent-lab/.git/e47",
+        "code/other/deep/e47-nested",
+        ".hidden/e47-hidden",
+        "e47-top",
+    ):
+        (root / path).mkdir(parents=True)
+    (root / "code" / "e47-file").write_text("")
+
+    assert host_chat.matching_projects({"work": root}, "e47") == [
+        ("work/code/e47-agent-lab", root / "code" / "e47-agent-lab"),
+        ("work/e47-top", root / "e47-top"),
+    ]
+
+
+def test_start_duplicate_directory_names_show_full_paths(tmp_path: Path) -> None:
+    for path in ("one/project-abc", "two/project-abc"):
+        (tmp_path / path).mkdir(parents=True)
+    chat = host_chat.HostChat.__new__(host_chat.HostChat)
+    chat.roots = {"work": tmp_path}
+    chat.client = Mock()
+    chat.handle("/start abc")
+    assert chat.handle("/start abc") == (
+        "I found 2 directories matching your request, please choose:\n"
+        "1 work/one/project-abc\n2 work/two/project-abc"
+    )
+
+
+def test_start_choices_sort_by_display_name_not_parent_path(
+    tmp_path: Path,
+) -> None:
+    for path in ("one/z-abc", "two/a-abc"):
+        (tmp_path / path).mkdir(parents=True)
+    chat = host_chat.HostChat.__new__(host_chat.HostChat)
+    chat.roots = {"work": tmp_path}
+    chat.client = Mock()
+    result = chat.handle("/start abc")
+    assert result == (
+        "I found 2 directories matching your request, please choose:\n"
+        "1 a-abc\n2 z-abc"
+    )
+    assert [path.name for _label, path in chat.project_choices] == ["a-abc", "z-abc"]
+
+
+def test_start_selection_failure_clears_choice(tmp_path: Path) -> None:
+    for name in ("abc-1", "abc-2"):
+        (tmp_path / name).mkdir()
+    chat = host_chat.HostChat.__new__(host_chat.HostChat)
+    chat.roots = {"work": tmp_path}
+    chat.client = Mock()
+    chat.client.request.side_effect = host_chat.RpcError("start failed")
+    chat.handle("/start abc")
+    with pytest.raises(host_chat.RpcError, match="start failed"):
+        chat.handle("1")
+    assert not chat.project_choices
+
+
 def test_host_room_uses_short_hostname(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(host_chat.socket, "gethostname", lambda: "leda.example.org")
     agent = Mock()
@@ -68,19 +197,41 @@ def test_host_room_uses_short_hostname(monkeypatch: pytest.MonkeyPatch) -> None:
     user.join_room.assert_called_once_with("!host:example.org")
 
 
-def test_session_search_numbers_only_approved_project_paths(tmp_path: Path) -> None:
+def test_session_search_matches_project_paths_not_titles_or_transcripts(
+    tmp_path: Path,
+) -> None:
     client = Mock()
     client.request.return_value = {
         "data": [
             {
-                "thread": {
-                    "id": "first",
-                    "name": "First",
-                    "cwd": str(tmp_path / "one"),
-                    "updatedAt": 1_700_000_000,
-                }
+                "id": "folder-match",
+                "name": "Unrelated title",
+                "cwd": str(tmp_path / "code" / "e47-agent-lab"),
+                "updatedAt": 1_700_000_000,
             },
-            {"thread": {"id": "outside", "name": "Other", "cwd": "/tmp/outside"}},
+            {
+                "id": "title-only",
+                "name": "e47 appears only in the title",
+                "cwd": str(tmp_path / "random"),
+                "updatedAt": 1_700_000_001,
+            },
+            {
+                "id": "codex",
+                "name": "Session Name Generation",
+                "cwd": str(tmp_path / "code" / "codex"),
+                "updatedAt": 1_700_000_002,
+            },
+            {
+                "id": "host-chat",
+                "name": "Matrix host chat",
+                "cwd": str(tmp_path / "code" / "e47-agent-lab"),
+                "updatedAt": 1_700_000_003,
+            },
+            {
+                "id": "outside",
+                "name": "e47 elsewhere",
+                "cwd": "/tmp/e47",
+            },
         ],
         "nextCursor": None,
     }
@@ -89,11 +240,112 @@ def test_session_search_numbers_only_approved_project_paths(tmp_path: Path) -> N
     chat.roots = {"work": tmp_path}
     chat.thread_id = "host-chat"
     chat.matches = []
-    result = chat.handle("/sessions first")
+    result = chat.handle("/sessions e47")
     timestamp = host_chat.update_timestamp({"updatedAt": 1_700_000_000})
-    assert result == f"1 First\n`  {timestamp}`\n`  work/one`"
-    assert [row["id"] for row in chat.matches] == ["first"]
+    assert result == (
+        f"1 Unrelated title\n`  {timestamp}`\n`  work/code/e47-agent-lab`"
+    )
+    assert [row["id"] for row in chat.matches] == ["folder-match"]
     assert chat.handle("/attach 2") == "Use a number from the last /sessions result."
+    client.request.assert_called_once_with(
+        "thread/list",
+        {
+            "sortKey": "updated_at",
+            "sortDirection": "desc",
+            "limit": 100,
+        },
+    )
+
+
+def test_session_search_preserves_newest_first_order_across_pages(
+    tmp_path: Path,
+) -> None:
+    client = Mock()
+    client.request.side_effect = [
+        {
+            "data": [
+                {
+                    "id": "newest",
+                    "name": "Zebra title",
+                    "cwd": str(tmp_path / "e47-project-a"),
+                    "updatedAt": 1_700_000_003,
+                },
+                {
+                    "id": "unmatched",
+                    "name": "Session Name Generation",
+                    "cwd": str(tmp_path / "code" / "codex"),
+                    "updatedAt": 1_700_000_004,
+                },
+            ],
+            "nextCursor": "page-two",
+        },
+        {
+            "data": [
+                {
+                    "id": "older",
+                    "name": "Alpha title",
+                    "cwd": str(tmp_path / "e47-project-b"),
+                    "updatedAt": 1_700_000_001,
+                }
+            ],
+            "nextCursor": None,
+        },
+    ]
+    chat = host_chat.HostChat.__new__(host_chat.HostChat)
+    chat.client = client
+    chat.roots = {"work": tmp_path}
+    chat.thread_id = "host-chat"
+    chat.matches = []
+
+    result = chat.handle("/sess e47")
+
+    assert [row["id"] for row in chat.matches] == ["newest", "older"]
+    assert result.startswith("1 Zebra title\n")
+    assert "\n2 Alpha title\n" in result
+    assert client.request.call_args_list[0].args == (
+        "thread/list",
+        {
+            "sortKey": "updated_at",
+            "sortDirection": "desc",
+            "limit": 100,
+        },
+    )
+    assert client.request.call_args_list[1].args == (
+        "thread/list",
+        {
+            "sortKey": "updated_at",
+            "sortDirection": "desc",
+            "limit": 100,
+            "cursor": "page-two",
+        },
+    )
+
+
+def test_session_titles_are_truncated_to_64_characters(tmp_path: Path) -> None:
+    client = Mock()
+    client.request.return_value = {
+        "data": [
+            {
+                "id": "long-title",
+                "name": "e47 " + "prompt " * 20,
+                "cwd": str(tmp_path / "e47-project"),
+                "updatedAt": 1_700_000_000,
+            }
+        ],
+        "nextCursor": None,
+    }
+    chat = host_chat.HostChat.__new__(host_chat.HostChat)
+    chat.client = client
+    chat.roots = {"work": tmp_path}
+    chat.thread_id = "host-chat"
+    chat.matches = []
+
+    result = chat.handle("/sessions e47")
+
+    title = result.splitlines()[0][2:]
+    assert len(title) == 64
+    assert title.endswith("…")
+    assert chat.matches[0]["name"] == "e47 " + "prompt " * 20
 
 
 def test_sessions_without_search_lists_all_approved_project_paths(tmp_path: Path) -> None:
@@ -108,31 +360,31 @@ def test_sessions_without_search_lists_all_approved_project_paths(tmp_path: Path
                 "id": "beta",
                 "name": "Beta",
                 "cwd": str(workspace / "project-b"),
-                "updatedAt": 1_700_000_000,
+                "updatedAt": 1_700_000_003,
             },
             {
                 "id": "zulu",
                 "name": "Zulu",
                 "cwd": str(workspace / "project-a"),
-                "updatedAt": 1_700_000_000,
+                "updatedAt": 1_700_000_002,
+            },
+            {
+                "id": "host-chat",
+                "name": "Matrix Host Chat Session",
+                "cwd": str(workspace / "project-a"),
+                "updatedAt": 1_700_000_004,
+            },
+            {
+                "id": "alpha",
+                "name": "Alpha",
+                "cwd": str(workspace / "project-a"),
+                "updatedAt": 1_700_000_001,
             },
             {
                 "id": "other",
                 "name": "Alpha",
                 "cwd": str(other_workspace / "project-a"),
                 "updatedAt": 1_700_000_000,
-            },
-            {
-                "id": "alpha",
-                "name": "Alpha",
-                "cwd": str(workspace / "project-a"),
-                "updatedAt": 1_700_000_000,
-            },
-            {
-                "id": "host-chat",
-                "name": "Matrix Host Chat Session",
-                "cwd": str(workspace / "project-a"),
-                "updatedAt": 1_700_000_001,
             },
             {"id": "outside", "name": "Other", "cwd": "/tmp/outside"},
         ],
@@ -145,30 +397,30 @@ def test_sessions_without_search_lists_all_approved_project_paths(tmp_path: Path
     chat.matches = []
 
     result = chat.handle("/sessions")
+    assert [row["id"] for row in chat.matches] == ["beta", "zulu", "alpha", "other"]
     assert result == (
-        f"1 Alpha\n`  {host_chat.update_timestamp({'updatedAt': 1_700_000_000})}`\n"
-        "`  other/project-a`\n"
-        f"2 Alpha\n`  {host_chat.update_timestamp({'updatedAt': 1_700_000_000})}`\n"
+        f"1 Beta\n`  {host_chat.update_timestamp({'updatedAt': 1_700_000_003})}`\n"
+        "`  work/project-b`\n"
+        f"2 Zulu\n`  {host_chat.update_timestamp({'updatedAt': 1_700_000_002})}`\n"
         "`  work/project-a`\n"
-        f"3 Zulu\n`  {host_chat.update_timestamp({'updatedAt': 1_700_000_000})}`\n"
+        f"3 Alpha\n`  {host_chat.update_timestamp({'updatedAt': 1_700_000_001})}`\n"
         "`  work/project-a`\n"
-        f"4 Beta\n`  {host_chat.update_timestamp({'updatedAt': 1_700_000_000})}`\n"
-        "`  work/project-b`"
+        f"4 Alpha\n`  {host_chat.update_timestamp({'updatedAt': 1_700_000_000})}`\n"
+        "`  other/project-a`"
     )
     assert matrix.matrix_formatted_body(result) == (
-        f"<p>1 Alpha<br><code>  {host_chat.update_timestamp({'updatedAt': 1_700_000_000})}</code><br>"
-        "<code>  other/project-a</code><br>"
-        f"2 Alpha<br><code>  {host_chat.update_timestamp({'updatedAt': 1_700_000_000})}</code><br>"
+        f"<p>1 Beta<br><code>  {host_chat.update_timestamp({'updatedAt': 1_700_000_003})}</code><br>"
+        "<code>  work/project-b</code><br>"
+        f"2 Zulu<br><code>  {host_chat.update_timestamp({'updatedAt': 1_700_000_002})}</code><br>"
         "<code>  work/project-a</code><br>"
-        f"3 Zulu<br><code>  {host_chat.update_timestamp({'updatedAt': 1_700_000_000})}</code><br>"
+        f"3 Alpha<br><code>  {host_chat.update_timestamp({'updatedAt': 1_700_000_001})}</code><br>"
         "<code>  work/project-a</code><br>"
-        f"4 Beta<br><code>  {host_chat.update_timestamp({'updatedAt': 1_700_000_000})}</code><br>"
-        "<code>  work/project-b</code></p>"
+        f"4 Alpha<br><code>  {host_chat.update_timestamp({'updatedAt': 1_700_000_000})}</code><br>"
+        "<code>  other/project-a</code></p>"
     )
-    assert [row["id"] for row in chat.matches] == ["other", "alpha", "zulu", "beta"]
     client.request.assert_called_once_with(
         "thread/list",
-        {"sortKey": "updated_at", "limit": 100},
+        {"sortKey": "updated_at", "sortDirection": "desc", "limit": 100},
     )
 
 

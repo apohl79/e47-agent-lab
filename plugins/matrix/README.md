@@ -80,12 +80,17 @@ Send `/help` in the host room for the supported commands:
 
 - `/list` lists approved remote-agent workspaces.
 - `/list <workspace>` lists immediate project directories in that workspace.
-- `/sessions <search string>` lists matching stored sessions with numbered
-  workspace-relative directories.
+- `/sessions [search string]` lists stored sessions with numbered
+  workspace-relative directories. The optional filter matches project
+  directories only; results appear newest first, and titles are capped at 64
+  characters.
 - `/attach <num>` resumes the numbered session and enables its Matrix bridge.
 - `/start <project dir>` starts a session in an approved project directory and
-  enables its Matrix bridge. Prefix with `<workspace>/` when there are multiple
-  approved workspaces.
+  enables its Matrix bridge. Exact paths take precedence; otherwise it matches
+  directory paths by case-insensitive substring beneath approved workspaces.
+  Multiple matches are listed alphabetically; reply with a number to start one.
+  Invalid selections can be retried; another slash command cancels the choice.
+  Prefix with `<workspace>/` to restrict the search to that workspace.
 - `/detach` in a session room disables that session's Matrix bridge. The host
   room remains connected; `/detach` there explains where to use it.
 

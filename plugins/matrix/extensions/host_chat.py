@@ -50,12 +50,14 @@ HELP = "\n".join(
         "/help — show commands",
         "/list — list approved workspaces",
         "/list <workspace> — list project directories",
-        "/sessions [search string] — list resumable sessions",
+        "/sessions [project-path filter] — list matching sessions newest first",
         "/attach <num> — enable Matrix in a listed session",
         "/detach — disable Matrix in this session",
         "/start <project dir> — create and enable a session (prefix workspace when needed)",
     ]
 )
+MAX_SESSION_TITLE_LENGTH = 64
+MAX_PROJECT_DEPTH = 2
 
 
 def workspaces(client: SessionScriptClient) -> dict[str, Path]:
@@ -104,8 +106,54 @@ def workspace_project(roots: dict[str, Path], cwd: str) -> str | None:
     return None
 
 
+def matching_projects(roots: dict[str, Path], text: str) -> list[tuple[str, Path]]:
+    if not text or text.startswith("/") or "\\" in text or "\x00" in text or ".." in Path(text).parts:
+        raise ValueError("Use /start <project dir> inside an approved workspace.")
+    workspace, separator, relative = text.partition("/")
+    selected_roots = roots
+    if separator and workspace in roots:
+        selected_roots = {workspace: roots[workspace]}
+        text = relative
+    if not text or text == ".":
+        raise ValueError("Use /start <project dir> inside an approved workspace.")
+    exact = []
+    for name, root in selected_roots.items():
+        path = root / text
+        if path.is_dir() and path.resolve().is_relative_to(root):
+            exact.append((f"{name}/{text}", path))
+    if exact:
+        return sorted(exact)
+    search = text.casefold()
+    matches: list[tuple[str, Path]] = []
+
+    def scan(name: str, root: Path, directory: Path, depth: int) -> None:
+        try:
+            entries = list(os.scandir(directory))
+        except OSError:
+            return
+        for entry in entries:
+            if entry.name.startswith(".") or entry.is_symlink() or not entry.is_dir():
+                continue
+            path = Path(entry.path)
+            if search in entry.name.casefold():
+                matches.append((f"{name}/{path.relative_to(root).as_posix()}", path))
+            elif depth < MAX_PROJECT_DEPTH:
+                scan(name, root, path, depth + 1)
+
+    for name, root in selected_roots.items():
+        scan(name, root, root, 1)
+    return sorted(matches, key=lambda entry: (entry[0].casefold(), entry[0]))
+
+
 def session_name(row: dict[str, Any]) -> str:
     return row.get("name") or row.get("preview") or row["id"]
+
+
+def display_session_name(row: dict[str, Any]) -> str:
+    name = session_name(row)
+    if len(name) > MAX_SESSION_TITLE_LENGTH:
+        return f"{name[: MAX_SESSION_TITLE_LENGTH - 1]}…"
+    return name
 
 
 def update_timestamp(row: dict[str, Any]) -> str:
@@ -120,28 +168,22 @@ def update_timestamp(row: dict[str, Any]) -> str:
         return "unknown"
 
 
-def session_rows(client: SessionScriptClient, search: str) -> list[dict[str, Any]]:
+def session_rows(client: SessionScriptClient) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     cursor: str | None = None
-    method = "thread/search" if search else "thread/list"
     for _ in range(10):
-        params: dict[str, Any] = {"sortKey": "updated_at", "limit": 100}
-        if search:
-            params["searchTerm"] = search
+        params: dict[str, Any] = {
+            "sortKey": "updated_at",
+            "sortDirection": "desc",
+            "limit": 100,
+        }
         if cursor:
             params["cursor"] = cursor
-        page = client.request(method, params)
+        page = client.request("thread/list", params)
         data = page.get("data")
         if not isinstance(data, list):
-            raise RpcError("invalid session search response")
-        if method == "thread/list":
-            rows.extend(row for row in data if isinstance(row, dict))
-        else:
-            rows.extend(
-                row["thread"]
-                for row in data
-                if isinstance(row, dict) and isinstance(row.get("thread"), dict)
-            )
+            raise RpcError("invalid session list response")
+        rows.extend(row for row in data if isinstance(row, dict))
         cursor = page.get("nextCursor")
         if not isinstance(cursor, str) or not cursor:
             break
@@ -179,6 +221,7 @@ class HostChat:
         self.client = client
         self.roots = workspaces(client)
         self.matches: list[dict[str, Any]] = []
+        self.project_choices: list[tuple[str, Path]] = []
         self.thread_id = self._home_session()
         self.active_turn_id: str | None = None
         raw = load_settings()
@@ -255,6 +298,14 @@ class HostChat:
     def handle(self, message: str) -> str | None:
         command, _, argument = message.strip().partition(" ")
         argument = argument.strip()
+        choices = getattr(self, "project_choices", [])
+        if choices and not command.startswith("/"):
+            if not message.strip().isdecimal() or not 1 <= int(message.strip()) <= len(choices):
+                return f"Please choose a directory by number (1–{len(choices)})."
+            label, _path = choices[int(message.strip()) - 1]
+            self.project_choices = []
+            return self.start_project(project_path(self.roots, label))
+        self.project_choices = []
         if command.startswith("/"):
             matches = [candidate for candidate in COMMANDS if candidate.startswith(command)]
             if len(matches) == 1:
@@ -290,20 +341,17 @@ class HostChat:
                 )
             ) or "No project directories."
         if command == "/sessions":
-            self.matches = [
-                row for row in session_rows(self.client, argument)
-                if row.get("id") != self.thread_id
-                and isinstance(row.get("cwd"), str)
-                and workspace_project(self.roots, row["cwd"]) is not None
-            ]
-            self.matches.sort(
-                key=lambda row: (
-                    (workspace_project(self.roots, row["cwd"]) or "").casefold(),
-                    session_name(row).casefold(),
-                )
-            )
+            search = argument.casefold()
+            self.matches = []
+            for row in session_rows(self.client):
+                cwd = row.get("cwd")
+                if row.get("id") == self.thread_id or not isinstance(cwd, str):
+                    continue
+                project = workspace_project(self.roots, cwd)
+                if project is not None and (not search or search in project.casefold()):
+                    self.matches.append(row)
             return "\n".join(
-                f"{number} {session_name(row)}\n"
+                f"{number} {display_session_name(row)}\n"
                 f"`  {update_timestamp(row)}`\n"
                 f"`  {workspace_project(self.roots, row['cwd'])}`"
                 for number, row in enumerate(self.matches, 1)
@@ -318,11 +366,29 @@ class HostChat:
         if command == "/detach":
             return "The host chat stays connected. Send /detach in a session room."
         if command == "/start":
-            path = project_path(self.roots, argument)
-            result = self.client.request("thread/start", {"cwd": str(path)})
-            thread_id = result["thread"]["id"]
-            extension_command(self.client, thread_id, "on")
-            return f"Started {path.name} and enabled Matrix."
+            choices = matching_projects(self.roots, argument)
+            if not choices:
+                return "No project directories match your request."
+            if len(choices) == 1:
+                return self.start_project(project_path(self.roots, choices[0][0]))
+            display_names = [path.name for _label, path in choices]
+            if len({name.casefold() for name in display_names}) != len(display_names):
+                choices = sorted(choices, key=lambda entry: (entry[0].casefold(), entry[0]))
+                display_names = [label for label, _path in choices]
+            else:
+                choices = sorted(
+                    choices,
+                    key=lambda entry: (entry[1].name.casefold(), entry[1].name),
+                )
+                display_names = [path.name for _label, path in choices]
+            self.project_choices = choices
+            return (
+                f"I found {len(choices)} directories matching your request, please choose:\n"
+                + "\n".join(
+                    f"{number} {name}"
+                    for number, name in enumerate(display_names, 1)
+                )
+            )
         if command.startswith("/"):
             return "Unknown command. Send /help for available commands."
         payload = {
@@ -339,6 +405,12 @@ class HostChat:
             if isinstance(turn, dict) and isinstance(turn.get("id"), str):
                 self.active_turn_id = turn["id"]
         return None
+
+    def start_project(self, path: Path) -> str:
+        result = self.client.request("thread/start", {"cwd": str(path)})
+        thread_id = result["thread"]["id"]
+        extension_command(self.client, thread_id, "on")
+        return f"Started {path.name} and enabled Matrix."
 
     def run(self) -> None:
         initial = self.user.sync(self.room_id, None, 0)
