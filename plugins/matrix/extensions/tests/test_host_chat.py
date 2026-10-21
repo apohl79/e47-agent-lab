@@ -110,6 +110,24 @@ def test_start_search_workspace_scope_and_boundaries(tmp_path: Path) -> None:
             host_chat.matching_projects(roots, argument)
 
 
+def test_start_search_matches_project_names_only(tmp_path: Path) -> None:
+    root = tmp_path / "work"
+    for path in (
+        "code/e47-agent-lab/node_modules/e47-pkg",
+        "code/e47-agent-lab/.git/e47",
+        "code/other/deep/e47-nested",
+        ".hidden/e47-hidden",
+        "e47-top",
+    ):
+        (root / path).mkdir(parents=True)
+    (root / "code" / "e47-file").write_text("")
+
+    assert host_chat.matching_projects({"work": root}, "e47") == [
+        ("work/code/e47-agent-lab", root / "code" / "e47-agent-lab"),
+        ("work/e47-top", root / "e47-top"),
+    ]
+
+
 def test_start_duplicate_directory_names_show_full_paths(tmp_path: Path) -> None:
     for path in ("one/project-abc", "two/project-abc"):
         (tmp_path / path).mkdir(parents=True)

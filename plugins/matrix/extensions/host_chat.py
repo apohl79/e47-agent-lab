@@ -57,6 +57,7 @@ HELP = "\n".join(
     ]
 )
 MAX_SESSION_TITLE_LENGTH = 64
+MAX_PROJECT_DEPTH = 2
 
 
 def workspaces(client: SessionScriptClient) -> dict[str, Path]:
@@ -122,19 +123,25 @@ def matching_projects(roots: dict[str, Path], text: str) -> list[tuple[str, Path
             exact.append((f"{name}/{text}", path))
     if exact:
         return sorted(exact)
-    matches = []
+    search = text.casefold()
+    matches: list[tuple[str, Path]] = []
+
+    def scan(name: str, root: Path, directory: Path, depth: int) -> None:
+        try:
+            entries = list(os.scandir(directory))
+        except OSError:
+            return
+        for entry in entries:
+            if entry.name.startswith(".") or entry.is_symlink() or not entry.is_dir():
+                continue
+            path = Path(entry.path)
+            if search in entry.name.casefold():
+                matches.append((f"{name}/{path.relative_to(root).as_posix()}", path))
+            elif depth < MAX_PROJECT_DEPTH:
+                scan(name, root, path, depth + 1)
+
     for name, root in selected_roots.items():
-        for directory, children, _files in os.walk(root):
-            children[:] = [
-                child for child in children
-                if not (Path(directory) / child).is_symlink()
-            ]
-            for child in children:
-                path = Path(directory) / child
-                relative_path = path.relative_to(root).as_posix()
-                entry = (f"{name}/{relative_path}", path)
-                if text.casefold() in relative_path.casefold():
-                    matches.append(entry)
+        scan(name, root, root, 1)
     return sorted(matches, key=lambda entry: (entry[0].casefold(), entry[0]))
 
 
