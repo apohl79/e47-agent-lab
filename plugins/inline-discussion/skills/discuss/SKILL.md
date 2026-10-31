@@ -124,7 +124,7 @@ protocol.
     ```
 
     Wait only for `<session-dir>/url.txt` (not for a browser signal), then
-    publish the URL and perform the cmux browser-open step below.
+    publish the URL and follow **Browser opening** below.
     If the URL does not appear within 30 seconds, inspect `server.log` and
     report the startup failure. The server sends Apply and Finish prompts back
     into the listed main session, so the user can continue that session after
@@ -142,7 +142,7 @@ protocol.
    If `<HOST> = codex` or `xedoc`, run this as a background command/session
    and leave it running. It prints the URL quickly, then `--hold` keeps the
    launcher process alive until the user clicks Pause or Finish. Do not wait
-   for this command to exit before continuing to cmux/browser opening and the
+   for this command to exit before continuing to **Browser opening** and the
    signal-file loop:
 
    ```bash
@@ -177,7 +177,17 @@ protocol.
    by the host shell. In app-server handoff mode, the `screen` session owns the
    launcher and this turn ends after the URL is published.
 
-   **cmux integration.** When the environment indicates a cmux session (e.g. `$CMUX_WORKSPACE_ID` or `$CMUX_BUNDLE_ID` is set, or the `cmux` CLI is available and `cmux identify` succeeds), open the discussion URL in the workspace the user is actually looking at.
+   **Browser opening.** On macOS, open the discussion URL in the default browser:
+
+   ```bash
+   open "<URL>"
+   ```
+
+   Use this default in host-gui as well. Do not run cmux commands unless the user explicitly requests opening the discussion in cmux. Inherited `CMUX_*` variables, the presence of the `cmux` CLI, and a successful `cmux identify` do not establish which interface the user is using; do not probe cmux to select the browser.
+
+   If `open` fails, report the failure and provide the URL for manual opening; do not fall back to cmux. On other platforms, provide the URL for manual opening unless the user explicitly requests cmux. A successful `open` means the URL was handed to macOS, not that the page was verified as loaded.
+
+   **Explicit cmux request only.** Follow the remaining steps in this block only when the user explicitly requests cmux. Open the discussion URL in the workspace the user is actually looking at.
 
    `cmux browser open` defaults to `$CMUX_WORKSPACE_ID` and defaults `--focus` to `false`. The agent's shell is often in a different workspace than the user's focused surface, so the bare form can report `OK ... placement=reuse` while the browser opens in a workspace the user cannot see. Resolve the focused workspace first and open there with focus:
 
