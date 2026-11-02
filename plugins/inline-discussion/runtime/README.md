@@ -5,28 +5,28 @@ markdown file (including Mermaid diagrams) to HTML, watches it on disk, streams
 updates over SSE, and hosts threaded AI conversations + Apply/Finish workflow on
 top of the document.
 
-Extracted from the `plugins/inline-discussion/server/` tree so the same binary
-can also be invoked from outside the marketplace skill.
+The runtime ships with the plugin and can also be invoked outside the marketplace
+skill. `tools/inline-discussion` remains a compatibility symlink.
 
 ## Quickstart
 
 ```bash
-cd tools/inline-discussion
+cd plugins/inline-discussion/runtime
 npm install
 npm run build
 
 # Quick mode: render a document and hold until the browser clicks Finish.
 # No main host session — Apply buttons are hidden in the browser.
-./bin/inline-discussion ../../README.md
+./bin/inline-discussion ../../../README.md
 
 # Quick mode with a bootstrapped Codex agent driving the skill:
-./bin/inline-discussion -a ../../README.md
+./bin/inline-discussion -a ../../../README.md
 
 # Quick mode with a bootstrapped Claude agent driving the skill:
-./bin/inline-discussion -a claude ../../README.md
+./bin/inline-discussion -a claude ../../../README.md
 
 # Quick mode with a bootstrapped Xedoc agent driving the skill:
-./bin/inline-discussion -a xedoc ../../README.md
+./bin/inline-discussion -a xedoc ../../../README.md
 ```
 
 ## CLI
@@ -191,7 +191,7 @@ Example using the local read-only gateway session:
 IND_MCP_URL=http://127.0.0.1:3100/mcp \
 IND_MCP_SERVER_NAME=gateway \
 IND_MCP_TOOLS=notion__notion-search,notion__notion-fetch \
-./bin/inline-discussion start --doc ../../docs/sap-oem-voice-auth.md \
+./bin/inline-discussion start --doc ../../../docs/sap-oem-voice-auth.md \
   --session-dir "$TMPDIR/inline-discussion/sap-oem" --agent claude --hold
 ```
 

@@ -45,6 +45,17 @@ await build({
 
 // Frontend bundle — dompurify (not isomorphic-dompurify) bundled into client
 await build({
+  entryPoints: [join(__dirname, 'src/hosted-panel.ts')],
+  outfile: join(distDir, 'hosted-panel.js'),
+  bundle: true,
+  platform: 'node',
+  target: 'node20',
+  format: 'esm',
+  banner: { js: "import { createRequire } from 'module';const require = createRequire(import.meta.url);" },
+  external: [...SERVER_EXTERNALS, './server.js'],
+});
+
+await build({
   entryPoints: [join(__dirname, 'src/web/app.ts')],
   outfile: join(distDir, 'app.js'),
   bundle: true,

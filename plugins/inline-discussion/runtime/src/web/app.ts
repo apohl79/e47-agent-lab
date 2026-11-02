@@ -1,5 +1,6 @@
 // src/web/app.ts
 import DOMPurify from 'dompurify';
+import { documentRoute, installHostedLinks, panelFetch as fetch, panelUrl } from './hosted.ts';
 import { Marked } from 'marked';
 import hljs from 'highlight.js/lib/common';
 import mermaid from 'mermaid';
@@ -477,6 +478,7 @@ async function showToolApproval(request: ToolApprovalPrompt): Promise<void> {
   }
 }
 
+installHostedLinks();
 init().catch((err) => console.error(err));
 
 async function updateInferenceSettings(url: string, settings: InferenceSettings): Promise<void> {
@@ -531,14 +533,14 @@ async function init(): Promise<void> {
   installLinkTargetPreview(document.body);
   installInDocumentNavigation(document.body, { document, history: window.history, location: window.location });
 
-  const sourcePath = window.location.pathname === '/' ? '' : `?${new URLSearchParams({ path: window.location.pathname }).toString()}`;
+  const sourcePath = documentRoute === '/' ? '' : `?${new URLSearchParams({ path: documentRoute }).toString()}`;
   const boot = (await (await fetch(`/api/bootstrap${sourcePath}`)).json()) as Bootstrap;
   applyTitle(boot.title);
   renderDoc(boot.html);
   installImageViewer(document.getElementById('doc')!);
   state.readOnly = boot.readOnly === true;
   state.sourceView = boot.sourceView === true;
-  state.documentPath = boot.documentPath ?? (window.location.pathname === '/' ? '' : window.location.pathname);
+  state.documentPath = boot.documentPath ?? (documentRoute === '/' ? '' : documentRoute);
   state.inferenceCatalog = boot.inferenceCatalog;
   state.defaultInferenceSettings = boot.defaultInferenceSettings;
   renderDefaultInferenceSelectors();
@@ -607,7 +609,7 @@ async function init(): Promise<void> {
   // documentPath field carried on document-specific events.
   if (state.readOnly) return;
 
-  const es = new EventSource(`/events?path=${encodeURIComponent(state.documentPath)}`);
+  const es = new EventSource(panelUrl(`/events?path=${encodeURIComponent(state.documentPath)}`));
   listenDocumentEvent(es, 'thread.message.delta', onDelta);
   listenDocumentEvent(es, 'thread.message.status', onStatus);
   listenDocumentEvent(es, 'thread.message.activity', onActivity);
@@ -757,7 +759,7 @@ async function init(): Promise<void> {
 }
 
 function backToDiscussion(): void {
-  window.location.assign('/');
+  window.location.assign(panelUrl('/'));
 }
 
 function showApplyOverlay(progress: ApplyProgress | null, fallbackStatus: string, tasks: ApplyTask[] = []): void {

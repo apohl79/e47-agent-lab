@@ -1,0 +1,45 @@
+#!/usr/bin/env python3
+import json
+import os
+from pathlib import Path
+import socket
+import sys
+
+unavailable = False
+try:
+    if len(sys.argv) != 2:
+        raise ValueError("Usage: xedoc-panel-open <markdown-path>")
+    thread_id = os.environ.get("XEDOC_THREAD_ID")
+    if not thread_id:
+        unavailable = True
+        raise ValueError("No current Xedoc thread")
+    if not hasattr(socket, "AF_UNIX"):
+        unavailable = True
+        raise ValueError("This platform does not support the Xedoc local panel socket")
+    home = Path(os.environ.get("XEDOC_HOME", Path.home() / ".xedoc"))
+    request = {
+        "protocol": "xedoc.plugin-panel/v1",
+        "threadId": thread_id,
+        "pluginId": "inline-discussion@e47",
+        "panelId": "discussion",
+        "target": str(Path(sys.argv[1]).resolve(strict=True)),
+    }
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        client.settimeout(240)
+        try:
+            client.connect(str(home / "remote-agent/host-panels.sock"))
+        except (FileNotFoundError, ConnectionRefusedError):
+            unavailable = True
+            raise
+        client.sendall(json.dumps(request).encode() + b"\n")
+        response = client.makefile("rb").readline(65537)
+        if not response or len(response) > 65536:
+            raise ValueError("Invalid host panel response")
+        result = json.loads(response)
+        if not isinstance(result, dict) or not isinstance(result.get("ok"), bool):
+            raise ValueError("Invalid host panel response")
+        print(json.dumps(result))
+        raise SystemExit(0 if result.get("ok") is True else 1)
+except (OSError, ValueError) as error:
+    print(json.dumps({"ok": False, "unavailable": unavailable, "error": str(error)}))
+    raise SystemExit(1)

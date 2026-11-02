@@ -49,5 +49,20 @@ or another source document that should be converted into Markdown for a local
 human-to-agent discussion. The standalone `inline-discussion` CLI is installed
 by `./install.sh`; the plugin supports Codex, Claude Code, and Xedoc.
 
-See the [tool README](../../tools/inline-discussion/README.md) for launcher
+### Xedoc host GUI
+
+The Xedoc manifest contributes an embedded discussion panel and a **Start
+discussion** action for local `.md` and `.markdown` links in model responses.
+The discuss skill prefers that same panel when an active Xedoc GUI session is
+available. Thread-agent conversations, direct main-agent conversations, Apply,
+and Finish use the existing session bridges without a skill handoff.
+
+The runtime ships inside the plugin. First launch provisions its pinned npm
+dependencies and builds the renderer in the plugin directory (Node >=20 and npm
+required). To prepare it ahead of time, run `runtime/bin/xedoc-panel --prepare`
+from this plugin directory. Runtime upgrades fingerprint the package lock.
+The standalone browser renderer remains supported; Codex and Claude retain their
+existing skill and CLI flows.
+
+See the [tool README](runtime/README.md) for launcher
 commands and the [marketplace README](../../README.md#install) for installation.

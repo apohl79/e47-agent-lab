@@ -44,6 +44,25 @@ protocol.
    and promotes durable findings with Project Context Curator in that same Apply
    turn. This keeps speculative discussion separate from durable project memory.
 
+3b. **Prefer the Xedoc host GUI panel.** For `<HOST> = xedoc` only, resolve this
+    installed plugin's root from this skill's location (two directories above
+    this file), then run:
+
+    ```bash
+    "<PLUGIN_ROOT>/runtime/bin/xedoc-panel-open" "<DOC_PATH>"
+    ```
+
+    A successful JSON response (`ok: true`) means the host owns the discussion
+    panel and server lifecycle. Report that it opened inside Xedoc and end this
+    turn. Do not launch a browser, standalone server, `screen`, or wait loop.
+    Apply and Finish return directly to this main session; the standalone
+    renderer remains available through the panel's browser action.
+    Only when the response says `unavailable: true` (no active host GUI) continue
+    below with the existing standalone path. If an active GUI reports a panel
+    launch error, report that error and stop rather than opening a separate
+    browser as a substitute. Codex and Claude always continue below; this
+    extension does not change their flow.
+
 4. **Resolve the main-session JSONL path.**
    - When `<HOST> = xedoc`, use `$XEDOC_SESSION_JSONL` when set. Otherwise,
      if `$XEDOC_THREAD_ID` is set, find the current Xedoc rollout file:
