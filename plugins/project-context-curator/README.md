@@ -16,6 +16,8 @@ decisions while keeping private context private.
   than creating an empty memory file.
 - Canonical local or Git-backed storage, plus migration that preserves record
   identity and provenance.
+- Domain knowledge in the main Git store or dedicated repositories linked as
+  Git submodules, with guided setup and whole-domain migration.
 - Typed applicability for project, domain, user, machine, and universal facts;
   user and machine facts remain private in XDG storage.
 - Session-start retrieval guidance, generated human-readable views, and
@@ -38,6 +40,26 @@ Enable shared context when agents should discover durable knowledge in related
 repositories. Setup previews the exact repositories and storage policy before
 anything is indexed or initialized; repositories are not silently added, and
 private user or machine facts remain private.
+
+Use `project-context-curator:manage-context-domains` to choose main or dedicated
+storage for each new domain, manage portable Git-remote membership and local
+root rules, or migrate its knowledge and member projects between stores. New
+GitHub repositories can be created through `gh` after account, owner/name,
+visibility, and the migration preview are approved.
+
+On another machine, clone and configure the main store through
+`project-context-curator:configure-context-storage`, activate the registered
+domain submodules you need, and bind available component checkouts by Git remote.
+Checkout paths may differ. Component source need not exist locally: inspect its
+remote at a pinned commit and capture/update knowledge using the stable project
+ID with source-remote and source-commit provenance. A binding alone is not source
+verification. Use `git-store-register` to preview and approve a new remote-only
+project identity, then bootstrap verified records without creating a source
+checkout. New sources for global retrieval still require enrollment approval.
+
+New PCC versions continue to read and write older storage repositories without
+requiring domain submodules. Older PCC versions are not required to understand
+new multi-store layouts.
 
 ## Why it exists
 

@@ -4,9 +4,9 @@ The user selects a canonical storage runtime during initial setup. In `local`
 mode, project facts use `docs/context/context.json` as their canonical text
 store and broader applicability uses canonical JSON under
 `$XDG_DATA_HOME/project-context-curator/contexts/` (default
-`~/.local/share/project-context-curator/contexts/`). In `git-store` mode, one
-configured Git checkout becomes exclusive canonical storage for project, domain,
-and universal facts. User, machine, and composites containing either remain
+`~/.local/share/project-context-curator/contexts/`). In `git-store` mode, the
+configured main Git checkout and its registered domain submodules provide
+canonical storage for project, domain, and universal facts. User, machine, and composites containing either remain
 private in XDG.
 
 Project Markdown files are generated views for humans and agents; `index.md`
@@ -158,6 +158,15 @@ reported as `unconfigured` while retaining local compatibility. An older valid
 | Shareable intersection | `<xdg>/contexts/composite/<boundary-hash>/context.json` | `<git-store>/scopes/composite/<boundary-hash>/context.json` |
 | Intersection containing user/machine | `<xdg>/contexts/composite/<boundary-hash>/context.json` | Same private XDG path |
 
+In the Git-store column, `<git-store>` means the routed canonical owner.
+Without ownership metadata it is the main checkout, preserving older stores.
+Dedicated owners are registered Git submodules at `<main-store>/stores/<slug>`;
+they use the same project and scope layout. The main catalog retains portable
+project identity and ownership routing. One project has exactly one owner,
+including projects belonging to multiple domains. Use `domain-store` through
+`$manage-context-domains` to preview and approve whole-bundle migration; do not
+move canonical files or edit routing metadata manually.
+
 Selector keys and composite hashes are deterministic. Domain IDs are lowercase,
 1–64 characters, and may contain letters, digits, dots, underscores, or hyphens.
 Domain membership is stored in XDG configuration as `projects`, `remotes`, and
@@ -235,6 +244,42 @@ registered and points to `git-store-bind --match-remote`.
 checkout's project ID is in `domains` or its remote is in `domain_remotes`;
 restoration preserves any roots configured on that machine.
 
+Multi-store routing adds optional fields without changing catalog schema
+version 1 or requiring older repositories to supply them:
+
+```json
+{
+  "stores": {
+    "billing": {
+      "store_id": "2dd54917-fb91-48bb-9664-0468bfcbc12d",
+      "remote_url": "git@github.com:acme/billing-knowledge.git",
+      "path": "stores/billing"
+    }
+  },
+  "project_owners": {
+    "f0b9cb7c-2cc4-4eb2-907f-b69ec16d3702": "billing"
+  },
+  "domain_owners": {
+    "billing": "billing"
+  }
+}
+```
+
+`stores` maps each dedicated store slug to its stable store ID, raw Git remote
+URL, and `stores/<slug>` submodule path. Unlike normalized project identity
+remotes, store remote URLs retain the transport needed for Git operations.
+`project_owners` maps project UUIDs to store slugs; `domain_owners` maps domain
+IDs to store slugs. An absent owner means main. The root `projects` and
+`domains` remain the global catalog; child catalogs contain their owned subset.
+Older catalogs without these additive fields remain valid and writable.
+Older PCC clients need not support the new routing fields or multi-store layout.
+
+Ownership is checked again under mutation locks. A concurrent route change
+rejects a stale operation rather than writing to an obsolete owner. Domain
+migration uses a pending journal in the local Git directory; resume an
+interrupted migration with the identical command and original approval token,
+not manual cleanup or another migration.
+
 XDG configuration records the runtime decision, store checkout path, store
 identity, and absolute checkout-to-project-ID bindings. `storage-migrate
 --target git-store` changes that configuration only after an exact snapshot
@@ -259,7 +304,23 @@ flow, list IDs with `git-store-status`, and attach each checkout with
 `git-store-bind --project-store-id <uuid>`, or with
 `git-store-bind --match-remote` when the store already records the checkout's
 remote URL. Binding regenerates local Markdown
-views and restores domain membership. `git-store-init` remains a compatible
+views and restores domain membership. `git-store-detect` reports candidate
+remote matches read-only; binding a unique match must not overwrite conflicting
+local context. Activate selected registered domain submodules with
+`git-store-activate --store <slug>` (or `--all`) before using their knowledge.
+Stable project IDs permit supported record commands and search to target
+canonical context through `--project-store-id` without a source checkout.
+Source-derived remote capture includes `--source-remote` and a full
+`--source-commit` SHA only after inspecting actual source at that revision.
+For remote-only `--source repo-docs` additions these flags are required, and the
+source remote must match the registered project. User-confirmed decisions may
+omit remote evidence; their provenance must not fabricate a local commit.
+`git-store-register --remote <url> --name <name> [--domain <existing-domain>]`
+previews remote-only registration. Approved execution with the identical inputs
+and `--approve-snapshot <token>` creates a stable project UUID. Bootstrap verified
+records through `add-* --project-store-id <uuid>` in the same turn.
+New portable retrieval sources still require snapshot enrollment approval.
+`git-store-init` remains a compatible
 one-way command for existing automation. Git-store mutations require the
 checkout on `main`, synchronize the configured remote's `main`, stage only the
 manifest and canonical context paths, create one Conventional Commit when

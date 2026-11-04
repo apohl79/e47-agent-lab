@@ -18,7 +18,7 @@ import time
 import unicodedata
 import uuid
 import webbrowser
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -26,6 +26,12 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from lexical_retrieval import lexical_query_matches
+import domain_stores
+
+
+TARGET_PROJECT_ID: str | None = None
+SOURCE_REMOTE: str | None = None
+SOURCE_COMMIT: str | None = None
 
 
 SCHEMA_VERSION = 4
@@ -309,6 +315,10 @@ def snapshot_source(raw: Any) -> dict[str, str] | None:
         if not isinstance(value, str) or not value or len(value) > SNAPSHOT_PATH_LIMIT:
             return None
         source[field] = value
+    for field in ("project_id", "remote_url"):
+        value = raw.get(field)
+        if isinstance(value, str) and value and len(value) <= SNAPSHOT_PATH_LIMIT:
+            source[field] = value
     return source
 
 
@@ -458,6 +468,26 @@ def configured_domains(config: dict[str, Any]) -> dict[str, DomainMembers]:
                 if isinstance(root, str) and root
             ),
         )
+    store = configured_git_store(config)
+    if store is not None:
+        root = Path(store["path"])
+        if git_store_manifest_path(root).is_file():
+            manifest = load_git_store_manifest(root)
+            for domain_id in sorted({*manifest["domains"], *manifest["domain_remotes"]}):
+                current = domains.get(domain_id, DomainMembers())
+                members = manifest["domains"].get(domain_id, [])
+                domains[domain_id] = DomainMembers(
+                    projects=tuple(sorted({
+                        *current.projects,
+                        *(Path(path) for path, project_id in store["project_bindings"].items()
+                          if project_id in members and Path(path).is_dir()),
+                    }, key=str)),
+                    remotes=tuple(sorted({
+                        *current.remotes,
+                        *manifest["domain_remotes"].get(domain_id, []),
+                    })),
+                    roots=current.roots,
+                )
     return domains
 
 
@@ -466,6 +496,14 @@ def domains_config(domains: dict[str, DomainMembers]) -> dict[str, Any]:
 
 
 def member_domains(repo: Path, domains: dict[str, DomainMembers]) -> tuple[str, ...]:
+    if TARGET_PROJECT_ID is not None:
+        _store, _root, manifest = require_configured_git_store()
+        remote = manifest["projects"][TARGET_PROJECT_ID].get("remote_url")
+        return tuple(sorted(
+            domain for domain, members in manifest["domains"].items()
+            if TARGET_PROJECT_ID in members
+            or remote in manifest["domain_remotes"].get(domain, [])
+        ))
     remote_url = (
         repo_remote_url(repo)
         if any(members.remotes for members in domains.values())
@@ -559,6 +597,12 @@ def resolve_applicability(
             resolved.append({"kind": kind, "selector": domain_id})
             continue
         if kind == "project":
+            if TARGET_PROJECT_ID is not None:
+                target = f"pcc://project/{TARGET_PROJECT_ID}"
+                if selector not in {"self", target}:
+                    raise SystemExit("Project applicability must target --project-store-id.")
+                resolved.append({"kind": kind, "selector": target})
+                continue
             project = (
                 repo if selector == "self" else Path(selector).expanduser().resolve()
             )
@@ -580,7 +624,7 @@ def resolve_applicability(
 def active_applicability(repo: Path) -> frozenset[tuple[str, str]]:
     config = global_config()
     active = {
-        ("project", str(repo)),
+        ("project", f"pcc://project/{TARGET_PROJECT_ID}" if TARGET_PROJECT_ID else str(repo)),
         ("project", "self"),
         ("user", getpass.getuser()),
         ("user", "self"),
@@ -651,6 +695,15 @@ def scope_selector_key(kind: str, selector: str) -> str:
 def scope_context_path(applicability: list[dict[str, str]]) -> Path:
     pairs = applicability_pairs(applicability)
     git_root = configured_git_store_root()
+    if git_root is not None and applicability_is_shareable(applicability):
+        owners = {
+            domain_stores.scope_root(sys.modules[__name__], git_root, selector)
+            for kind, selector in pairs if kind == "domain"
+        }
+        if len(owners) > 1:
+            raise SystemExit("Composite domain scope spans different stores; migrate its domains together first.")
+        if owners:
+            git_root = owners.pop()
     root = (
         git_root / GIT_STORE_SCOPES_DIR
         if git_root is not None and applicability_is_shareable(applicability)
@@ -867,7 +920,10 @@ def scope_context_roots() -> tuple[Path, ...]:
     roots = [scope_context_root()]
     git_root = configured_git_store_root()
     if git_root is not None:
-        roots.append(git_root / GIT_STORE_SCOPES_DIR)
+        roots.extend(
+            root / GIT_STORE_SCOPES_DIR
+            for root in domain_stores.roots(sys.modules[__name__], git_root).values()
+        )
     return tuple(dict.fromkeys(root.resolve() for root in roots))
 
 
@@ -888,7 +944,8 @@ def git_store_project_path(root: Path, project_store_id: str) -> Path:
         raise SystemExit(
             f"Invalid project context store id {project_store_id!r}."
         ) from None
-    return root / GIT_STORE_PROJECTS_DIR / canonical_id / "context.json"
+    owner = domain_stores.project_root(sys.modules[__name__], root, canonical_id)
+    return owner / GIT_STORE_PROJECTS_DIR / canonical_id / "context.json"
 
 
 def validate_git_store_target(root: Path, path: Path) -> None:
@@ -940,7 +997,10 @@ def persist_git_store_domain(
     domains = manifest["domains"]
     domain_remotes = manifest["domain_remotes"]
     if members is None:
-        domains.pop(domain_id, None)
+        if domain_id in manifest.get("domain_owners", {}):
+            domains[domain_id] = []
+        else:
+            domains.pop(domain_id, None)
         domain_remotes.pop(domain_id, None)
     else:
         missing = tuple(
@@ -962,6 +1022,10 @@ def persist_git_store_domain(
             for raw_project, project_id in configured["project_bindings"].items()
             if containing_workspace(Path(raw_project), members.roots) is not None
         )
+        project_ids.update(
+            project_id for project_id, metadata in manifest["projects"].items()
+            if metadata.get("remote_url") in members.remotes
+        )
         if members.roots:
             project_ids.update(domains.get(domain_id, ()))
         domains[domain_id] = sorted(project_ids)
@@ -969,6 +1033,18 @@ def persist_git_store_domain(
             domain_remotes[domain_id] = list(members.remotes)
         else:
             domain_remotes.pop(domain_id, None)
+    if domain_id in manifest.get("domain_owners", {}):
+        child = domain_stores.scope_root(sys.modules[__name__], root, domain_id)
+        child_manifest = load_git_store_manifest(child)
+        child_manifest["domains"][domain_id] = [
+            project_id for project_id in domains[domain_id]
+            if project_id in child_manifest["projects"]
+        ]
+        if domain_id in domain_remotes:
+            child_manifest["domain_remotes"][domain_id] = domain_remotes[domain_id]
+        else:
+            child_manifest["domain_remotes"].pop(domain_id, None)
+        write_git_json(child, git_store_manifest_path(child), child_manifest)
     manifest["updated_at"] = now_iso()
     write_git_json(root, git_store_manifest_path(root), manifest)
 
@@ -1122,20 +1198,34 @@ def append_external_source_arguments(
     store = configured_git_store()
     git_root = configured_git_store_root()
     if store is not None and git_root is not None:
-        for raw_repo, project_id in sorted(store["project_bindings"].items()):
-            project = Path(raw_repo)
-            workspace = containing_workspace(project, roots)
-            source = git_store_project_path(git_root, project_id)
-            if (
-                workspace is None
-                or not source.is_file()
-                or (project / IGNORE_MARKER).exists()
-            ):
+        manifest = load_git_store_manifest(git_root)
+        available = domain_stores.roots(sys.modules[__name__], git_root)
+        for project_id, metadata in sorted(manifest["projects"].items()):
+            owner = manifest.get("project_owners", {}).get(project_id, "main")
+            if owner not in available:
                 continue
+            source = available[owner] / GIT_STORE_PROJECTS_DIR / project_id / "context.json"
+            validate_git_store_target(available[owner], source)
+            candidates = sorted(
+                Path(path) for path, bound_id in store["project_bindings"].items()
+                if bound_id == project_id and Path(path).is_dir()
+            )
+            if candidates and all((project / IGNORE_MARKER).exists() for project in candidates):
+                continue
+            project = next(
+                (project for project in candidates
+                 if not (project / IGNORE_MARKER).exists()
+                 and containing_workspace(project, roots) is not None), None
+            )
+            if not source.is_file():
+                raise SystemExit(f"Canonical project context is missing: {source}")
             payload = {
                 "source_path": str(source),
-                "project_path": str(project),
-                "workspace_root": str(workspace),
+                "project_path": str(project) if project else f"pcc://project/{project_id}",
+                "workspace_root": str(containing_workspace(project, roots) if project else git_root),
+                "project_id": project_id,
+                "remote_url": metadata.get("remote_url"),
+                "portable": True,
             }
             arguments.extend(("--external-source", json.dumps(payload, sort_keys=True)))
 
@@ -1692,7 +1782,7 @@ def local_context_path(repo: Path) -> Path:
 
 
 def context_path(repo: Path) -> Path:
-    project_store_id = git_store_project_binding(repo)
+    project_store_id = TARGET_PROJECT_ID or git_store_project_binding(repo)
     git_root = configured_git_store_root()
     if project_store_id is not None and git_root is not None:
         return git_store_project_path(git_root, project_store_id)
@@ -1835,9 +1925,12 @@ def git_store_upstream(root: Path) -> GitUpstream:
         target = branch
     if target != GIT_STORE_BRANCH:
         raise SystemExit(f"Git context store must push directly to {GIT_STORE_BRANCH}.")
-    push_url = git_checked(
-        root, "remote", "get-url", "--push", remote, action="push remote lookup"
-    ).stdout.strip()
+    push_urls = git_checked(
+        root, "remote", "get-url", "--push", "--all", remote, action="push remote lookup"
+    ).stdout.splitlines()
+    if len(push_urls) != 1:
+        raise SystemExit("Git context stores require exactly one explicit push URL.")
+    push_url = push_urls[0]
     return GitUpstream(remote=remote, branch=target, push_url=push_url)
 
 
@@ -1880,7 +1973,10 @@ def git_status_for_paths(root: Path, paths: tuple[str, ...]) -> str:
 
 
 def require_no_unmanaged_git_store_changes(root: Path) -> None:
-    status = git_status_for_paths(root, GIT_STORE_UNMANAGED_PATHS)
+    extra = domain_stores.managed_paths(sys.modules[__name__], root)
+    status = git_status_for_paths(
+        root, (*GIT_STORE_UNMANAGED_PATHS, *(f":(exclude){path}" for path in extra))
+    )
     if status:
         raise SystemExit(
             "Git context store has unmanaged changes outside curator paths: "
@@ -1889,11 +1985,12 @@ def require_no_unmanaged_git_store_changes(root: Path) -> None:
 
 
 def commit_git_store_changes(root: Path, message: str) -> bool:
-    if not git_status_for_paths(root, GIT_STORE_MANAGED_PATHS):
+    extra = domain_stores.managed_paths(sys.modules[__name__], root)
+    if not git_status_for_paths(root, (*GIT_STORE_MANAGED_PATHS, *extra)):
         return False
     paths = tuple(
         path
-        for path in GIT_STORE_STAGE_PATHS
+        for path in (*GIT_STORE_STAGE_PATHS, *extra)
         if (root / path).exists() or git_process(root, "ls-files", "--", path).stdout
     )
     git_checked(root, "add", "-A", "--", *paths, action="staging")
@@ -2661,7 +2758,8 @@ def context_write_target(
     )
     if any(item["kind"] == "machine" for item in resolved):
         migrate_private_scope_contexts()
-    if applicability_pairs(resolved) == (("project", str(repo)),):
+    project_selector = f"pcc://project/{TARGET_PROJECT_ID}" if TARGET_PROJECT_ID else str(repo)
+    if applicability_pairs(resolved) == (("project", project_selector),):
         return context_path(repo), load_context(repo), parsed, True
     path = scope_context_path(resolved)
     return path, load_scope_context(path, resolved), resolved, False
@@ -2710,6 +2808,11 @@ def apply_storage_policy(repo: Path, data: dict[str, Any]) -> str:
 
 
 def save_context(repo: Path, data: dict[str, Any]) -> str:
+    if TARGET_PROJECT_ID is not None:
+        normalize(data)
+        path = context_path(repo)
+        write_git_json(path.parents[2], path, data)
+        return "not-git"
     ctx_dir = repo / CONTEXT_DIR
     ctx_dir.mkdir(parents=True, exist_ok=True)
     ensure_context_gitignore(ctx_dir)
@@ -2817,10 +2920,14 @@ def add_provenance(
     entry = {
         "action": action,
         "recorded_at": stamp,
-        "repo": str(repo),
+        "repo": SOURCE_REMOTE or (
+            f"pcc://project/{TARGET_PROJECT_ID}" if TARGET_PROJECT_ID else str(repo)
+        ),
         "source": source,
     }
-    commit = git_output(repo, "rev-parse", "HEAD")
+    commit = SOURCE_COMMIT or (
+        None if TARGET_PROJECT_ID is not None else git_output(repo, "rev-parse", "HEAD")
+    )
     if commit:
         entry["commit"] = commit
     provenance = record.setdefault("provenance", [])
@@ -3170,6 +3277,7 @@ def load_git_store_manifest(root: Path) -> dict[str, Any]:
             normalize_remote_url(remote) != remote for remote in remotes
         ):
             raise SystemExit(f"Invalid domain remotes for {domain_id!r} in {path}")
+    domain_stores.validate_routes(sys.modules[__name__], manifest)
     return manifest
 
 
@@ -3491,6 +3599,10 @@ def local_storage_migration_plan(
         }
 
     configured, root, manifest = require_configured_git_store()
+    if manifest.get("project_owners") or manifest.get("domain_owners"):
+        raise SystemExit(
+            "Migrate dedicated domain bundles back to main before switching to local storage."
+        )
     upstream = git_store_upstream(root)
     projects_by_id = bound_projects_by_store_id(configured, manifest)
     project_moves: list[dict[str, Any]] = []
@@ -4149,6 +4261,113 @@ def git_store_bind(args: argparse.Namespace) -> None:
     print(f"Canonical context: {target}")
 
 
+def git_store_detection(repo: Path) -> dict[str, Any]:
+    store = configured_git_store()
+    if store is None or (repo / IGNORE_MARKER).exists():
+        return {"status": "disabled", "matches": []}
+    manifest = load_git_store_manifest(Path(store["path"]))
+    matches = git_store_projects_by_remote(manifest, repo_remote_url(repo))
+    existing = git_store_project_binding(repo)
+    if existing:
+        status = "bound"
+    elif local_context_path(repo).exists():
+        status = "conflict" if matches else "local"
+    elif len(matches) == 1:
+        status = "match"
+    elif matches:
+        status = "ambiguous"
+    else:
+        status = "new"
+    return {"status": status, "matches": list(matches), "binding": existing}
+
+
+def git_store_detect(args: argparse.Namespace) -> None:
+    result = git_store_detection(context_repo(args.repo))
+    print(json.dumps(result, sort_keys=True))
+
+
+def git_store_register(args: argparse.Namespace) -> None:
+    _store, root, manifest = require_configured_git_store()
+    remote = normalize_remote_url(args.remote)
+    if not remote:
+        raise SystemExit("Registration requires a valid Git remote URL.")
+    matches = git_store_projects_by_remote(manifest, remote)
+    if matches:
+        if len(matches) != 1:
+            raise SystemExit("Remote identity is ambiguous; resolve duplicate projects first.")
+        print(f"Registered project context: {matches[0]}")
+        return
+    domain = validate_domain_id(args.domain) if args.domain else None
+    if domain and domain not in manifest["domains"]:
+        raise SystemExit("Register the domain membership with domain-set first.")
+    project_id = str(uuid.uuid5(uuid.UUID(manifest["store_id"]), remote))
+    owner = domain_stores.scope_root(sys.modules[__name__], root, domain) if domain else root
+    target = owner / "projects" / project_id / "context.json"
+    validate_git_store_target(owner, target)
+    if target.exists():
+        raise SystemExit(f"Unregistered project context already exists: {target}")
+    payload = {
+        "project_id": project_id, "remote_url": remote, "name": args.name,
+        "domain": domain, "manifest_hash": path_content_hash(git_store_manifest_path(root)),
+        "push_url": git_store_upstream(root).push_url,
+        "owner_push_url": git_store_upstream(owner).push_url,
+    }
+    token = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+    if not args.approve_snapshot:
+        print(json.dumps(payload, sort_keys=True))
+        print(f"Snapshot token: {token}")
+        print("No changes made. Approve registration, then bootstrap from inspected remote sources.")
+        return
+    validate_snapshot_approval({"snapshot": token}, args.approve_snapshot)
+    data = default_context()
+    data["store_id"] = project_id
+    data["storage_policy"] = storage_policy("git-store", "user-confirmed", False)
+    metadata = {"name": args.name, "remote_url": remote, "created_at": now_iso(), "updated_at": now_iso()}
+    manifest["projects"][project_id] = metadata
+    if domain:
+        manifest["domains"][domain] = sorted({*manifest["domains"][domain], project_id})
+    if owner != root:
+        owner_name = manifest["domain_owners"][domain]
+        manifest.setdefault("project_owners", {})[project_id] = owner_name
+        child_manifest = load_git_store_manifest(owner)
+        child_manifest["projects"][project_id] = metadata
+        child_manifest["domains"][domain] = sorted({*child_manifest["domains"].get(domain, []), project_id})
+        write_git_json(owner, git_store_manifest_path(owner), child_manifest)
+    write_git_json(owner, target, data)
+    write_git_json(root, git_store_manifest_path(root), manifest)
+    print(f"Registered project context: {project_id}")
+    print("Bootstrap required: capture verified non-empty records in this same turn.")
+
+
+def git_store_activate(args: argparse.Namespace) -> None:
+    _store, root, manifest = require_configured_git_store()
+    registry = manifest.get("stores", {})
+    selected = sorted(registry) if args.all else [args.store]
+    if not selected or any(name not in registry for name in selected):
+        raise SystemExit("Select a registered --store or --all.")
+    with git_store_lock(root):
+        domain_stores.validate_registry(sys.modules[__name__], root, manifest)
+        paths = (".", *(f":(exclude){entry['path']}" for entry in registry.values()))
+        if git_status_for_paths(root, paths):
+            raise SystemExit("Store activation requires a clean main store outside registered submodules.")
+        for name in selected:
+            entry = registry[name]
+            relative = entry["path"]
+            child = root / relative
+            validate_git_store_target(root, child / GIT_STORE_MANIFEST_FILE)
+            if (child / ".git").exists() and git_status_for_paths(child, (".",)):
+                raise SystemExit(f"Store activation refuses uncommitted child changes: {name}")
+            module_name = domain_stores.submodule_name(
+                sys.modules[__name__], root, relative, entry["remote_url"]
+            )
+            git_checked(root, "-c", f"submodule.{module_name}.url={entry['remote_url']}",
+                        "submodule", "update", "--init", "--", relative,
+                        action="domain store activation")
+            child = domain_stores.roots(sys.modules[__name__], root)[name]
+            domain_stores.attach_branch(sys.modules[__name__], child)
+            print(f"Activated domain store: {name} ({child})")
+
+
 def git_store_status(args: argparse.Namespace) -> None:
     configured, root, manifest = require_configured_git_store()
     upstream = git_store_upstream(root)
@@ -4156,14 +4375,18 @@ def git_store_status(args: argparse.Namespace) -> None:
     print(f"Store id: {manifest['store_id']}")
     print(f"Push upstream: {upstream.remote}/{upstream.branch}")
     print(f"Configured project bindings: {len(configured['project_bindings'])}")
+    available = domain_stores.roots(sys.modules[__name__], root)
     for project_id, metadata in sorted(manifest["projects"].items()):
         name = safe_display_field(metadata.get("name", ""), GLOBAL_LABEL_OUTPUT_LIMIT)
         remote = safe_display_field(
             metadata.get("remote_url") or "-", GLOBAL_LABEL_OUTPUT_LIMIT
         )
+        owner = manifest.get("project_owners", {}).get(project_id, "main")
+        source = (available[owner] / "projects" / project_id / "context.json"
+                  if owner in available else f"unavailable store:{owner}")
         print(
             f"{project_id} | {name} | {remote} | "
-            f"{git_store_project_path(root, project_id)}"
+            f"{source}"
         )
     for domain_id, members in sorted(manifest["domains"].items()):
         print(f"Domain {domain_id}: {', '.join(members)}")
@@ -4321,16 +4544,18 @@ def update_context(args: argparse.Namespace) -> None:
     require_initialized_context(repo)
     data, migrations = load_context_with_migrations(repo)
     save_context(repo, data)
-    refresh_bound_git_store_project_metadata(repo)
-    enroll_repo_in_domain_roots(repo)
+    if TARGET_PROJECT_ID is None:
+        refresh_bound_git_store_project_metadata(repo)
+        enroll_repo_in_domain_roots(repo)
     scope_migrations = migrate_private_scope_contexts()
     applied = ", ".join(migrations) if migrations else "none"
-    print(f"Updated project context: {repo / CONTEXT_DIR}")
+    location = context_path(repo) if TARGET_PROJECT_ID else repo / CONTEXT_DIR
+    print(f"Updated project context: {location}")
     print(f"Schema version: {SCHEMA_VERSION}")
     print(f"Migrations applied: {applied}")
     if scope_migrations:
         print(f"Scoped migrations applied: {', '.join(scope_migrations)}")
-    print("Generated views: refreshed")
+    print("Generated views: " + ("not requested (identity target)" if TARGET_PROJECT_ID else "refreshed"))
 
 
 def status_context(args: argparse.Namespace) -> None:
@@ -4344,8 +4569,25 @@ def status_context(args: argparse.Namespace) -> None:
                 f"Git context store configured: {git_root}. New project context "
                 "initialization uses it automatically."
             )
+            detection = git_store_detection(repo)
+            if detection["status"] == "match":
+                print(
+                    f"Known component checkout detected: {detection['matches'][0]}. "
+                    "Before onboarding, run git-store-bind --match-remote with this --repo "
+                    "to restore its existing context and domain membership. Do not initialize a duplicate."
+                )
+            elif detection["status"] in {"ambiguous", "conflict"}:
+                print(
+                    "Component binding needs user input: "
+                    + json.dumps(detection, sort_keys=True)
+                    + ". Do not initialize or bind automatically."
+                )
         return
     data = load_context(repo)
+    if TARGET_PROJECT_ID is None and configured_git_store() and git_store_project_binding(repo) is None:
+        detection = git_store_detection(repo)
+        if detection["status"] == "conflict":
+            print("Component binding needs user input: " + json.dumps(detection, sort_keys=True))
     open_questions = [
         question
         for question in data.get("open_questions", [])
@@ -4517,7 +4759,7 @@ def search_context(args: argparse.Namespace) -> None:
         raise SystemExit("Search limit must be greater than zero.")
 
     require_initialized_context(repo)
-    global_lines = try_global_search(repo, queries, args.limit)
+    global_lines = None if TARGET_PROJECT_ID else try_global_search(repo, queries, args.limit)
     active = active_applicability(repo)
     try:
         local_results = context_search_results(
@@ -4929,11 +5171,14 @@ def knowledge_graph_inputs(repo: Path) -> tuple[tuple[Any, ...], tuple[Any, ...]
     for scope_root in scope_context_roots():
         loaded, _, _ = global_backend.load_scope_records(scope_root)
         records = global_backend.sorted_records((*records, *loaded))
+    git_root = configured_git_store_root(config)
+    manifest = load_git_store_manifest(git_root) if git_root else {"domains": {}}
     domains = [
         backend.DomainSpec(
             domain_id,
             tuple(str(project) for project in members.projects),
             tuple(members.remotes),
+            tuple(manifest["domains"].get(domain_id, [])),
         )
         for domain_id, members in configured_domains(config).items()
     ]
@@ -5520,6 +5765,43 @@ def build_parser() -> argparse.ArgumentParser:
     add_repo(git_store_status_parser)
     git_store_status_parser.set_defaults(func=git_store_status)
 
+    detect_parser = subparsers.add_parser(
+        "git-store-detect", help="Read-only component binding detection"
+    )
+    add_repo(detect_parser)
+    detect_parser.set_defaults(func=git_store_detect)
+
+    register_parser = subparsers.add_parser(
+        "git-store-register", help="Preview or approve a remote-only project's stable identity"
+    )
+    add_repo(register_parser)
+    register_parser.add_argument("--remote", required=True)
+    register_parser.add_argument("--name", required=True)
+    register_parser.add_argument("--domain")
+    register_parser.add_argument("--approve-snapshot")
+    register_parser.set_defaults(func=git_store_register)
+
+    activate_parser = subparsers.add_parser(
+        "git-store-activate", help="Initialize selected registered domain submodules"
+    )
+    add_repo(activate_parser)
+    activation = activate_parser.add_mutually_exclusive_group(required=True)
+    activation.add_argument("--store")
+    activation.add_argument("--all", action="store_true")
+    activate_parser.set_defaults(func=git_store_activate)
+
+    domain_store_parser = subparsers.add_parser(
+        "domain-store", help="Preview or approve whole-domain storage placement"
+    )
+    add_repo(domain_store_parser)
+    domain_store_parser.add_argument("--domain", required=True)
+    domain_store_parser.add_argument("--store", required=True)
+    domain_store_parser.add_argument("--remote")
+    domain_store_parser.add_argument("--create-repo")
+    domain_store_parser.add_argument("--visibility", choices=("private", "public"))
+    domain_store_parser.add_argument("--approve-snapshot")
+    domain_store_parser.set_defaults(func=lambda args: domain_stores.run(sys.modules[__name__], args))
+
     global_init_parser = subparsers.add_parser(
         "global-init",
         help="Provision the pinned Qdrant runtime and index configured workspace roots",
@@ -5848,10 +6130,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     graph_parser.set_defaults(func=graph_context)
 
+    for name in (
+        "add-component", "add-pattern", "add-question", "add-term",
+        "update", "remove", "move", "status", "search", "audit",
+    ):
+        subparser = subparsers.choices[name]
+        subparser.add_argument(
+            "--project-store-id",
+            help="Target a registered project identity without a component checkout",
+        )
+        if name.startswith("add-"):
+            subparser.add_argument("--source-remote", help="Inspected source Git remote")
+            subparser.add_argument("--source-commit", help="Inspected full Git commit SHA")
     return parser
 
 
 def git_store_mutation_root(args: argparse.Namespace) -> Path | None:
+    if args.command == "git-store-register":
+        return configured_git_store_root() if args.approve_snapshot else None
     if args.command == "storage-migrate":
         if not args.approve_snapshot:
             return None
@@ -5877,6 +6173,8 @@ def git_store_mutation_root(args: argparse.Namespace) -> Path | None:
 
 
 def git_store_read_root(args: argparse.Namespace) -> Path | None:
+    if os.environ.get("PROJECT_CONTEXT_CURATOR_READ_ONLY") == "1":
+        return None
     if not is_git_store_read_command(args):
         return None
     candidate = configured_git_store_root()
@@ -5913,16 +6211,100 @@ def validate_git_store_approval(args: argparse.Namespace, root: Path) -> None:
     validate_snapshot_approval({"snapshot": plan["token"]}, args.approve_snapshot)
 
 
+def store_route_snapshot(root: Path) -> dict[str, Any]:
+    manifest = load_git_store_manifest(root)
+    return {
+        field: manifest.get(field, {})
+        for field in ("stores", "project_owners", "domain_owners", "domains")
+    }
+
+
+def require_unchanged_remote_routes(
+    root: Path, upstream: GitUpstream, expected: dict[str, Any] | None = None,
+) -> None:
+    if not git_remote_branch_exists(root, upstream):
+        return
+    git_checked(root, "fetch", "--no-tags", upstream.remote, upstream.branch,
+                action="routing lease refresh")
+    result = git_checked(root, "show", f"FETCH_HEAD:{GIT_STORE_MANIFEST_FILE}",
+                         action="routing lease inspection")
+    baseline = None
+    if expected is None:
+        ancestor = git_checked(root, "merge-base", "HEAD", "FETCH_HEAD",
+                               action="routing lease ancestry inspection").stdout.strip()
+        baseline = git_checked(root, "show", f"{ancestor}:{GIT_STORE_MANIFEST_FILE}",
+                               action="routing lease baseline inspection")
+    try:
+        if baseline is not None:
+            previous = json.loads(baseline.stdout)
+            expected = {
+                field: previous.get(field, {})
+                for field in ("stores", "project_owners", "domain_owners", "domains")
+            }
+        manifest = json.loads(result.stdout)
+        current = {field: manifest.get(field, {}) for field in expected}
+    except (ValueError, AttributeError):
+        raise SystemExit("Remote store registry is invalid; refusing publication.") from None
+    if current != expected:
+        raise SystemExit(
+            "Remote domain routing changed. Canonical changes were retained locally; "
+            "synchronize and resolve ownership before retrying."
+        )
+
+
+def publish_store_without_rebase(root: Path, upstream: GitUpstream) -> None:
+    result = push_git_store(root, upstream)
+    if result.returncode != 0:
+        raise SystemExit(
+            "Git context update was committed locally but push failed; resolve the "
+            "concurrent store change before retrying: " + git_error_detail(result)
+        )
+
+
 def main(argv: list[str] | None = None) -> int:
+    global TARGET_PROJECT_ID, SOURCE_REMOTE, SOURCE_COMMIT
     parser = build_parser()
     args = parser.parse_args(argv)
+    TARGET_PROJECT_ID = None
+    SOURCE_REMOTE = None
+    SOURCE_COMMIT = None
+    if args.command != "git-store-bind" and getattr(args, "project_store_id", None):
+        try:
+            TARGET_PROJECT_ID = str(uuid.UUID(args.project_store_id))
+        except ValueError:
+            raise SystemExit("Invalid project context store id.") from None
+        _store, _root, manifest = require_configured_git_store()
+        if TARGET_PROJECT_ID not in manifest["projects"]:
+            raise SystemExit(f"Unknown project context store id {TARGET_PROJECT_ID}.")
+    remote = getattr(args, "source_remote", None)
+    commit = getattr(args, "source_commit", None)
+    if (
+        TARGET_PROJECT_ID and args.command.startswith("add-")
+        and getattr(args, "source", "user-confirmed") != "user-confirmed"
+        and not (remote and commit)
+    ):
+        raise SystemExit("Remote source capture requires --source-remote and --source-commit; user-confirmed decisions do not.")
+    if remote or commit:
+        SOURCE_REMOTE = normalize_remote_url(remote)
+        if not SOURCE_REMOTE or not commit or not re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", commit):
+            raise SystemExit("--source-remote and --source-commit require a valid remote and full commit SHA together.")
+        SOURCE_COMMIT = commit.lower()
+        project_id = TARGET_PROJECT_ID or git_store_project_binding(context_repo(args.repo))
+        if project_id:
+            _store, _root, manifest = require_configured_git_store()
+            if manifest["projects"][project_id].get("remote_url") != SOURCE_REMOTE:
+                raise SystemExit("Source remote does not match the selected project's registered remote.")
     root = git_store_mutation_root(args)
     if root is None:
         root = git_store_read_root(args)
     if root is None:
         args.func(args)
         return 0
-    with git_store_lock(root):
+    with ExitStack() as locks:
+        locks.enter_context(git_store_lock(root))
+        journal = git_path(root, "--git-dir") / domain_stores.JOURNAL
+        if journal.exists():
+            raise SystemExit("A domain migration is pending. Resume domain-store with its original approved snapshot first.")
         validate_git_store_approval(args, root)
         upstream = git_store_upstream(root)
         if is_git_store_read_command(args):
@@ -5932,14 +6314,38 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"Git context store refreshed: {remote}/{branch}")
             args.func(args)
         else:
+            children = domain_stores.roots(sys.modules[__name__], root)
+            multiple_stores = bool(load_git_store_manifest(root).get("stores"))
+            if multiple_stores:
+                require_unchanged_remote_routes(root, upstream)
+            for name, child in sorted(children.items()):
+                if name == "main":
+                    continue
+                locks.enter_context(git_store_lock(child))
+                domain_stores.attach_branch(sys.modules[__name__], child)
+                prepare_git_store(child, git_store_upstream(child))
             prepare_git_store(root, upstream)
+            refreshed = domain_stores.roots(sys.modules[__name__], root)
+            if refreshed != children:
+                raise SystemExit("Store registry changed during synchronization; retry the command.")
+            route_snapshot = store_route_snapshot(root)
             args.func(args)
+            if multiple_stores:
+                require_unchanged_remote_routes(root, upstream, route_snapshot)
+            for name, child in sorted(children.items()):
+                if name == "main":
+                    continue
+                if commit_git_store_changes(child, f"chore(context): apply {args.command}"):
+                    publish_store_without_rebase(child, git_store_upstream(child))
             changed = commit_git_store_changes(
                 root,
                 f"chore(context): apply {args.command}",
             )
             if changed:
-                push_git_store_commit(root, upstream)
+                if multiple_stores:
+                    publish_store_without_rebase(root, upstream)
+                else:
+                    push_git_store_commit(root, upstream)
     if not is_git_store_read_command(args):
         remote = safe_display_field(upstream.remote, GLOBAL_LABEL_OUTPUT_LIMIT)
         branch = safe_display_field(upstream.branch, GLOBAL_LABEL_OUTPUT_LIMIT)

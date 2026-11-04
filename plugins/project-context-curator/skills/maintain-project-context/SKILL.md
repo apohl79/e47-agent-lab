@@ -19,8 +19,8 @@ Use JSON text files as canonical stores. Initial setup records one runtime mode:
   `~/.local/share/project-context-curator/contexts/`.
 
 Local storage runtime keeps project facts in each repository and non-project
-facts in XDG. Git-store runtime keeps project, domain, and universal facts in its
-exclusive canonical Git checkout while user and machine facts remain private in
+facts in XDG. Git-store runtime keeps project, domain, and universal facts in the
+main canonical Git store or registered domain submodules while user and machine facts remain private in
 XDG. Local mode's saved project visibility is `local` (Git-excluded) or
 `versioned`:
 
@@ -28,7 +28,11 @@ XDG. Local mode's saved project visibility is `local` (Git-excluded) or
 - Domain, universal, and shareable composite facts: `<git-store>/scopes/`.
 - User, machine, and every composite containing either remain private in XDG.
 - `<git-store>/project-context-store.json` persists stable project IDs and
-  domain membership. Absolute checkout bindings and domain roots stay in XDG.
+  domain membership and routes each project/domain to one canonical owner.
+  Absent ownership metadata means the main store, preserving older stores.
+  Dedicated stores live under `stores/<slug>` as Git submodules; their project
+  and scope paths use the same layout. Absolute checkout bindings and domain
+  roots stay in XDG.
 - Project checkouts retain generated Markdown views, not a writable JSON mirror.
 - The updater serializes Git-store mutations, synchronizes the configured
   remote's `main` before writing, and creates and pushes one Conventional Commit
@@ -90,6 +94,7 @@ python3 <skill-dir>/scripts/project_context.py git-store-bind --repo . \
   --project-store-id <uuid>
 python3 <skill-dir>/scripts/project_context.py git-store-bind --repo . \
   --match-remote
+python3 <skill-dir>/scripts/project_context.py git-store-detect --repo .
 python3 <skill-dir>/scripts/project_context.py git-store-status --repo .
 ```
 
@@ -143,6 +148,70 @@ python3 <skill-dir>/scripts/project_context.py git-store-bind --repo <repo> \
 Binding (and `init` of a not-yet-registered checkout) restores persisted domain
 membership, including remote-declared members, and regenerates project views.
 User/machine knowledge and local absolute bindings never leave XDG storage.
+
+Before initializing a newly checked-out repository, run read-only
+`git-store-detect --repo <checkout>`. If it reports a unique remote match with
+no local-context conflict, use `git-store-bind --repo <checkout> --match-remote`
+instead of creating another project. Resolve ambiguous matches or local-context
+conflicts with the user. SessionStart may report a candidate but remains
+read-only; the agent performs binding explicitly.
+
+Use `$manage-context-domains` for domain membership, main-versus-submodule
+storage selection, and whole-domain migration. Use `$configure-context-storage`
+for selective activation of registered stores on another machine. New PCC
+versions support older single-store repositories; older clients need not
+understand new multi-store layouts.
+
+### Knowledge without a source checkout
+
+A local checkout binding locates source; it is not the project identity or
+proof that source was inspected. Obtain the stable project ID and stored
+remote from `git-store-status`. If the remote has no registered project, preview:
+
+```bash
+python3 <skill-dir>/scripts/project_context.py git-store-register \
+  --repo <current-repo> --remote <source-url> --name <project-name> \
+  [--domain <existing-domain>]
+```
+
+Show the exact remote, name, optional existing domain, and snapshot token through
+the host approval UI. After explicit approval, rerun the identical command with
+`--approve-snapshot <token>` to create its stable UUID. Bootstrap non-empty,
+verified context in the same turn using `add-* --project-store-id <uuid>`;
+do not leave an empty registered knowledge store. Inspect source before
+registration when needed to prepare that bootstrap. A domain must already exist;
+use `$manage-context-domains` to create it first. Registration does not create
+or bind a source checkout and does not approve global enrollment.
+
+Use `--project-store-id <uuid>` on supported
+record commands or `search` to target that canonical project without binding
+the current repository to it:
+
+```bash
+python3 <skill-dir>/scripts/project_context.py search --repo <current-repo> \
+  --project-store-id <uuid> --query "<task term>"
+```
+
+Shared knowledge remains writable when source checkouts are absent. Before
+capturing or updating source-derived facts, inspect the actual remote repository
+through authenticated `gh` or Git, resolve a full commit SHA, and inspect the
+relevant files at that exact revision. Do not substitute a remote URL, binding,
+repository metadata, or cached knowledge for source evidence. Ask for access or
+record an open question when the source cannot be inspected.
+
+Search the target project's existing records first, apply the admission gate,
+then capture with the supported record command, `--project-store-id <uuid>`,
+`--source-remote <inspected-url>`, and `--source-commit <full-sha>`. Use
+`--source repo-docs` for verified remote repository evidence. Preserve precise
+paths and revision in the fact's evidence; never imply that a local filesystem
+path exists. Domain or universal capture still requires verified applicability;
+remote source access does not broaden scope.
+
+For remote-only `--source repo-docs` additions, both `--source-remote` and a full
+`--source-commit` are required, and the remote must match the registered project.
+For explicitly user-confirmed decisions, use `--source user-confirmed`; remote
+evidence flags may be omitted. Remote-only provenance uses a portable project
+URI rather than inventing a local checkout or local Git commit.
 
 ### Optional global retrieval
 
@@ -280,18 +349,19 @@ progress in the task or plan, not in `docs/context/`.
 Classify each admitted fact conservatively before writing it. Without a
 configured Git context store, project facts stay in the repository and
 non-project facts use XDG. With one configured, project, domain, and universal
-facts use that exclusive canonical Git store while user and machine facts
+facts use their routed canonical Git store while user and machine facts
 remain private in XDG.
 
 - `project:self` is the default. Use it whenever broader applicability is not
   verified.
 - Classify as domain only from user confirmation, authoritative domain
   documentation, or corroborating evidence in multiple registered domain
-  projects. Before setting up a domain, ask whether membership stays explicit
-  or automatically includes initialized/bound projects beneath local roots; ask
-  for exact roots when chosen. Use `domain-set` with `--project`, `--remote`,
-  and/or `--root`. Never infer membership or a root from names or one
-  implementation.
+  projects. Invoke `$manage-context-domains` before setting up or changing a
+  domain. Ask for explicit members and/or exact local roots; for each new domain,
+  also ask whether storage belongs in main or a dedicated repository.
+  `domain-set` replaces the supplied membership configuration; preserve existing
+  members, remotes, and roots the user wants to retain. Never infer membership
+  or a root from names or one implementation.
 - Workspace applicability is legacy and read-only; reclassify existing records
   with `move`. Use user or machine only for the current identity or environment;
   use universal only for context-independent facts.
@@ -338,6 +408,11 @@ canonical store; it only makes those facts inapplicable to the removed project.
       terms (or `CONTEXT_PREFLIGHT: NONE` when no pattern matches).
 3. If `.no-project-context` exists at the repository root, do not initialize context and do not ask again.
 4. If `docs/context/index.md` does not exist, ask one concise question before executing ordinary feature, research, planning, or review work: whether Project Context Curator should be initialized for this project.
+   - In Git-store runtime, first run `git-store-detect` and bind a unique existing
+     remote match without local conflict instead of initializing duplicate
+     knowledge. Ask for resolution if matches are ambiguous or local context
+     conflicts; continue the initialization question only for a genuinely new
+     project.
    - If the user says no, run `scripts/project_context.py ignore --repo <repo>` and continue without project context.
    - If the user says yes, bootstrap before responding — even when the enablement decision arrived alongside an unrelated primary task:
      1. Run `storage-status`. If the runtime is unconfigured, invoke
@@ -448,13 +523,15 @@ python3 <skill-dir>/scripts/project_context.py add-pattern --repo . \
   --name "Signed commits" --summary "..." --applicability universal
 ```
 
-Before configuring a domain, use the host user-input tool to ask:
+Use `$manage-context-domains` before configuring a domain, including its required
+main-versus-dedicated storage choice. Use the host user-input tool to ask:
 “Should membership stay explicit, or should initialized/bound projects beneath
 a local root join automatically?” Ask for the exact root when automatic
 membership is selected. `--project` accepts checkout paths, `--remote` accepts
 Git remote URLs, and `--root` accepts machine-local directory roots. Root rules
 add current and future initialized/bound projects without removing members when
-a checkout disappears:
+a checkout disappears. Include the full intended membership when replacing
+configuration:
 
 ```bash
 python3 <skill-dir>/scripts/project_context.py domain-set --repo . \

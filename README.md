@@ -9,7 +9,7 @@ Plugin marketplace for Codex, Claude Code, and Xedoc.
 | [Reviewers](plugins/reviewers/README.md) | `0.11.0` | Incremental implementation review, PR finalization, and broad reviewer-team workflows. | Xedoc, Codex, Claude Code |
 | [Auto Compaction](plugins/auto-compaction/README.md) | `0.1.0` | Claude Code auto-compaction gate with setup skill and checkpoint hooks. | Claude Code |
 | [Inline Discussion](plugins/inline-discussion/README.md) | `2.1.1` | Keep document editing, focused AI side threads, and main-agent updates in one view. | Xedoc, Codex, Claude Code |
-| [Project Context Curator](plugins/project-context-curator/README.md) | `5.8.0` | Durable project knowledge with audit and graph-assisted retrieval. | Xedoc, Codex, Claude Code |
+| [Project Context Curator](plugins/project-context-curator/README.md) | `5.9.0` | Portable project and domain knowledge in main or dedicated Git stores. | Xedoc, Codex, Claude Code |
 | [Matrix](plugins/matrix/README.md) | `0.13.4` | Connect Xedoc sessions and an always-on host chat to private Matrix rooms. | Xedoc |
 
 ## Install

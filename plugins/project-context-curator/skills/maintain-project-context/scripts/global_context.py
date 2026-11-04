@@ -150,6 +150,8 @@ class ContextRecord:
     source_path: str
     applicability: tuple[tuple[str, str], ...]
     content_hash: str
+    project_id: str = ""
+    remote_url: str = ""
 
 
 @dataclass(frozen=True)
@@ -157,6 +159,9 @@ class ContextSource:
     source_path: str
     project_path: str
     workspace_root: str
+    project_id: str = ""
+    remote_url: str = ""
+    portable: bool = False
 
 
 @dataclass(frozen=True)
@@ -386,8 +391,23 @@ def discover_context_candidates(
     )
 
 
-def source_payload(source: ContextSource) -> dict[str, str]:
-    return asdict(source)
+def source_payload(source: ContextSource) -> dict[str, Any]:
+    payload = asdict(source)
+    for field in ("project_id", "remote_url", "portable"):
+        if not payload[field]:
+            del payload[field]
+    return payload
+
+
+def project_uri(project_id: str) -> str:
+    return f"pcc://project/{project_id}"
+
+
+def source_project_name(source: ContextSource) -> str:
+    if source.project_path.startswith("pcc://") or (source.portable and source.remote_url):
+        remote = source.remote_url.rstrip("/").rsplit("/", 1)[-1]
+        return remote.removesuffix(".git") or source.project_id
+    return Path(source.project_path).name
 
 
 def parse_external_sources(
@@ -402,33 +422,65 @@ def parse_external_sources(
         except json.JSONDecodeError as exc:
             raise GlobalContextError("external source must be valid JSON") from exc
         source_path = Path(one_line(payload.get("source_path"))).expanduser()
-        project_path = Path(one_line(payload.get("project_path"))).expanduser()
+        raw_project = one_line(payload.get("project_path"))
+        project_path = Path(raw_project).expanduser()
         workspace_root = Path(one_line(payload.get("workspace_root"))).expanduser()
-        if not source_path.is_absolute() or not project_path.is_absolute():
+        portable = payload.get("portable") is True
+        project_id = one_line(payload.get("project_id"))
+        if project_id:
+            try:
+                project_id = str(uuid.UUID(project_id))
+            except ValueError as exc:
+                raise GlobalContextError("external project ID must be a UUID") from exc
+        if portable and not project_id:
+            raise GlobalContextError("portable external source requires a project ID")
+        remote_only = portable and raw_project == project_uri(project_id)
+        if not source_path.is_absolute() or not (
+            project_path.is_absolute() or remote_only
+        ):
             raise GlobalContextError(
                 "external source and project paths must be absolute"
             )
         workspace = workspace_root.resolve()
-        project = project_path.resolve()
+        project = raw_project if remote_only else str(project_path.resolve())
         if source_path.is_symlink():
             raise GlobalContextError("external canonical source must not be a symlink")
         source = source_path.resolve()
-        if str(workspace) not in allowed_roots:
+        if str(workspace) not in allowed_roots and not remote_only:
             raise GlobalContextError("external source workspace is not configured")
-        try:
-            project.relative_to(workspace)
-        except ValueError:
+        if remote_only:
+            try:
+                source.relative_to(workspace)
+            except ValueError:
+                raise GlobalContextError(
+                    "portable canonical source is outside its store workspace"
+                ) from None
+        else:
+            try:
+                Path(project).relative_to(workspace)
+            except ValueError:
+                raise GlobalContextError(
+                    "external source project is outside its workspace"
+                ) from None
+        if portable and (
+            source.name != "context.json"
+            or source.parent.name != project_id
+            or source.parent.parent.name != "projects"
+        ):
             raise GlobalContextError(
-                "external source project is outside its workspace"
-            ) from None
+                "portable canonical source must be projects/<project-id>/context.json"
+            )
         if not source.is_file():
             raise GlobalContextError(
                 f"external canonical source is unavailable: {source}"
             )
-        sources[str(project)] = ContextSource(
+        sources[project] = ContextSource(
             source_path=str(source),
-            project_path=str(project),
+            project_path=project,
             workspace_root=str(workspace),
+            project_id=project_id,
+            remote_url=one_line(payload.get("remote_url")),
+            portable=portable,
         )
     return tuple(
         sorted(sources.values(), key=lambda source: source.project_path.casefold())
@@ -460,7 +512,7 @@ def snapshot_fingerprint(
 def resolved_applicability(
     value: Any,
     *,
-    project_path: Path,
+    project_path: Path | str,
     workspace_root: Path,
 ) -> tuple[tuple[str, str], ...]:
     selectors = sequence(value, "applicability")
@@ -534,10 +586,12 @@ def records_from_context(
     *,
     project_path: str | None = None,
     project_name: str | None = None,
+    project_id: str = "",
+    remote_url: str = "",
 ) -> tuple[ContextRecord, ...]:
     data = mapping(json.loads(path.read_text(encoding="utf-8")), str(path))
-    repo = path.parents[2].resolve() if project_path is None else Path(project_path)
-    project = project_name or repo.name
+    repo = path.parents[2].resolve() if project_path is None else project_path
+    project = project_name or Path(repo).name
     default = data.get(
         "default_applicability", [{"kind": "project", "selector": "self"}]
     )
@@ -556,7 +610,13 @@ def records_from_context(
                 workspace_root=workspace_root,
             )
             text = record_text(project, kind, record, fields, applicability)
-            key = "\x1f".join((str(path), kind, label.casefold()))
+            key = "\x1f".join(
+                (
+                    project_uri(project_id) if project_id else str(path),
+                    kind,
+                    label.casefold(),
+                )
+            )
             raw_id = one_line(record.get("id"))
             try:
                 record_id = str(uuid.UUID(raw_id)) if raw_id else ""
@@ -584,6 +644,8 @@ def records_from_context(
                     source_path=str(path),
                     applicability=applicability,
                     content_hash=content_hash,
+                    project_id=project_id,
+                    remote_url=remote_url,
                 )
             )
     keys = [record.key for record in records]
@@ -662,13 +724,23 @@ def catalog_sources(
         raw_sources if isinstance(raw_sources, list) else catalog.get("records", [])
     )
     external_by_project = {source.project_path: source for source in external_sources}
+    external_by_id = {
+        source.project_id: source for source in external_sources if source.project_id
+    }
+    external_by_path = {source.source_path: source for source in external_sources}
     sources: dict[str, ContextSource] = {}
     for raw_source in candidates:
         if not isinstance(raw_source, dict):
             continue
         raw_path = raw_source.get("source_path")
         raw_project = str(raw_source.get("project_path", ""))
-        replacement = external_by_project.get(raw_project)
+        raw_project_id = str(raw_source.get("project_id", ""))
+        replacement = (
+            external_by_id.get(raw_project_id)
+            if raw_project_id
+            else external_by_project.get(raw_project)
+            or external_by_path.get(str(raw_path))
+        )
         if replacement is not None:
             sources[replacement.project_path] = replacement
             continue
@@ -718,6 +790,8 @@ def record_from_payload(raw: dict[str, Any]) -> ContextRecord | None:
             source_path=str(raw["source_path"]),
             applicability=applicability,
             content_hash=str(raw["content_hash"]),
+            project_id=one_line(raw.get("project_id")),
+            remote_url=one_line(raw.get("remote_url")),
         )
     except (KeyError, TypeError, ValueError):
         return None
@@ -751,7 +825,10 @@ def load_source_records(
     for source in sources:
         path = Path(source.source_path)
         project = Path(source.project_path)
-        if (project / IGNORE_MARKER).exists():
+        if (
+            not source.project_path.startswith("pcc://")
+            and (project / IGNORE_MARKER).exists()
+        ):
             continue
         active_sources.append(source)
         try:
@@ -772,7 +849,9 @@ def load_source_records(
                     path,
                     Path(source.workspace_root),
                     project_path=source.project_path,
-                    project_name=project.name,
+                    project_name=source_project_name(source),
+                    project_id=source.project_id,
+                    remote_url=source.remote_url,
                 )
             )
         except (OSError, json.JSONDecodeError, GlobalContextError) as exc:
@@ -835,7 +914,7 @@ def project_nodes_from_sources(
 ) -> tuple[ProjectNode, ...]:
     nodes = {
         source.project_path: ProjectNode(
-            Path(source.project_path).name,
+            source_project_name(source),
             source.project_path,
         )
         for source in sources
@@ -1025,6 +1104,8 @@ def catalog_from_records(
                     source_path=record.source_path,
                     project_path=record.project_path,
                     workspace_root=record.workspace_root,
+                    project_id=record.project_id,
+                    remote_url=record.remote_url,
                 )
                 for record in records
                 if record.project_path
@@ -1063,7 +1144,17 @@ def catalog_diff(
     changed = tuple(
         record
         for record in new_records
-        if old_records.get(record.id, {}).get("content_hash") != record.content_hash
+        if any(
+            old_records.get(record.id, {}).get(field, "") != getattr(record, field)
+            for field in (
+                "content_hash",
+                "source_path",
+                "project_path",
+                "workspace_root",
+                "project_id",
+                "remote_url",
+            )
+        )
     )
     removed = tuple(sorted(set(old_records) - new_ids))
     return changed, removed

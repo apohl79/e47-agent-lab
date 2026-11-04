@@ -229,7 +229,7 @@ def test_session_start_emits_context(tmp_path: Path):
     assert "Project Context Curator is active" in text
     assert "context admission gate" in text
     assert "Facts default to project applicability" in text
-    assert "exclusive canonical Git checkout" in text
+    assert "main canonical Git store or its registered domain submodules" in text
     assert "user and machine facts remain private in XDG" in text
     assert "Workspace applicability is legacy and read-only" in text
     assert "Classify as domain only" in text
@@ -274,6 +274,51 @@ def test_session_start_includes_admission_gate_for_codex(
         "Domain and universal records are not in the docs/context views" in text,
         "Search command:" in text,
     ) == (True, True, True, True)
+
+
+def test_session_start_detects_known_checkout_without_writes_or_sync(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "fresh-checkout"
+    store = tmp_path / "store"
+    repo.mkdir()
+    store.mkdir()
+    git_init(repo)
+    git_init(store)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/acme/service.git"],
+        cwd=repo, check=True,
+    )
+    project_id = "b7e8f44a-518d-440b-b4b7-c6f05ba127b5"
+    store_id = "d83e4a64-1ca7-4e4f-a449-ffb698b066c0"
+    (store / "project-context-store.json").write_text(json.dumps({
+        "schema_version": 1, "store_id": store_id,
+        "projects": {project_id: {"name": "service", "remote_url": "github.com/acme/service"}},
+    }))
+    env = {
+        "PROJECT_CONTEXT_CURATOR_CONFIG_DIR": str(tmp_path / "config"),
+        "PROJECT_CONTEXT_CURATOR_CACHE_DIR": str(tmp_path / "cache"),
+        "PROJECT_CONTEXT_CURATOR_DATA_DIR": str(tmp_path / "data"),
+    }
+    config_dir = Path(env["PROJECT_CONTEXT_CURATOR_CONFIG_DIR"])
+    config_dir.mkdir()
+    (config_dir / "config.json").write_text(json.dumps({
+        "schema_version": 6,
+        "storage_runtime": {"mode": "git-store"},
+        "git_store": {"enabled": True, "path": str(store), "store_id": store_id,
+                      "project_bindings": {}},
+    }))
+    before = {str(path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+
+    result = run_hook("session-start", {"cwd": str(repo)}, env)
+
+    text = result["hookSpecificOutput"]["additionalContext"]
+    assert "automatically bind this unique existing component" in text
+    assert "git-store-bind" in text and "--match-remote" in text
+    assert "ask whether this project should use" not in text
+    assert {str(path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == before
+    assert not (store / ".git/project-context-curator.lock").exists()
+    assert not (repo / "docs/context").exists()
 
 
 def test_session_start_omits_admission_gate_for_xedoc_manifest_context(
@@ -558,7 +603,9 @@ def test_context_admission_policy_is_aligned_across_agent_surfaces(
         "complete and verified on a long-lived branch",
         "user-confirmed durable invariant or architectural decision",
         "decision or invariant, not as present behavior",
-        "local storage runtime keeps project facts in each repository and non-project facts in xdg. git-store runtime keeps project, domain, and universal facts in its exclusive canonical git checkout while user and machine facts remain private in xdg",
+        "local storage runtime keeps project facts in each repository and non-project facts in xdg",
+        "main canonical git store",
+        "user and machine facts remain private in xdg",
         "classify as domain only from user confirmation, authoritative domain documentation, or corroborating evidence in multiple registered domain projects",
         "workspace applicability is legacy and read-only",
         "use move for promotion or reclassification so the canonical record keeps its identity and provenance instead of being duplicated",

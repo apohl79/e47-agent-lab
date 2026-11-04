@@ -1,0 +1,4 @@
+interface:
+  display_name: "Manage Context Domains"
+  short_description: "Set up domain membership and storage repositories"
+  default_prompt: "Use $manage-context-domains to create a context domain or migrate its storage repository."

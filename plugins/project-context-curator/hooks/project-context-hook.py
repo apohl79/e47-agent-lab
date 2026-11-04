@@ -188,6 +188,7 @@ def project_context_status(repo: Path, script: Path) -> str:
     try:
         proc = subprocess.run(
             [sys.executable, str(script), "status", "--repo", str(repo)],
+            env={**os.environ, "PROJECT_CONTEXT_CURATOR_READ_ONLY": "1"},
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -215,6 +216,7 @@ def global_context_status(repo: Path, script: Path) -> str:
                 "--repo",
                 str(repo),
             ],
+            env={**os.environ, "PROJECT_CONTEXT_CURATOR_READ_ONLY": "1"},
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -239,6 +241,7 @@ def storage_runtime_status(repo: Path, script: Path) -> str:
                 "--repo",
                 str(repo),
             ],
+            env={**os.environ, "PROJECT_CONTEXT_CURATOR_READ_ONLY": "1"},
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -262,6 +265,7 @@ def context_audit_status(repo: Path, script: Path) -> str:
                 "--repo",
                 str(repo),
             ],
+            env={**os.environ, "PROJECT_CONTEXT_CURATOR_READ_ONLY": "1"},
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -298,7 +302,7 @@ ADMISSION_GATE = (
     "invariant, not as present behavior. Store admitted knowledge in the same turn. Facts "
     "default to project applicability. Local storage runtime keeps project facts in each "
     "repository and non-project facts in XDG. Git-store runtime keeps project, domain, "
-    "and universal facts in its exclusive canonical Git checkout while user and machine "
+    "and universal facts in the main canonical Git store or its registered domain submodules while user and machine "
     "facts remain private in XDG. Classify as domain only from user "
     "confirmation, authoritative domain documentation, or corroborating evidence in "
     "multiple registered domain projects. Workspace applicability is legacy and read-only; "
@@ -519,8 +523,16 @@ def session_start(payload: dict[str, Any]) -> None:
     if git_store_configured or git_store_canonical:
         lines.append(
             "A canonical Git context store is configured; init uses it automatically, so no "
-            "local-vs-versioned question is needed. Git commit and push remain explicit."
+            "local-vs-versioned question is needed. Canonical mutations commit and push automatically. "
+            "Use $manage-context-domains to choose main or a dedicated repository for each new domain."
         )
+        if "Known component checkout detected:" in context_status:
+            lines.append(
+                "Before project initialization or global enrollment, automatically bind this "
+                f"unique existing component with python3 {script} git-store-bind --repo {repo} "
+                "--match-remote. Then rerun status and read its restored context. "
+                "SessionStart only detected the match; it did not create a binding."
+            )
     elif storage_unconfigured:
         lines.append(
             "Before context initialization or global onboarding, invoke "
@@ -544,6 +556,10 @@ def session_start(payload: dict[str, Any]) -> None:
         )
     if index.exists():
         lines.append(f"Context index: {index}")
+    elif "Known component checkout detected:" in context_status:
+        lines.append("Restore the known component binding before considering new-project onboarding.")
+    elif "Component binding needs user input:" in context_status:
+        lines.append("Resolve the component binding conflict with the user before onboarding.")
     elif context_initialized:
         lines.append(
             "Context is initialized but its generated index is missing. Run the update command "

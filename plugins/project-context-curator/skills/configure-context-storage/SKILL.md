@@ -1,6 +1,6 @@
 ---
 name: configure-context-storage
-description: Select, inspect, or migrate Project Context Curator canonical storage between local/distributed mode and one Git-backed store. Use during first-time setup, when asked where context is stored, or when switching storage modes while preserving context identities and provenance.
+description: Select, inspect, or migrate Project Context Curator canonical storage between local/distributed mode and Git-backed storage. Use during first-time setup, when setting up shared knowledge on another machine, when asked where context is stored, or when switching storage modes while preserving context identities and provenance.
 ---
 
 # Configure Context Storage
@@ -23,8 +23,9 @@ snapshot.
    available. Present both without bias:
    - `local`: project context is canonical in each checkout; domain and universal
      context use XDG. User and machine context also stays private in XDG.
-   - `git-store`: project, domain, and universal context is canonical in one
-     user-selected Git checkout. User and machine context stays private in XDG.
+   - `git-store`: project, domain, and universal context is canonical in a
+     user-selected main Git checkout, optionally with dedicated domain repositories
+     linked as submodules. User and machine context stays private in XDG.
 4. Gather only the inputs required by that target:
    - For `local`, ask whether migrated and newly initialized project context should
      default to `local` (Git-excluded) or `versioned` in each project repository.
@@ -71,3 +72,43 @@ storage migration again after all bindings are exact.
 Run this workflow before the first project `init` or `global-init`. An approved
 zero-record migration is still meaningful: it persists the user's runtime choice
 and supplies the default used by future initialization.
+
+## Another machine
+
+1. Clone the main knowledge repository to the user's chosen path, then select
+   it through the approved `storage-migrate --target git-store` workflow above.
+   Source/component checkouts are not required merely to use portable knowledge.
+2. Inspect `git-store-status`. Initialize only the registered dedicated stores
+   the user needs:
+
+   ```bash
+   python3 <updater> git-store-activate --repo <current-repo> --store <slug>
+   ```
+
+   Use `--all` instead of `--store <slug>` only when the user wants all registered
+   stores. Let the updater establish an attached `main` with upstream tracking;
+   do not use a detached submodule checkout as a writable store or overwrite
+   existing local changes.
+3. For available source checkouts, run read-only detection before initialization:
+
+   ```bash
+   python3 <updater> git-store-detect --repo <checkout>
+   ```
+
+   Bind a unique remote match using `git-store-bind --repo <checkout>
+   --match-remote`. If detection reports ambiguity or conflicting local context,
+   ask the user; do not initialize a duplicate project or overwrite the conflict.
+   Different absolute paths on different machines are expected. Bindings stay
+   private in XDG.
+4. For unavailable component repositories, retain portable project IDs and
+   remotes. Follow `$maintain-project-context` to inspect remote source and write
+   verified knowledge without inventing a local checkout. For an unregistered
+   remote, use its approved `git-store-register` snapshot workflow and bootstrap
+   verified records in the same turn.
+5. Preview `global-enroll` and obtain approval for new portable knowledge sources
+   before enrollment. Neither cloning, activation, binding, nor a search grants
+   blanket approval to enroll arbitrary repositories.
+
+Use `$manage-context-domains` to choose main versus dedicated storage for each
+new domain or migrate an existing domain. Older single-store repositories remain
+supported by new PCC versions without requiring a multi-store conversion.

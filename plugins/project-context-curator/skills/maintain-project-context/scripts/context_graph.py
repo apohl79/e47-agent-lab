@@ -12,6 +12,7 @@ from global_context import (
     ContextRecord,
     ContextSource,
     derive_relationship_graph,
+    source_project_name,
     sorted_records,
 )
 
@@ -66,6 +67,7 @@ class DomainSpec:
     id: str
     projects: tuple[str, ...]
     remotes: tuple[str, ...]
+    project_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -100,8 +102,8 @@ class KnowledgeGraph:
         }
 
 
-def project_node_id(path: str) -> str:
-    return f"project:{path}"
+def project_node_id(path: str, project_id: str = "") -> str:
+    return f"project:{project_id or path}"
 
 
 def domain_node_id(domain_id: str) -> str:
@@ -129,7 +131,7 @@ def scope_store_id(record: ContextRecord) -> str | None:
 
 def store_of(record: ContextRecord) -> str:
     if record.project_path:
-        return project_node_id(record.project_path)
+        return project_node_id(record.project_path, record.project_id)
     return scope_store_id(record) or ""
 
 
@@ -158,7 +160,7 @@ def resolve_remote_members(
             (
                 node.path
                 for node in by_name.get(remote_name(remote).casefold(), ())
-                if remote_url_of(Path(node.path)) == remote
+                if node.path and remote_url_of(Path(node.path)) == remote
             ),
             None,
         )
@@ -199,16 +201,21 @@ def build_project_graph(
         if store:
             by_store.setdefault(store, []).append(record)
     nodes: dict[str, GraphNode] = {}
+    project_nodes_by_path: dict[str, str] = {}
+    project_nodes_by_remote: dict[str, str] = {}
     for source in sources:
-        node_id = project_node_id(source.project_path)
+        node_id = project_node_id(source.project_path, source.project_id)
+        project_nodes_by_path[source.project_path] = node_id
+        if source.remote_url:
+            project_nodes_by_remote[source.remote_url] = node_id
         nodes[node_id] = replace(
             store_node(
                 node_id,
                 "project",
-                Path(source.project_path).name,
+                source_project_name(source),
                 "initialized",
                 by_store.get(node_id, ()),
-                source.project_path,
+                "" if source.project_path.startswith("pcc://") else source.project_path,
             ),
             store=source.source_path,
         )
@@ -230,14 +237,22 @@ def build_project_graph(
     edges: list[GraphEdge] = []
     for spec in ordered_domains:
         domain_id = domain_node_id(spec.id)
+        for project_id in spec.project_ids:
+            node_id = project_node_id("", project_id)
+            nodes.setdefault(node_id, GraphNode(node_id, "project", project_id, "unavailable"))
+            edges.append(GraphEdge(node_id, domain_id, MEMBER_RELATION, 1.0, "project"))
         for path in spec.projects:
-            node_id = project_node_id(path)
+            node_id = project_nodes_by_path.get(path, project_node_id(path))
             if node_id not in nodes:
                 status = "uninitialized" if Path(path).is_dir() else "missing"
                 nodes[node_id] = GraphNode(node_id, "project", Path(path).name, status, path)
             edges.append(GraphEdge(node_id, domain_id, MEMBER_RELATION, 1.0, "project"))
         for remote, path in resolve_remote_members(spec, initialized, remote_url_of).items():
-            node_id = project_node_id(path) if path is not None else f"remote:{remote}"
+            node_id = project_nodes_by_remote.get(remote) or (
+                project_nodes_by_path.get(path, project_node_id(path))
+                if path is not None
+                else f"remote:{remote}"
+            )
             nodes.setdefault(
                 node_id,
                 GraphNode(node_id, "project", remote_name(remote), "remote-only", remote),
@@ -255,7 +270,11 @@ def build_project_graph(
     for raw in derived["edges"]:
         endpoints = []
         for path in (raw["source_project_path"], raw["target_project_path"]):
-            endpoints.append(path if path in nodes else project_node_id(path))
+            endpoints.append(
+                path
+                if path in nodes
+                else project_nodes_by_path.get(path, project_node_id(path))
+            )
         if any(endpoint not in nodes for endpoint in endpoints):
             continue
         edges.append(
@@ -282,9 +301,23 @@ def resolve_focus(graph: KnowledgeGraph, view: GraphView) -> str:
             raise ValueError(f"unknown domain {view.focus!r}")
         return node_id
     if view.kind == "project":
+        direct = graph.node(view.focus) or graph.node(project_node_id(view.focus))
+        if direct is not None and direct.kind == "project":
+            return direct.id
         resolved = project_node_id(str(Path(view.focus).expanduser().resolve()))
         if graph.node(resolved) is not None:
             return resolved
+        local_path = str(Path(view.focus).expanduser().resolve())
+        bound = next(
+            (
+                node
+                for node in graph.nodes
+                if node.kind == "project" and node.path == local_path
+            ),
+            None,
+        )
+        if bound is not None:
+            return bound.id
         matches = [
             node.id
             for node in graph.nodes
