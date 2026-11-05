@@ -89,6 +89,8 @@ def policy(pc: Any, root: Path, upstream: Any, *, detect: bool = True) -> dict[s
     if mode == "auto" and detect:
         mode = "direct"
         if github:
+            if not pc.git_remote_branch_exists(root, upstream):
+                return {"mode": mode, "repository": repository, "admin_merge": admin == "true"}
             branch = _json(
                 pc, root, "api", "--hostname", "github.com",
                 f"repos/{repository}/branches/{upstream.branch}",
@@ -217,10 +219,12 @@ def resume(pc: Any, root: Path, upstream: Any) -> None:
 def deferred(pc: Any, root: Path, children: dict[str, Path]) -> bool:
     if queue_path(pc, root).exists():
         for child in children.values():
-            policy(pc, child, pc.git_store_upstream(child), detect=False)
+            policy(pc, child, pc.git_store_upstream(child, allow_detached=True), detect=False)
         return True
     return any(
-        policy(pc, child, pc.git_store_upstream(child))["mode"] == "pull-request"
+        policy(
+            pc, child, pc.git_store_upstream(child, allow_detached=True)
+        )["mode"] == "pull-request"
         for child in children.values()
     )
 

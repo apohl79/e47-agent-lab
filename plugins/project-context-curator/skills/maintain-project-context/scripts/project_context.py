@@ -1894,13 +1894,15 @@ def git_config_value(root: Path, key: str) -> str | None:
     return value or None
 
 
-def git_store_upstream(root: Path) -> GitUpstream:
+def git_store_upstream(root: Path, *, allow_detached: bool = False) -> GitUpstream:
     branch_proc = git_process(root, "symbolic-ref", "--quiet", "--short", "HEAD")
     branch = branch_proc.stdout.strip()
     if branch_proc.returncode != 0 or not branch:
-        raise SystemExit(
-            "Git context store must use an attached branch for automatic push."
-        )
+        if not allow_detached:
+            raise SystemExit(
+                "Git context store must use an attached branch for automatic push."
+            )
+        branch = GIT_STORE_BRANCH
     if branch != GIT_STORE_BRANCH:
         raise SystemExit(
             f"Git context store must be checked out on {GIT_STORE_BRANCH} for "

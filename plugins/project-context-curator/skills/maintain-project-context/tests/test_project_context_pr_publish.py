@@ -10,14 +10,35 @@ from pathlib import Path
 
 import pytest
 
-from scope_test_support import read_json, run_context, run_git
-from test_project_context_git_sync import add_term, configure_store, store_context_path
+from scope_test_support import (
+    initialize_git_repository,
+    initialize_git_store,
+    isolated_environment,
+    read_json,
+    run_context,
+    run_git,
+)
+from test_project_context_domain_stores import configured_store, domain_remote, place_domain
+from test_project_context_git_sync import (
+    add_term,
+    configure_store,
+    snapshot_token,
+    store_context_path,
+)
 
 
 def github_store(
-    tmp_path: Path, mode: str = "pull-request",
+    tmp_path: Path, mode: str = "pull-request", *, empty: bool = False,
 ) -> tuple[dict[str, str], Path, Path, Path]:
-    env, repo, store, remote = configure_store(tmp_path)
+    if empty:
+        env = isolated_environment(tmp_path / "xdg")
+        repo = tmp_path / "repo"
+        store = tmp_path / "store"
+        initialize_git_repository(repo)
+        run_context("init", "--visibility", "local", repo=repo, env=env)
+        remote = initialize_git_store(store)
+    else:
+        env, repo, store, remote = configure_store(tmp_path)
     commands = tmp_path / "commands"
     commands.mkdir()
     real_git = shutil.which("git")
@@ -52,6 +73,14 @@ if args[:1] == ["api"]:
     if any("/rules/branches/" in argument for argument in args):
         print(json.dumps([{"type": "pull_request"}]))
     elif any("/branches/" in argument for argument in args):
+        branch = subprocess.run(
+            [os.environ["FAKE_REAL_GIT"], "--git-dir", os.environ["FAKE_GH_REMOTE"],
+             "rev-parse", "--verify", "refs/heads/main"],
+            text=True, capture_output=True, check=False,
+        )
+        if branch.returncode:
+            print("Not Found", file=sys.stderr)
+            sys.exit(1)
         print(json.dumps({"protected": os.environ.get("FAKE_GH_PROTECTED") != "false"}))
     else:
         print(json.dumps({"allow_merge_commit": True}))
@@ -152,6 +181,40 @@ def test_auto_unprotected_repo_does_not_require_rulesets_api(tmp_path: Path) -> 
     assert run_git(store, "rev-parse", "HEAD").stdout == run_git(remote, "rev-parse", "main").stdout
     assert not any("/rules/branches/" in " ".join(event) for event in publication_events(env))
     assert not any(event[:1] == ["pr"] for event in publication_events(env))
+
+
+def test_auto_policy_bootstraps_when_remote_main_does_not_exist(tmp_path: Path) -> None:
+    env, repo, store, remote = github_store(tmp_path, "auto", empty=True)
+    arguments = ("git-store-init", "--store", str(store))
+    preview = run_context(*arguments, repo=repo, env=env)
+    result = run_context(
+        *arguments, "--approve-snapshot", snapshot_token(preview.stdout),
+        repo=repo, env=env,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "synchronized" in result.stdout
+    assert run_git(remote, "rev-parse", "refs/heads/main").stdout.strip()
+    events = publication_events(env)
+    assert not any(event[:1] == ["pr"] for event in events)
+
+
+def test_detached_domain_submodule_is_attached_before_policy_detection(
+    tmp_path: Path,
+) -> None:
+    env, repo, store, _remote, _project_id = configured_store(tmp_path)
+    place_domain(repo, env, "cpl", domain_remote(tmp_path))
+    child = store / "stores" / "cpl"
+    run_git(child, "checkout", "--detach", "HEAD")
+
+    result = run_context(
+        "add-term", "--term", "Detached write", "--definition", "Submodule checkout recovers",
+        "--applicability", "domain:cpl", repo=repo, env=env,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert run_git(child, "symbolic-ref", "--short", "HEAD").stdout.strip() == "main"
+    assert "Detached write" in read_json(child / "scopes/domains/cpl/context.json")["terms"][0]["term"]
 
 
 def test_pending_checks_reuse_one_pr_and_keep_publication_journal(tmp_path: Path) -> None:
