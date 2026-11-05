@@ -134,7 +134,14 @@ auto-committed.
 
 After configuration, `init` automatically creates a new project's canonical
 JSON in the Git store and leaves generated Markdown in the project checkout.
-To restore a cloned store on another machine, select that checkout through
+For read-only consumers, use `git-store-attach --store <clone> --read-only`
+in an isolated runtime; see `$configure-context-storage`. This works directly
+with a dedicated domain repository, without its parent store or component
+checkouts. Use project IDs from `git-store-status` for reads. Attachment disables
+canonical writes and automatic Git synchronization; do not attempt migration,
+binding, curation, or publication in that runtime.
+
+To restore a writable cloned store on another machine, select that checkout through
 `storage-migrate --target git-store` and bind each checkout. When the store
 records the checkout's Git remote (`git-store-status` shows it in the third
 column), no ID lookup is needed:

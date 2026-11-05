@@ -57,6 +57,16 @@ verification. Use `git-store-register` to preview and approve a new remote-only
 project identity, then bootstrap verified records without creating a source
 checkout. New sources for global retrieval still require enrollment approval.
 
+Read-only agents can instead clone an authorized domain repository directly and
+run `git-store-attach --store <clone> --read-only` in isolated PCC runtime
+directories. No parent store, component checkout, push access, migration, or
+per-run approval is needed. Use `git-store-status` to discover project IDs, then
+`search --project-store-id <uuid> --query "<term>"`. The attachment only writes
+local configuration, disables mutation commands, and never automatically fetches
+or publishes. Refresh the snapshot explicitly for each run and record its commit;
+parent-store and other-domain knowledge is not implicitly included. See
+`configure-context-storage` for the full bootstrap commands.
+
 New PCC versions continue to read and write older storage repositories without
 requiring domain submodules. Older PCC versions are not required to understand
 new multi-store layouts or PR publication.

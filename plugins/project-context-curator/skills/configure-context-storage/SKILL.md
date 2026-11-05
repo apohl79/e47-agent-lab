@@ -9,6 +9,45 @@ Use the deterministic updater for discovery, preview, validation, and writes. Ke
 the agent responsible only for gathering the user's choice and approving the exact
 snapshot.
 
+## Read-only consumers and scheduled agents
+
+For an agent that only reads existing knowledge, do not use storage migration,
+binding, or a throwaway writable remote. Clone the authorized knowledge repository
+with the agent's own persistent credentials and record its commit SHA. A dedicated
+domain repository can be used directly, without access to its parent store.
+Use fresh, isolated runtime directories outside the clone:
+
+```bash
+export PROJECT_CONTEXT_CURATOR_CONFIG_DIR="$SESSION_DIR/pcc/config"
+export PROJECT_CONTEXT_CURATOR_CACHE_DIR="$SESSION_DIR/pcc/cache"
+export PROJECT_CONTEXT_CURATOR_DATA_DIR="$SESSION_DIR/pcc/data"
+python3 <updater> git-store-attach --store <clone> --read-only
+python3 <updater> storage-status --format json
+python3 <updater> git-store-status
+python3 <updater> search --project-store-id <uuid> --query "<task term>"
+```
+
+Resolve project IDs from `git-store-status` or the clone's
+`project-context-store.json`; use `--project-store-id` for project-targeted
+`status`, `search`, and `audit` without component checkouts or bindings.
+Read-only attachment writes only local configuration, is idempotent for the same
+store, and refuses to replace another runtime. It supports detached snapshots
+and needs neither a push remote nor migration approval. Canonical mutation,
+publication, binding, activation, and global-index update commands are disabled.
+Reads do not fetch or change the checkout: acquire a fresh authorized snapshot
+for each scheduled run, then attach it in that run's isolated runtime.
+Runtime directories and graph export destinations must stay outside the checkout
+and its Git metadata; resolved symlink aliases are checked too.
+No per-run human connector authorization is part of this flow.
+
+Only knowledge present in the snapshot is available. A standalone domain clone
+does not implicitly include parent-store universal records or other domains.
+Report missing referenced context; do not claim complete cross-store coverage.
+The optional global index is not required for lexical search. Attaching a store
+does not install PCC or grant repository access; unavailable code or credentials
+remain setup blockers. Use a separate writable runtime for curation, never remove
+the read-only setting to bypass the boundary.
+
 ## Workflow
 
 1. Locate the sibling updater at

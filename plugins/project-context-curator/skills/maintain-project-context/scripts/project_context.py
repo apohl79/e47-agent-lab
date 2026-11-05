@@ -887,6 +887,8 @@ def configured_git_store(
             "Invalid git_store.store_id in global context configuration."
         ) from None
     raw_bindings = raw.get("project_bindings", {})
+    if not isinstance(raw.get("read_only", False), bool):
+        raise SystemExit("Invalid git_store.read_only in global context configuration.")
     if not isinstance(raw_bindings, dict):
         raise SystemExit(
             "Invalid git_store.project_bindings in global context configuration."
@@ -3971,6 +3973,8 @@ def configure_git_store(
     root: Path,
     manifest: dict[str, Any],
     bindings: dict[str, str],
+    *,
+    read_only: bool = False,
 ) -> None:
     stamp = now_iso()
     config = global_config()
@@ -3983,8 +3987,49 @@ def configure_git_store(
         "created_at": previous.get("created_at", stamp) if previous else stamp,
         "updated_at": stamp,
     }
+    if read_only:
+        config["git_store"]["read_only"] = True
     set_storage_runtime(config, "git-store")
     write_global_config(config)
+
+
+def validate_read_only_destinations(root: Path, *paths: Path) -> None:
+    protected = [root.resolve()]
+    for option in ("--git-dir", "--git-common-dir"):
+        directory = git_path(root, option)
+        if directory is not None:
+            protected.append(directory)
+    for path in (global_config_dir(), global_cache_dir(), global_data_dir(), *paths):
+        if any(path.resolve().is_relative_to(directory) for directory in protected):
+            raise SystemExit(
+                "Read-only attachment requires runtime and export paths outside the store "
+                "and its Git metadata."
+            )
+
+
+def git_store_attach(args: argparse.Namespace) -> None:
+    root = validate_git_store_root(args.store)
+    if not git_store_manifest_path(root).is_file():
+        raise SystemExit("Read-only attachment requires an existing store manifest.")
+    manifest = load_git_store_manifest(root)
+    validate_read_only_destinations(root)
+    config = global_config()
+    existing = configured_git_store(config)
+    if config:
+        if not (
+            existing and existing.get("read_only")
+            and existing["path"] == str(root)
+            and existing["store_id"] == manifest["store_id"]
+        ):
+            raise SystemExit(
+                "Use a fresh PROJECT_CONTEXT_CURATOR_CONFIG_DIR for read-only attachment; "
+                "existing configuration will not be replaced."
+            )
+    else:
+        configure_git_store(root, manifest, {}, read_only=True)
+    print(f"Read-only Git context store attached: {root}")
+    print(f"Store id: {manifest['store_id']}")
+    print("Snapshot only: no automatic Git sync or publication. Use --project-store-id for reads.")
 
 
 def apply_git_store_migration(root: Path, plan: dict[str, Any]) -> None:
@@ -4122,6 +4167,8 @@ def storage_status(args: argparse.Namespace) -> None:
         if store is not None:
             payload["store_path"] = store["path"]
             payload["store_id"] = store["store_id"]
+            if store.get("read_only"):
+                payload["read_only"] = True
     if args.format == "json":
         print(json.dumps(payload, sort_keys=True))
         return
@@ -4143,6 +4190,8 @@ def storage_status(args: argparse.Namespace) -> None:
     print(
         f"Storage runtime mode: git-store (canonical store: {payload['store_path']})."
     )
+    if payload.get("read_only"):
+        print("Read-only attachment: snapshot only; canonical mutations and Git sync disabled.")
 
 
 def storage_migrate(args: argparse.Namespace) -> None:
@@ -4397,10 +4446,13 @@ def git_store_activate(args: argparse.Namespace) -> None:
 
 def git_store_status(args: argparse.Namespace) -> None:
     configured, root, manifest = require_configured_git_store()
-    upstream = git_store_upstream(root)
     print(f"Git context store: {root}")
     print(f"Store id: {manifest['store_id']}")
-    print(f"Push upstream: {upstream.remote}/{upstream.branch}")
+    if configured.get("read_only"):
+        print("Read-only attachment: snapshot only; no push upstream required.")
+    else:
+        upstream = git_store_upstream(root)
+        print(f"Push upstream: {upstream.remote}/{upstream.branch}")
     queue = git_store_publish.queue_path(sys.modules[__name__], root)
     if queue.exists():
         queued = read_json_object(queue)
@@ -5259,6 +5311,9 @@ def graph_context(args: argparse.Namespace) -> None:
     if target is None:
         print(output)
         return
+    store = configured_git_store()
+    if store is not None and store.get("read_only"):
+        validate_read_only_destinations(Path(store["path"]), target)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(output + "\n", encoding="utf-8")
     print(f"Knowledge graph written to {target}")
@@ -5708,6 +5763,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--format", choices=("text", "json", "hook"), default="text"
     )
     storage_status_parser.set_defaults(func=storage_status)
+
+    attach_parser = subparsers.add_parser(
+        "git-store-attach",
+        help="Attach an existing store snapshot for read-only use without migration or publication",
+    )
+    add_repo(attach_parser)
+    attach_parser.add_argument("--store", type=Path, required=True)
+    attach_parser.add_argument("--read-only", action="store_true", required=True)
+    attach_parser.set_defaults(func=git_store_attach)
 
     storage_migrate_parser = subparsers.add_parser(
         "storage-migrate",
@@ -6212,7 +6276,11 @@ def git_store_mutation_root(args: argparse.Namespace) -> Path | None:
 
 
 def git_store_read_root(args: argparse.Namespace) -> Path | None:
-    if os.environ.get("PROJECT_CONTEXT_CURATOR_READ_ONLY") == "1":
+    store = configured_git_store()
+    if (
+        os.environ.get("PROJECT_CONTEXT_CURATOR_READ_ONLY") == "1"
+        or (store is not None and store.get("read_only"))
+    ):
         return None
     if not is_git_store_read_command(args):
         return None
@@ -6304,6 +6372,23 @@ def main(argv: list[str] | None = None) -> int:
     global TARGET_PROJECT_ID, SOURCE_REMOTE, SOURCE_COMMIT
     parser = build_parser()
     args = parser.parse_args(argv)
+    store = configured_git_store()
+    if store is not None and store.get("read_only"):
+        output = getattr(args, "output", None)
+        validate_read_only_destinations(
+            Path(store["path"]), *((output,) if output is not None else ())
+        )
+        allowed = (
+            is_git_store_read_command(args) and args.command != "global-update"
+        ) or args.command in {
+            "git-store-attach", "git-store-detect", "storage-status",
+            "global-status", "scan-text", "scan-file",
+        }
+        if not allowed:
+            raise SystemExit(
+                f"{args.command} is disabled for a read-only store attachment. "
+                "Use a separate configured writable runtime for mutations."
+            )
     TARGET_PROJECT_ID = None
     SOURCE_REMOTE = None
     SOURCE_COMMIT = None
