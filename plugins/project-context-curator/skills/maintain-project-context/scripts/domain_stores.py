@@ -965,7 +965,18 @@ def _resume(pc: Any, root: Path, journal: dict[str, Any], path: Path) -> None:
         upstream = pc.git_store_upstream(root)
         remote_head = _remote_head(pc, root, upstream.remote)
         if remote_head not in {initial, journal.get("publication_head")}:
-            raise SystemExit("Main remote changed during migration; reconcile it before resuming.")
+            published = journal.get("publication_head")
+            pc.git_checked(root, "fetch", "--no-tags", upstream.remote, upstream.branch,
+                           action="migration publication recovery")
+            contains = published and pc.git_process(
+                root, "merge-base", "--is-ancestor", published, "FETCH_HEAD"
+            ).returncode == 0
+            remote_manifest = pc.git_checked(
+                root, "show", f"FETCH_HEAD:{pc.GIT_STORE_MANIFEST_FILE}",
+                action="migration registry recovery",
+            )
+            if not contains or json.loads(remote_manifest.stdout) != expected:
+                raise SystemExit("Main remote changed during migration; reconcile it before resuming.")
         pc.write_git_json(root, pc.git_store_manifest_path(root), expected)
         all_modules = tuple(entry["path"] for entry in expected.get("stores", {}).values())
         _commit(
@@ -1079,4 +1090,15 @@ def run(pc: Any, args: Any) -> None:
                     raise SystemExit("Domain migration changed while acquiring locks; preview again.")
                 journal = {"plan": plan, "phase": "copy"}
                 _save_journal(journal_path, journal)
-            _resume(pc, root, journal, journal_path)
+            try:
+                _resume(pc, root, journal, journal_path)
+            except SystemExit as exc:
+                candidates = [root, root / "stores" / request["store"]]
+                candidates.extend(Path(item["path"]) for item in plan["snapshots"].values())
+                if not any(pc.git_store_publish.pending_path(pc, child).exists()
+                           for child in candidates if (child / ".git").exists()):
+                    raise
+                error = pc.safe_display_field(exc, pc.DIAGNOSTIC_OUTPUT_LIMIT)
+                pc.git_store_publish.enqueue(pc, root, pc.context_repo(args.repo), error=error)
+                print("Domain migration publication pending; the migration journal and source copies are retained.")
+                print("Last publication error: " + error)
