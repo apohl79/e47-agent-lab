@@ -30,8 +30,9 @@ snapshot.
    - For `local`, ask whether migrated and newly initialized project context should
      default to `local` (Git-excluded) or `versioned` in each project repository.
    - For `git-store`, ask for an existing Git checkout root on `main` with a
-     configured push remote. Ask for workspace roots only when none are already
-     configured or the user wants to override them.
+     configured push remote. Inspect its write policy below. Ask for workspace
+     roots only when none are already configured or the user wants to override
+     them.
 5. Run the matching command without approval:
 
    ```bash
@@ -53,10 +54,40 @@ snapshot.
    project, and `git status --short --branch` in every affected Git checkout.
 
 Approved Git-store migrations and later canonical mutations automatically lock
-the store, synchronize the configured remote's `main`, commit changed
-curator-managed paths, and push directly to `main`. Do not run a second manual
-commit/push. If synchronization fails, report whether the update was rejected
-before mutation or retained as a local commit after a rejected push.
+the store, synchronize the configured remote's `main`, and commit changed
+curator-managed paths. Publication follows each store's policy; do not run a
+second manual commit/push. Report local pending publication separately from
+verified synchronization.
+
+## Per-repository write policy
+
+Use native Git config in each canonical checkout, including domain submodules:
+
+```bash
+git -C <store-checkout> config --local project-context-curator.writeMode pull-request
+git -C <store-checkout> config --local project-context-curator.adminMerge false
+```
+
+`writeMode` accepts `auto` (default), `direct`, or `pull-request`. Auto inspects
+GitHub's effective branch rules and selects PRs when PRs, workflows, or status
+checks are required; other stores use direct publication. PR publication
+requires authenticated `gh` and merge commits enabled to preserve commit
+identities. Do not change repository protections or force direct mode to evade
+them. `adminMerge` defaults to `false`; set `true` only after explicit approval
+to request merging with the caller's existing bypass rights. It grants no new
+rights and cannot bypass rules the caller lacks permission to bypass.
+
+Ordinary PR-backed writes save a local commit and queue publication. A bounded
+worker retries every 15 seconds for up to 15 minutes, releasing store locks
+between attempts. This does not create a recurring scheduled task. Inspect
+`git-store-status --repo <current-repo>` for pending state and the last error;
+`git-store-publish --repo <current-repo>` makes one explicit attempt. Retain the
+local queue and publication journal on failure; do not claim pending writes are
+synchronized.
+
+Local ↔ Git-store runtime migration involving PR publication is currently
+rejected before mutation. Journaled `domain-store` migrations support PR-backed
+stores; do not substitute manual file copies for an unsupported runtime change.
 
 ## Binding Blocker
 
@@ -88,7 +119,8 @@ and supplies the default used by future initialization.
    Use `--all` instead of `--store <slug>` only when the user wants all registered
    stores. Let the updater establish an attached `main` with upstream tracking;
    do not use a detached submodule checkout as a writable store or overwrite
-   existing local changes.
+   existing local changes. Inspect the write policy in each checkout; local Git
+   settings are not carried by a clone or submodule activation.
 3. For available source checkouts, run read-only detection before initialization:
 
    ```bash

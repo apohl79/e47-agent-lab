@@ -59,7 +59,37 @@ checkout. New sources for global retrieval still require enrollment approval.
 
 New PCC versions continue to read and write older storage repositories without
 requiring domain submodules. Older PCC versions are not required to understand
-new multi-store layouts.
+new multi-store layouts or PR publication.
+
+## Git-store publication
+
+Each store checkout selects its own write flow through native local Git config.
+`project-context-curator.writeMode` defaults to `auto`: GitHub branch rules
+requiring PRs, workflows, or status checks select PR publication; otherwise PCC
+uses direct pushes. Set `direct` or `pull-request` explicitly when needed:
+
+```bash
+git -C <store-checkout> config --local project-context-curator.writeMode pull-request
+git -C <store-checkout> config --local project-context-curator.adminMerge false
+```
+
+These settings are local to each checkout, including dedicated domain stores;
+they are not tracked or transferred to another machine. `adminMerge` defaults to
+`false`; enable it only with explicit approval to use the caller's existing
+GitHub bypass rights. It cannot bypass rules the caller lacks permission to
+bypass.
+PR publication requires `gh` authentication and merge commits enabled on the
+destination, preserving canonical commit identities.
+
+Ordinary PR-backed writes commit locally and queue a bounded background worker.
+It retries every 15 seconds for up to 15 minutes, releasing store locks between
+attempts; it is not a recurring scheduled task. Pending writes are not reported
+as synchronized. Inspect `git-store-status --repo <project-checkout>` and retry
+once with `git-store-publish --repo <project-checkout>`, using the updater.
+Errors and the queue remain in the local Git directory after the worker stops.
+Approved domain migrations resume from their journal and retain source copies
+until publication is verified. Local ↔ Git-store runtime migrations involving
+PR publication are currently rejected before mutation.
 
 ## Why it exists
 

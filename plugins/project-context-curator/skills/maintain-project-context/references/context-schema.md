@@ -272,13 +272,16 @@ remotes, store remote URLs retain the transport needed for Git operations.
 IDs to store slugs. An absent owner means main. The root `projects` and
 `domains` remain the global catalog; child catalogs contain their owned subset.
 Older catalogs without these additive fields remain valid and writable.
-Older PCC clients need not support the new routing fields or multi-store layout.
+Older PCC clients need not support the new routing fields, multi-store layout,
+or PR publication.
 
 Ownership is checked again under mutation locks. A concurrent route change
 rejects a stale operation rather than writing to an obsolete owner. Domain
 migration uses a pending journal in the local Git directory; resume an
 interrupted migration with the identical command and original approval token,
-not manual cleanup or another migration.
+not manual cleanup or another migration. PR-backed domain migration retains
+source copies until destination and ownership publication are verified; the
+bounded publisher can resume its already-approved journal without new approval.
 
 XDG configuration records the runtime decision, store checkout path, store
 identity, and absolute checkout-to-project-ID bindings. `storage-migrate
@@ -298,6 +301,10 @@ destination hash. Approval writes all project and scope destinations first,
 persists local mode, refreshes project policies and views, then removes the
 Git-store canonical JSON and manifest. The removals are committed and pushed;
 unknown files and unrelated Git history are untouched.
+
+Runtime migrations between local and Git-store mode involving PR publication
+are currently rejected before mutation. This limitation does not apply to
+journaled `domain-store` migration.
 
 On another machine, configure the cloned store through the same preview/approval
 flow, list IDs with `git-store-status`, and attach each checkout with
@@ -324,9 +331,34 @@ New portable retrieval sources still require snapshot enrollment approval.
 one-way command for existing automation. Git-store mutations require the
 checkout on `main`, synchronize the configured remote's `main`, stage only the
 manifest and canonical context paths, create one Conventional Commit when
-content changed, and push directly to `main`. A no-op creates no commit.
+content changed, and publish according to the checkout's write policy. A no-op
+creates no commit.
 Unrelated dirty files block mutation, while a rejected post-write push retains
 the local commit and returns an error.
+
+Publication settings use native repository-local Git config, not fields in the
+portable catalog or canonical context:
+
+- `project-context-curator.writeMode`: `auto` (default), `direct`, or
+  `pull-request`. Auto detects effective GitHub branch PR, workflow, and
+  required-status-check rules; otherwise it selects direct publication.
+- `project-context-curator.adminMerge`: `true` or `false` (default). True opts
+  into the caller's existing admin bypass capability; it grants no rights.
+
+Configure every store checkout separately, including domain submodules and
+clones on another machine. PR publication requires authenticated `gh`, a
+github.com push URL, and merge commits enabled to preserve canonical commit
+identities. Pending publication is verified against the destination branch's
+ancestry before reporting success.
+
+Ordinary PR-backed mutations commit locally, then queue a bounded background
+worker. It retries at 15-second intervals for up to 15 minutes, releasing store
+locks between attempts; no recurring scheduler is installed. The queue and PR
+journal live in the local Git directory, outside tracked canonical data.
+Failures retain the queue, commits, journal, and last error. `git-store-status`
+reports pending state and the last error; `git-store-publish --repo <repo>`
+attempts publication once, including an approved domain migration. Pending
+publication is not synchronized success, and passive reads do not publish it.
 
 ## Record Identity and Provenance
 

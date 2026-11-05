@@ -27,6 +27,7 @@ from typing import Any, Callable, Iterator
 
 from lexical_retrieval import lexical_query_matches
 import domain_stores
+import git_store_publish
 
 
 TARGET_PROJECT_ID: str | None = None
@@ -1893,13 +1894,15 @@ def git_config_value(root: Path, key: str) -> str | None:
     return value or None
 
 
-def git_store_upstream(root: Path) -> GitUpstream:
+def git_store_upstream(root: Path, *, allow_detached: bool = False) -> GitUpstream:
     branch_proc = git_process(root, "symbolic-ref", "--quiet", "--short", "HEAD")
     branch = branch_proc.stdout.strip()
     if branch_proc.returncode != 0 or not branch:
-        raise SystemExit(
-            "Git context store must use an attached branch for automatic push."
-        )
+        if not allow_detached:
+            raise SystemExit(
+                "Git context store must use an attached branch for automatic push."
+            )
+        branch = GIT_STORE_BRANCH
     if branch != GIT_STORE_BRANCH:
         raise SystemExit(
             f"Git context store must be checked out on {GIT_STORE_BRANCH} for "
@@ -1924,7 +1927,7 @@ def git_store_upstream(root: Path) -> GitUpstream:
         remote = remotes[0]
         target = branch
     if target != GIT_STORE_BRANCH:
-        raise SystemExit(f"Git context store must push directly to {GIT_STORE_BRANCH}.")
+        raise SystemExit(f"Git context store must publish to {GIT_STORE_BRANCH}.")
     push_urls = git_checked(
         root, "remote", "get-url", "--push", "--all", remote, action="push remote lookup"
     ).stdout.splitlines()
@@ -2025,6 +2028,15 @@ def rebase_git_store(root: Path, upstream: GitUpstream) -> None:
 def push_git_store(
     root: Path, upstream: GitUpstream
 ) -> subprocess.CompletedProcess[str]:
+    try:
+        selected = git_store_publish.policy(sys.modules[__name__], root, upstream)
+        if selected["mode"] == "pull-request":
+            git_store_publish.publish(sys.modules[__name__], root, upstream, selected)
+            return subprocess.CompletedProcess(["gh", "pr", "merge"], 0, "", "")
+        if git_store_publish.pending_path(sys.modules[__name__], root).exists():
+            raise SystemExit("Pending PR publication must finish before switching to direct pushes.")
+    except SystemExit as exc:
+        return subprocess.CompletedProcess(["gh", "pr", "merge"], 1, "", str(exc))
     return git_process(
         root,
         "push",
@@ -2039,6 +2051,8 @@ def push_git_store_commit(root: Path, upstream: GitUpstream) -> None:
     if proc.returncode == 0:
         return
     first_error = git_error_detail(proc)
+    if proc.args[0] == "gh" or git_store_publish.pending_path(sys.modules[__name__], root).exists():
+        raise SystemExit("Git context update was committed locally but publication failed: " + first_error)
     try:
         if git_remote_branch_exists(root, upstream):
             rebase_git_store(root, upstream)
@@ -2053,8 +2067,11 @@ def push_git_store_commit(root: Path, upstream: GitUpstream) -> None:
     )
 
 
-def prepare_git_store(root: Path, upstream: GitUpstream) -> None:
+def prepare_git_store(root: Path, upstream: GitUpstream, *, defer: bool = False) -> None:
     require_no_unmanaged_git_store_changes(root)
+    selected = git_store_publish.policy(sys.modules[__name__], root, upstream)
+    if not defer:
+        git_store_publish.resume(sys.modules[__name__], root, upstream)
     remote_exists = git_remote_branch_exists(root, upstream)
     local_exists = git_head_exists(root)
     if remote_exists and not local_exists:
@@ -2062,9 +2079,15 @@ def prepare_git_store(root: Path, upstream: GitUpstream) -> None:
             "Git context store upstream has history but the local branch has no commit."
         )
     commit_git_store_changes(root, "chore(context): persist pending updates")
-    if remote_exists:
-        rebase_git_store(root, upstream)
-    if git_head_exists(root):
+    pending = git_store_publish.pending_path(sys.modules[__name__], root).exists()
+    queued = git_store_publish.queue_path(sys.modules[__name__], root).exists()
+    if remote_exists and not pending and not (defer and queued):
+        if selected["mode"] == "pull-request":
+            remote_head = git_store_publish._fetch(sys.modules[__name__], root, upstream)
+            git_store_publish.synchronize(sys.modules[__name__], root, remote_head)
+        else:
+            rebase_git_store(root, upstream)
+    if git_head_exists(root) and not defer:
         push_git_store_commit(root, upstream)
     mark_git_store_synced(root)
 
@@ -2084,6 +2107,10 @@ def mark_git_store_synced(root: Path) -> None:
 
 
 def sync_git_store_for_read(root: Path, upstream: GitUpstream) -> bool:
+    if git_store_publish.pending_path(sys.modules[__name__], root).exists():
+        return False
+    if git_store_publish.queue_path(sys.modules[__name__], root).exists():
+        return False
     marker = git_store_sync_marker(root)
     try:
         if time.time() - marker.stat().st_mtime < GIT_STORE_READ_SYNC_INTERVAL_SECONDS:
@@ -4374,6 +4401,12 @@ def git_store_status(args: argparse.Namespace) -> None:
     print(f"Git context store: {root}")
     print(f"Store id: {manifest['store_id']}")
     print(f"Push upstream: {upstream.remote}/{upstream.branch}")
+    queue = git_store_publish.queue_path(sys.modules[__name__], root)
+    if queue.exists():
+        queued = read_json_object(queue)
+        print(f"Publication: {queued.get('state', 'pending')}")
+        if queued.get("error"):
+            print("Last publication error: " + safe_display_field(queued["error"], DIAGNOSTIC_OUTPUT_LIMIT))
     print(f"Configured project bindings: {len(configured['project_bindings'])}")
     available = domain_stores.roots(sys.modules[__name__], root)
     for project_id, metadata in sorted(manifest["projects"].items()):
@@ -5765,6 +5798,12 @@ def build_parser() -> argparse.ArgumentParser:
     add_repo(git_store_status_parser)
     git_store_status_parser.set_defaults(func=git_store_status)
 
+    publish_parser = subparsers.add_parser(
+        "git-store-publish", help="Attempt queued publication once, including approved domain migrations"
+    )
+    add_repo(publish_parser)
+    publish_parser.set_defaults(func=lambda args: git_store_publish.run(sys.modules[__name__], args))
+
     detect_parser = subparsers.add_parser(
         "git-store-detect", help="Read-only component binding detection"
     )
@@ -6304,6 +6343,10 @@ def main(argv: list[str] | None = None) -> int:
         locks.enter_context(git_store_lock(root))
         journal = git_path(root, "--git-dir") / domain_stores.JOURNAL
         if journal.exists():
+            if is_git_store_read_command(args):
+                print("Domain migration publication pending; reading the current canonical source.")
+                args.func(args)
+                return 0
             raise SystemExit("A domain migration is pending. Resume domain-store with its original approved snapshot first.")
         validate_git_store_approval(args, root)
         upstream = git_store_upstream(root)
@@ -6315,33 +6358,46 @@ def main(argv: list[str] | None = None) -> int:
             args.func(args)
         else:
             children = domain_stores.roots(sys.modules[__name__], root)
+            defer = git_store_publish.deferred(sys.modules[__name__], root, children)
+            queued = git_store_publish.queue_path(sys.modules[__name__], root).exists()
+            if defer and args.command in {"storage-migrate", "git-store-init"}:
+                raise SystemExit("Runtime storage migration requires direct publication; use domain-store for journaled PR-backed domain migrations.")
             multiple_stores = bool(load_git_store_manifest(root).get("stores"))
-            if multiple_stores:
+            if multiple_stores and not defer:
                 require_unchanged_remote_routes(root, upstream)
             for name, child in sorted(children.items()):
                 if name == "main":
                     continue
                 locks.enter_context(git_store_lock(child))
                 domain_stores.attach_branch(sys.modules[__name__], child)
-                prepare_git_store(child, git_store_upstream(child))
-            prepare_git_store(root, upstream)
+                if defer and queued:
+                    require_no_unmanaged_git_store_changes(child)
+                else:
+                    prepare_git_store(child, git_store_upstream(child), defer=defer)
+            if defer and queued:
+                require_no_unmanaged_git_store_changes(root)
+            else:
+                prepare_git_store(root, upstream, defer=defer)
             refreshed = domain_stores.roots(sys.modules[__name__], root)
             if refreshed != children:
                 raise SystemExit("Store registry changed during synchronization; retry the command.")
             route_snapshot = store_route_snapshot(root)
             args.func(args)
-            if multiple_stores:
+            if multiple_stores and not defer:
                 require_unchanged_remote_routes(root, upstream, route_snapshot)
             for name, child in sorted(children.items()):
                 if name == "main":
                     continue
-                if commit_git_store_changes(child, f"chore(context): apply {args.command}"):
+                if commit_git_store_changes(child, f"chore(context): apply {args.command}") and not defer:
                     publish_store_without_rebase(child, git_store_upstream(child))
             changed = commit_git_store_changes(
                 root,
                 f"chore(context): apply {args.command}",
             )
-            if changed:
+            if defer:
+                # Queue even after a no-op: an earlier local commit may still need publication.
+                git_store_publish.enqueue(sys.modules[__name__], root, context_repo(args.repo))
+            elif changed:
                 if multiple_stores:
                     publish_store_without_rebase(root, upstream)
                 else:
@@ -6349,7 +6405,10 @@ def main(argv: list[str] | None = None) -> int:
     if not is_git_store_read_command(args):
         remote = safe_display_field(upstream.remote, GLOBAL_LABEL_OUTPUT_LIMIT)
         branch = safe_display_field(upstream.branch, GLOBAL_LABEL_OUTPUT_LIMIT)
-        print(f"Git context store synchronized: {remote}/{branch}")
+        if defer:
+            print(f"Git context saved locally; publication pending: {remote}/{branch}")
+        else:
+            print(f"Git context store synchronized: {remote}/{branch}")
     return 0
 
 

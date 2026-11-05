@@ -25,6 +25,13 @@ copies. Read command help before execution.
    log in, or infer public visibility. Stop if the intended account is unavailable.
    The approved updater operation creates fresh repositories through `gh` and
    links dedicated stores under `stores/<slug>` as Git submodules.
+   Inspect effective branch rules and merge settings. Each store uses local
+   `project-context-curator.writeMode` (`auto`, `direct`, or `pull-request`);
+   auto selects PRs for GitHub PR/workflow/status-check rules. PR publication
+   requires authenticated `gh` and merge commits enabled. Follow
+   `$configure-context-storage` for per-checkout settings and explicit approval
+   before opting into `project-context-curator.adminMerge=true`; the default is
+   `false`, and this setting grants no bypass rights.
 4. In local runtime, manage membership locally. Dedicated repositories require
    an explicitly approved switch to Git-store runtime through
    `$configure-context-storage`; do not silently switch storage.
@@ -72,16 +79,21 @@ diagnostics before requesting approval; do not duplicate projects or promise
 that an unsafe migration can proceed. Preserve private user/machine data in XDG.
 
 Ask for explicit approval of that exact preview, including external repository
-creation and automatic Git commits/pushes. Rerun the identical command with
+creation and automatic Git commits/publication. Rerun the identical command with
 `--approve-snapshot <token>` only after approval. If inputs or source state
 change before application, discard the token and preview again. A concurrent
 ownership-route change may safely reject the operation: inspect current status
 and preview again rather than bypassing the error. If an applied migration
 reports a pending journal, resume the identical command with its original
-approval token. The journal lives in the local Git directory; do not delete it,
-manually clean up moved files, or start a different migration to repair it.
-Never repair a rejected migration
-by hand-copying canonical files or overriding dirty-state checks.
+approval token; the unchanged approved request needs no new approval. PR-backed
+publication queues a worker that retries every 15 seconds for up to 15 minutes,
+releasing store locks between attempts. `git-store-publish --repo <current-repo>`
+makes one explicit attempt and resumes the approved journal. The queue, journal,
+and last error stay in the local Git directory if publication remains blocked.
+Source copies remain until destination and ownership publication are verified.
+Do not delete journals, manually clean up moved files, start a different
+migration, hand-copy canonical files, or override dirty-state checks to repair
+an interrupted migration.
 
 ## Verify
 
@@ -90,7 +102,10 @@ Run `domain-list`, `git-store-status`, and `storage-status`; inspect
 owner and membership, preserved project/record IDs, and readable knowledge.
 Search a known project record and a domain-scoped record from an applicable
 member. Report any failed push or partial external repository creation honestly;
-do not silently retry destructive cleanup.
+do not silently retry destructive cleanup. Pending publication is not completed
+or synchronized migration. Local ↔ Git-store runtime migrations involving PR
+publication remain unsupported and are rejected before mutation; this does not
+prevent journaled domain migration.
 
 Use `$configure-context-storage` for another-machine setup and
 `$maintain-project-context` for remote-source inspection and writable capture.

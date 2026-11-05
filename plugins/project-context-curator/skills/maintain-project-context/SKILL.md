@@ -1,6 +1,6 @@
 ---
 name: maintain-project-context
-description: Maintain durable project domain context while working in a repository. Use when implementing features, researching a project, reviewing code, planning architecture, setting up or changing a context domain, or encountering unknown abbreviations, domain terms, component names, service names, events, APIs, ownership boundaries, or architecture patterns that should be clarified and stored for future Codex or Claude Code sessions.
+description: Maintain durable project domain context while working in a repository. Treat “PCC” or “pcc” in user requests as shorthand for Project Context Curator. Use when implementing features, researching a project, reviewing code, planning architecture, setting up or changing a context domain, or encountering unknown abbreviations, domain terms, component names, service names, events, APIs, ownership boundaries, or architecture patterns that should be clarified and stored for future Codex or Claude Code sessions.
 ---
 
 # Maintain Project Context
@@ -35,15 +35,19 @@ XDG. Local mode's saved project visibility is `local` (Git-excluded) or
   roots stay in XDG.
 - Project checkouts retain generated Markdown views, not a writable JSON mirror.
 - The updater serializes Git-store mutations, synchronizes the configured
-  remote's `main` before writing, and creates and pushes one Conventional Commit
-  directly to `main` when curator-managed files changed. No-op writes do not
-  create empty commits.
+  remote's `main` without rebasing pending PR commits, and creates one
+  Conventional Commit when curator-managed files change. Each store publishes
+  directly or through PRs according to its local write policy. No-op writes
+  create no empty commits.
+  Ordinary PR-backed writes queue publication after committing locally; pending
+  publication is not synchronized success.
 - Git-store reads (`status`, `search`, `audit`, `graph`, `domain-list`,
   `git-store-status`, `pattern-category list`, and `global-update`) check a
   checkout-local sync timestamp. If more than 15 minutes have passed, they
   pull/rebase the configured remote before reading; passive reads never commit
   or push. A dirty Git store blocks a stale passive sync rather than reading
-  potentially outdated data.
+  potentially outdated data. Pending PR publication skips passive synchronization
+  so reads retain local canonical changes without altering queued commits.
 - Automatic synchronization requires the store checkout on `main` and an exact
   push remote. Unrelated dirty files block mutation; a rejected post-write push
   keeps the local commit and returns an error for retry.
@@ -96,6 +100,7 @@ python3 <skill-dir>/scripts/project_context.py git-store-bind --repo . \
   --match-remote
 python3 <skill-dir>/scripts/project_context.py git-store-detect --repo .
 python3 <skill-dir>/scripts/project_context.py git-store-status --repo .
+python3 <skill-dir>/scripts/project_context.py git-store-publish --repo .
 ```
 
 The session-start hook is read-only: it loads project, storage, global-runtime,
@@ -123,8 +128,9 @@ workspace applicability, or a Git project without exactly one local checkout
 binding. User/machine context remains private XDG in both modes. The updater
 binds the preview token to the exact push remote, branch, and hashed push URL.
 After approved Git-store migration and every later canonical mutation, it
-commits and pushes curator-managed paths automatically. Local/versioned project
-repositories are not auto-committed.
+commits and publishes curator-managed paths automatically, subject to the
+runtime-migration limitation below. Local/versioned project repositories are not
+auto-committed.
 
 After configuration, `init` automatically creates a new project's canonical
 JSON in the Git store and leaves generated Markdown in the project checkout.
@@ -160,7 +166,40 @@ Use `$manage-context-domains` for domain membership, main-versus-submodule
 storage selection, and whole-domain migration. Use `$configure-context-storage`
 for selective activation of registered stores on another machine. New PCC
 versions support older single-store repositories; older clients need not
-understand new multi-store layouts.
+understand new multi-store layouts or PR publication.
+
+### Publication settings and recovery
+
+Each canonical checkout, including each domain submodule, uses native local Git
+settings rather than tracked configuration:
+
+```bash
+git -C <store-checkout> config --local project-context-curator.writeMode pull-request
+git -C <store-checkout> config --local project-context-curator.adminMerge false
+```
+
+`writeMode` accepts `auto` (default), `direct`, or `pull-request`. Auto selects
+PR publication when GitHub's effective branch rules require PRs, workflows, or
+status checks; other stores use direct pushes. PR publication uses authenticated
+`gh` and requires merge commits enabled to preserve canonical commit identity.
+`adminMerge` defaults to `false`; enable it only after explicit approval to use
+the caller's existing bypass rights. It grants no permissions and does not
+override rules the caller cannot bypass. Reapply chosen settings on another
+machine; every checkout has its own policy.
+
+Ordinary PR-backed writes return after committing locally and queuing a bounded
+background worker. It retries every 15 seconds for up to 15 minutes and releases
+store locks between attempts; it is not a recurring scheduled task. Inspect
+`git-store-status` for pending state and the last error. Use `git-store-publish`
+for one explicit attempt after resolving a blocker. Keep queued commits and
+journals intact; never report pending publication as synchronization.
+
+Approved domain migrations use the same worker to resume the saved journal,
+retaining source copies until destination and ownership publication are
+verified. Reuse the identical request and original approval token; do not ask
+for a new approval or perform manual cleanup. Local ↔ Git-store runtime
+migrations involving PR publication are currently rejected before mutation;
+use `$configure-context-storage` to inspect that limitation.
 
 ### Knowledge without a source checkout
 
