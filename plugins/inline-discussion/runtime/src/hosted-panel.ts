@@ -1,6 +1,6 @@
 import { createInterface } from 'node:readline';
 import { existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from 'node:fs';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createServer } from './server.js';
 import { discoverAppServerInferenceCatalog, xedocAgentFactory } from './agent.ts';
@@ -66,7 +66,7 @@ const server = await createServer({
 });
 const url = `http://127.0.0.1:${server.port}/`;
 writeFileSync(join(sessionDir, 'url.txt'), url, { mode: 0o600 });
-console.log(JSON.stringify({ url, title: 'Inline Discussion' }));
+console.log(JSON.stringify({ url, title: basename(docPath) }));
 const shutdown = async (): Promise<void> => { await server.close(); process.exit(0); };
 process.on('SIGINT', () => { void shutdown(); });
 process.on('SIGTERM', () => { void shutdown(); });
