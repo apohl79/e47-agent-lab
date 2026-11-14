@@ -241,6 +241,8 @@ function declinedCodexServerRequest(method: string): Record<string, unknown> {
 }
 
 class CodexAppServerClient {
+  private closed = false;
+  private closing: Promise<void> | null = null;
   private child: ChildProcessWithoutNullStreams | null = null;
   private rl: ReadlineInterface | null = null;
   private nextId = 1;
@@ -344,7 +346,9 @@ class CodexAppServerClient {
     }
   }
 
-  async close(): Promise<void> {
+  close(): Promise<void> {
+    if (this.closing) return this.closing;
+    this.closed = true;
     this.interruptRequested = false;
     this.activeTurnId = null;
     for (const pending of this.pendingSteers.splice(0)) pending.reject(new Error('codex app-server closed'));
@@ -357,10 +361,18 @@ class CodexAppServerClient {
     this.pending.clear();
     this.rl?.close();
     this.rl = null;
-    if (this.child && !this.child.killed) {
-      this.child.kill();
-    }
+    const child = this.child;
     this.child = null;
+    this.closing = child && child.exitCode === null && child.signalCode === null
+      ? new Promise<void>((resolve) => {
+          const timeout = setTimeout(() => child.kill('SIGKILL'), 1500);
+          timeout.unref();
+          child.once('close', () => { clearTimeout(timeout); resolve(); });
+          child.stdin.end();
+          child.kill();
+        })
+      : Promise.resolve();
+    return this.closing;
   }
 
   async interrupt(): Promise<void> {
@@ -485,6 +497,7 @@ class CodexAppServerClient {
   }
 
   private start(): void {
+    if (this.closed) throw new Error('codex app-server closed');
     if (this.child) return;
     const child = spawn(this.opts.command, this.opts.args, {
       cwd: this.opts.cwd,
@@ -922,7 +935,7 @@ class CodexAppServerClient {
   }
 }
 
-function parseInferenceModels(result: unknown): InferenceModelOption[] {
+export function parseInferenceModels(result: unknown): InferenceModelOption[] {
   if (!isRecord(result) || !Array.isArray(result['data'])) return [];
   return result['data'].flatMap((raw): InferenceModelOption[] => {
     if (!isRecord(raw)) return [];

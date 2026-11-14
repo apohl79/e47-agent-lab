@@ -79,7 +79,15 @@ export async function listAppServerSessions(
 }
 
 class AppServerSessionBridge implements MainSessionBridge {
+  private readonly clients = new Set<AppServerRpcClient>();
+  private closed = false;
   constructor(private readonly options: AppServerSessionBridgeOptions) {}
+
+  async close(): Promise<void> {
+    this.closed = true;
+    await Promise.all([...this.clients].map((client) => client.close()));
+    this.clients.clear();
+  }
 
   async send(prompt: string): Promise<void> {
     const client = await this.connect();
@@ -87,6 +95,7 @@ class AppServerSessionBridge implements MainSessionBridge {
       await this.submit(client, prompt);
     } finally {
       await client.close();
+      this.clients.delete(client);
     }
   }
 
@@ -100,6 +109,7 @@ class AppServerSessionBridge implements MainSessionBridge {
       yield* consumeMainSessionTurn(client, this.options.threadId, turnId);
     } finally {
       await client.close();
+      this.clients.delete(client);
     }
   }
 
@@ -111,6 +121,7 @@ class AppServerSessionBridge implements MainSessionBridge {
       await client.request('turn/steer', { threadId, input: [{ type: 'text', text: prompt }], expectedTurnId: turnId });
     } finally {
       await client.close();
+      this.clients.delete(client);
     }
   }
 
@@ -120,20 +131,25 @@ class AppServerSessionBridge implements MainSessionBridge {
       await client.request('turn/interrupt', { threadId: this.options.threadId, turnId });
     } finally {
       await client.close();
+      this.clients.delete(client);
     }
   }
 
   private async connect(): Promise<AppServerRpcClient> {
+    if (this.closed) throw new Error('main-session bridge closed');
     const client = new AppServerRpcClient(
       this.options.socketPath ?? appServerSocketPath(this.options.harness),
       this.options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
     );
+    this.clients.add(client);
     try {
       await client.connect();
       await initializeAppServerClient(client);
+      if (this.closed) throw new Error('main-session bridge closed');
       return client;
     } catch (error) {
       await client.close();
+      this.clients.delete(client);
       throw error;
     }
   }

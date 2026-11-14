@@ -227,6 +227,9 @@ export async function createServer(opts: ServerOptions): Promise<ServerHandle> {
     mainSession,
     mainSessionLease: null,
     hosted: opts.hosted === true,
+    closing: false,
+    preserveLiveSession: true,
+    close: async () => {},
   };
   restoreLiveSession(state);
   state.archivedThreads = parseArchivedThreads(state.docMd, state.docPath);
@@ -243,10 +246,19 @@ export async function createServer(opts: ServerOptions): Promise<ServerHandle> {
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
   const port = (server.address() as { port: number }).port;
   state.port = port;
+  let closing: Promise<void> | undefined;
 
-  return {
-    port,
-    close: async () => {
+  state.close = () => closing ??= (async () => {
+      state.closing = true;
+      if (state.preserveLiveSession) {
+        try { writeLiveSession(state); }
+        catch (error) {
+          logDiagnostic('session.persist.error', { error: error instanceof Error ? error.message : String(error) });
+        }
+      }
+      if (state.applyTimeout) clearTimeout(state.applyTimeout);
+      state.pendingAgentReplacements.clear();
+      for (const active of state.activeReplies.values()) active.interrupted = true;
       for (const pending of state.pendingToolApprovals.values()) {
         pending.removeAbortListener?.();
         pending.resolve(false);
@@ -255,10 +267,12 @@ export async function createServer(opts: ServerOptions): Promise<ServerHandle> {
       for (const c of state.sseClients) c.end();
       if (state.docWatcher) state.docWatcher.close();
       if (state.docReloadTimer) clearTimeout(state.docReloadTimer);
+      await Promise.all([...state.agents.values()].map((agent) => agent.close?.().catch(() => {})));
+      state.agents.clear();
       if (state.mainSession?.close) await state.mainSession.close().catch(() => {});
       await new Promise<void>((resolve) => server.close(() => resolve()));
-    },
-  };
+    })();
+  return { port, close: state.close };
 }
 
 interface BufferedEvent { id: number; event: string; data: unknown }
@@ -280,6 +294,9 @@ interface ServerState {
   pendingAgentReplacements: Set<string>;
   agentFactory: AgentFactory;
   inferenceCatalog?: InferenceCatalog;
+  closing: boolean;
+  preserveLiveSession: boolean;
+  close: () => Promise<void>;
   defaultInferenceSettings?: InferenceSettings;
   mainTranscript: string;
   sseClients: Set<ServerResponse>;
@@ -387,6 +404,7 @@ function restoreLiveSession(state: ServerState): void {
 }
 
 function createThreadAgent(state: ServerState, thread: Thread): ThreadAgent {
+  if (state.closing) throw Object.assign(new Error('Discussion is closing'), { statusCode: 503 });
   if (thread.recipient === 'main-agent') return createMainSessionThreadAgent(state, thread);
   const transcript = thread.messages
     .map((message) => `${message.role === 'user' ? 'User' : 'Assistant'}: ${message.text}`)
@@ -1048,6 +1066,7 @@ function mainAgentMessagePrompt(input: {
 }
 
 async function handle(state: ServerState, req: IncomingMessage, res: ServerResponse): Promise<void> {
+  if (state.closing) { res.statusCode = 503; res.end('Discussion is closing'); return; }
   const url = new URL(req.url ?? '/', 'http://x');
   res.setHeader('x-content-type-options', 'nosniff');
   res.setHeader('referrer-policy', 'no-referrer');
@@ -2272,6 +2291,7 @@ async function handle(state: ServerState, req: IncomingMessage, res: ServerRespo
     removeLiveSession(state);
     const resultPath = join(state.sessionDir, 'result.json');
     writeFileSync(resultPath, JSON.stringify(result, null, 2));
+    state.preserveLiveSession = false;
     chmodSync(resultPath, 0o600);
     pushEvent(state, 'server.finished', { result });
     if (state.mainSession) {
@@ -2289,7 +2309,7 @@ async function handle(state: ServerState, req: IncomingMessage, res: ServerRespo
     }
     res.setHeader('content-type', 'application/json');
     res.end(JSON.stringify(result));
-    if (state.shutdownOnFinish) setTimeout(() => process.exit(0), 100).unref();
+    if (state.shutdownOnFinish) void state.close().finally(() => process.exit(0));
     return;
   }
 
@@ -2309,9 +2329,8 @@ async function handle(state: ServerState, req: IncomingMessage, res: ServerRespo
     pushEvent(state, 'server.paused', { result });
     res.setHeader('content-type', 'application/json');
     res.end(JSON.stringify(result));
-    void Promise.all([...state.agents.values()].map((agent) => agent.close?.().catch(() => {}))).finally(() => {
-      if (state.shutdownOnFinish) setTimeout(() => process.exit(0), 100).unref();
-    });
+    if (state.shutdownOnFinish) void state.close().finally(() => process.exit(0));
+    else void Promise.all([...state.agents.values()].map((agent) => agent.close?.().catch(() => {})));
     return;
   }
 
