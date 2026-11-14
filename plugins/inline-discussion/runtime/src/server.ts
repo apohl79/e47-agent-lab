@@ -4,8 +4,10 @@ import { mkdirSync, readFileSync, writeFileSync, chmodSync, realpathSync, exists
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve, sep } from 'node:path';
-import { isMarkdownFile, isSourceFile, renderDoc, renderedMarkdownText, renderSourceFile } from './markdown.ts';
+import { isMarkdownFile, isSourceFile, renderDoc, renderedMarkdownText, renderSourceFile, trackedTaskCheckbox } from './markdown.ts';
 import { parseSourceReference, selectedSourceText } from './source-reference.ts';
+import { documentTaskBinding, documentTaskRegisterPath, documentTaskSnapshot } from './task-document.ts';
+import { writeTaskCommand, type TaskCommand } from './task-register.ts';
 import { parseArchivedThreads } from './archive.ts';
 import { readCodexSessionInferenceSettings, readJsonl, trimTranscript } from './transcript.ts';
 import { appendThreadDetails, removeAllArchivedBlocks, removeArchivedBlockByIndex, removeThreadDetailsById, replaceThreadDetails, updateTaskCheckbox } from './doc-writer.ts';
@@ -682,8 +684,7 @@ async function archiveAllOpenThreads(state: ServerState): Promise<FinishResult['
         });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        logDiagnostic(state, {
-          event: 'apply.archive_thread.warning',
+        logDiagnostic('apply.archive_thread.warning', {
           threadId,
           documentPath,
           error: message,
@@ -1142,6 +1143,9 @@ async function handle(state: ServerState, req: IncomingMessage, res: ServerRespo
       return;
     }
     try {
+      if (trackedTaskCheckbox(readFileSync(documentPath, 'utf8'), body.blockId, body.checkboxIndex)) {
+        throw new Error('tracked task completion requires outcome acceptance');
+      }
       const markdown = updateTaskCheckbox(documentPath, body.blockId, body.checkboxIndex, body.checked);
       if (documentPath === state.docPath) {
         state.docMd = markdown;
@@ -1161,6 +1165,27 @@ async function handle(state: ServerState, req: IncomingMessage, res: ServerRespo
     return;
   }
 
+  if (req.method === 'POST' && url.pathname === '/api/tasks/command') {
+    if (!requireJsonContentType(req, res)) return;
+    const body = await readJson(req) as TaskCommand & { documentPath?: string };
+    const documentPath = resolveAnnotationDocument(state, body.documentPath);
+    res.setHeader('content-type', 'application/json');
+    try {
+      if (!documentPath) throw new Error('Markdown document required');
+      if (!['approve', 'resume', 'request_changes', 'accept', 'cancel'].includes(body.action)) throw new Error('unsupported user task command');
+      const binding = documentTaskBinding(readFileSync(documentPath, 'utf8'));
+      if (!body.id || !binding?.ids.includes(body.id)) throw new Error('task does not belong to document');
+      const path = documentTaskRegisterPath(documentPath, state.projectRoot ?? resolveServeRoot(state.docPath));
+      if (!path) throw new Error('document has no task register');
+      writeTaskCommand(path, body, 'user');
+      res.end(JSON.stringify(documentTaskSnapshot(documentPath, state.projectRoot ?? resolveServeRoot(state.docPath))));
+    } catch (error) {
+      res.statusCode = 409;
+      res.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }));
+    }
+    return;
+  }
+
   if (req.method === 'GET' && url.pathname === '/api/bootstrap') {
     const reference = url.searchParams.get('path');
     const selected = reference === null ? null : resolveSourceReference(state, reference);
@@ -1176,6 +1201,7 @@ async function handle(state: ServerState, req: IncomingMessage, res: ServerRespo
       : renderCurrentDoc(state);
     res.setHeader('content-type', 'application/json');
     res.end(JSON.stringify({
+      tasks: documentTaskSnapshot(documentPath, state.projectRoot ?? resolveServeRoot(state.docPath)),
       html: rendered.html,
       blockIds: rendered.blockIds,
       title: rendered.title,
@@ -1328,7 +1354,23 @@ async function handle(state: ServerState, req: IncomingMessage, res: ServerRespo
       applyCount: applyCount(state),
     })}\n\n`);
     res.write(`event: ready\ndata: {}\n\n`);
-    req.on('close', () => state.sseClients.delete(res));
+    const taskDocument = resolveAnnotationDocument(state, url.searchParams.get('path') ?? undefined);
+    let lastTaskSnapshot = '';
+    const sendTasks = () => {
+      if (!taskDocument) return;
+      const snapshot = documentTaskSnapshot(taskDocument, state.projectRoot ?? resolveServeRoot(state.docPath));
+      const serialized = JSON.stringify(snapshot);
+      if (serialized === lastTaskSnapshot) return;
+      lastTaskSnapshot = serialized;
+      res.write(`event: tasks.updated\ndata: ${serialized}\n\n`);
+    };
+    sendTasks();
+    const taskTimer = setInterval(sendTasks, 2000);
+    taskTimer.unref();
+    req.on('close', () => {
+      clearInterval(taskTimer);
+      state.sseClients.delete(res);
+    });
     return;
   }
 

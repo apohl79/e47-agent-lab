@@ -241,13 +241,42 @@ export function renderSourceFile(source: string, path: string): RenderedDoc {
 
 export function renderDoc(markdown: string, documentPath?: string): RenderedDoc {
   const parsed = parseDoc(markdown);
+  const tracksTasks = parsed.blocks.some((block) =>
+    block.kind === 'html' && /^<!-- task-register: ([^\r\n]+) -->$/.test(block.markdown.trim()));
   const headingIds = new Map<string, number>();
   const pieces = parsed.blocks.map((block) => {
-    const clean = DOMPurify.sanitize(preserveInlineSemantics(block.html), SANITIZE_OPTS);
+    let html = block.html;
+    if (tracksTasks && block.kind === 'list') {
+      const fragment = new JSDOM(html);
+      const walker = fragment.window.document.createTreeWalker(fragment.window.document.body, 128);
+      while (walker.nextNode()) {
+        const id = walker.currentNode.textContent?.trim().match(/^task-id: ([A-Za-z0-9][A-Za-z0-9_-]{0,79})$/)?.[1];
+        const item = walker.currentNode.parentElement?.closest('li');
+        if (id && item?.querySelector('input[type="checkbox"]')) {
+          item.setAttribute('data-task-id', id);
+          item.id = `task-${id}`;
+        }
+      }
+      html = fragment.window.document.body.innerHTML;
+      fragment.window.close();
+    }
+    const clean = DOMPurify.sanitize(preserveInlineSemantics(html), SANITIZE_OPTS);
     const withDocumentAssets = rewriteDocumentUrls(clean, documentPath);
     return injectBlockIdViaDom(withDocumentAssets, block, headingIds);
   });
   return { ...parsed, html: pieces.join('\n') };
+}
+
+export function trackedTaskCheckbox(markdown: string, blockId: string, checkboxIndex: number): boolean {
+  const rendered = renderDoc(markdown);
+  const dom = new JSDOM(rendered.html);
+  try {
+    const block = Array.from(dom.window.document.querySelectorAll('[data-block-id]'))
+      .find((entry) => entry.getAttribute('data-block-id') === blockId);
+    return Boolean(block?.querySelectorAll('input[type="checkbox"]')[checkboxIndex]?.closest('[data-task-id]'));
+  } finally {
+    dom.window.close();
+  }
 }
 
 function rewriteDocumentUrls(fragmentHtml: string, documentPath?: string): string {

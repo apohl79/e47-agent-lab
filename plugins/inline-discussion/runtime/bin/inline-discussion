@@ -119,6 +119,7 @@ PYEOF
 usage() {
   cat >&2 <<'EOF'
 Usage:
+  inline-discussion tasks init|read|update REGISTER [COMMAND.json|-]
   inline-discussion [-a [codex|claude|xedoc]|--agent[=codex|claude|xedoc]] <doc>        # quick: launch a discussion on <doc>, hold until Finish
   inline-discussion start --doc <path> [--main-jsonl <path>] [--main-session-id <id>] [--main-session-socket <path>] --session-dir <path> [--agent claude|codex|xedoc] [--cwd <path>] [--hold]
   inline-discussion sessions [--harness codex|xedoc] [--socket <path>]
@@ -166,7 +167,7 @@ ensure_runtime_build() {
 
   local dist_marker="$SERVER_DIR/dist/index.html"
   local needs_build=0
-  if [[ ! -f "$dist_marker" || ! -f "$SERVER_DIR/dist/server.js" || ! -f "$SERVER_DIR/dist/session-control.js" ]]; then
+  if [[ ! -f "$dist_marker" || ! -f "$SERVER_DIR/dist/server.js" || ! -f "$SERVER_DIR/dist/session-control.js" || ! -f "$SERVER_DIR/dist/task-control.js" ]]; then
     needs_build=1
   elif find "$SERVER_DIR/src" -type f -newer "$dist_marker" -print -quit 2>/dev/null | grep -q .; then
     needs_build=1
@@ -723,6 +724,7 @@ do_quick() {
 
 [[ $# -ge 1 ]] || usage
 case "$1" in
+  tasks)     shift; ensure_runtime_build; exec node "$SERVER_DIR/dist/task-control.js" "$@" ;;
   start)     shift; do_start "$@" ;;
   sessions)  shift; do_sessions "$@" ;;
   wait)      shift; do_wait "$@" ;;

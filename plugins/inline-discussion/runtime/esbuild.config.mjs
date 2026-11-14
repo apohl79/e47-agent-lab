@@ -45,6 +45,15 @@ await build({
 
 // Frontend bundle — dompurify (not isomorphic-dompurify) bundled into client
 await build({
+  entryPoints: [join(__dirname, 'src/task-control.ts')],
+  outfile: join(distDir, 'task-control.js'),
+  bundle: true,
+  platform: 'node',
+  target: 'node20',
+  format: 'esm',
+});
+
+await build({
   entryPoints: [join(__dirname, 'src/hosted-panel.ts')],
   outfile: join(distDir, 'hosted-panel.js'),
   bundle: true,

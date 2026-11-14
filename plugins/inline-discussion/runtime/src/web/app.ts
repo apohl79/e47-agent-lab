@@ -35,6 +35,8 @@ import { findThreadDetails, scrollThreadToTop } from './thread-details.ts';
 import { installImageViewer } from './image-viewer.ts';
 import { blockPlusHost } from './block-plus-host.ts';
 import { bindTaskCheckboxes, type TaskCheckboxChange } from './task-checkboxes.ts';
+import { createTaskSidebar } from './task-sidebar.ts';
+import type { TaskSnapshot } from '../task-types.ts';
 import {
   awaitsMermaidRender,
   canAnnotateBlock,
@@ -135,6 +137,7 @@ function renderMarkdown(text: string): string {
 }
 
 interface Bootstrap {
+  tasks?: TaskSnapshot;
   html: string;
   blockIds: string[];
   title: string;
@@ -541,6 +544,16 @@ async function init(): Promise<void> {
   state.readOnly = boot.readOnly === true;
   state.sourceView = boot.sourceView === true;
   state.documentPath = boot.documentPath ?? (documentRoute === '/' ? '' : documentRoute);
+  const taskSidebar = createTaskSidebar(document, async (action, id, expectedRevision, note) => {
+    const response = await fetch('/api/tasks/command', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ action, id, expectedRevision, note, documentPath: state.documentPath }),
+    });
+    if (!response.ok) throw await responseError(response);
+    return await response.json() as TaskSnapshot;
+  });
+  if (boot.tasks) taskSidebar.update(boot.tasks);
   state.inferenceCatalog = boot.inferenceCatalog;
   state.defaultInferenceSettings = boot.defaultInferenceSettings;
   renderDefaultInferenceSelectors();
@@ -610,6 +623,7 @@ async function init(): Promise<void> {
   if (state.readOnly) return;
 
   const es = new EventSource(panelUrl(`/events?path=${encodeURIComponent(state.documentPath)}`));
+  es.addEventListener('tasks.updated', (event) => taskSidebar.update(JSON.parse((event as MessageEvent).data) as TaskSnapshot));
   listenDocumentEvent(es, 'thread.message.delta', onDelta);
   listenDocumentEvent(es, 'thread.message.status', onStatus);
   listenDocumentEvent(es, 'thread.message.activity', onActivity);
@@ -624,6 +638,7 @@ async function init(): Promise<void> {
   listenDocumentEvent(es, 'highlight.created', onHighlightCreated);
   listenDocumentEvent(es, 'highlight.deleted', onHighlightDeleted);
   listenDocumentEvent(es, 'doc.updated', onDocUpdated);
+  es.addEventListener('doc.updated', () => taskSidebar.refresh());
   listenDocumentEvent(es, 'server.finished', onFinished);
   listenDocumentEvent(es, 'server.paused', onPaused);
   listenDocumentEvent<ToolApprovalPrompt>(es, 'tool.approval.requested', enqueueToolApproval);
@@ -962,6 +977,7 @@ function renderDoc(html: string): void {
     ADD_TAGS: ['details', 'summary', 'del', 's', 'strike'] as string[],
     ADD_ATTR: [
       'data-block-id',
+      'data-task-id',
       'data-thread-id',
       'data-source-start-line',
       'data-source-end-line',
