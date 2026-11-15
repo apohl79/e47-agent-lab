@@ -3,7 +3,6 @@ import DOMPurify from 'dompurify';
 import { documentRoute, installHostedLinks, panelFetch as fetch, panelUrl } from './hosted.ts';
 import { Marked } from 'marked';
 import hljs from 'highlight.js/lib/common';
-import mermaid from 'mermaid';
 import type {
   AgentActivity,
   ApplyProgress,
@@ -82,16 +81,6 @@ const msgMarked = new Marked({
   },
 });
 
-function initializeMermaid(): void {
-  mermaid.initialize({
-    startOnLoad: false,
-    securityLevel: 'strict',
-    theme: mermaidThemeFor(document.documentElement.dataset.theme),
-  });
-}
-
-initializeMermaid();
-
 let mermaidRenderQueue: Promise<void> = Promise.resolve();
 
 function scheduleMermaidRender(): void {
@@ -103,6 +92,12 @@ function scheduleMermaidRender(): void {
       const pending = nodes.filter((node) => node.isConnected && !node.dataset.processed);
       if (pending.length === 0) return;
       try {
+        const { default: mermaid } = await import('mermaid');
+        mermaid.initialize({
+          startOnLoad: false,
+          securityLevel: 'strict',
+          theme: mermaidThemeFor(document.documentElement.dataset.theme),
+        });
         await mermaid.run({ nodes: pending, suppressErrors: true });
       } catch (error) {
         console.warn('Failed to render Mermaid diagram', error);
@@ -117,7 +112,6 @@ function scheduleMermaidRender(): void {
 // Rendered SVGs bake in their palette, so a theme switch has to re-run mermaid
 // against the stashed source rather than restyling the existing output.
 function syncMermaidTheme(): void {
-  initializeMermaid();
   const rendered = renderedDiagrams(document);
   if (rendered.length === 0) return;
   for (const node of rendered) restoreDiagramSource(node);
@@ -482,7 +476,18 @@ async function showToolApproval(request: ToolApprovalPrompt): Promise<void> {
 }
 
 installHostedLinks();
-init().catch((err) => console.error(err));
+init().catch((error) => {
+  console.error(error);
+  const heading = document.createElement('h2');
+  heading.textContent = 'Unable to open document';
+  const message = document.createElement('p');
+  message.textContent = error instanceof Error ? error.message : String(error);
+  const retry = document.createElement('button');
+  retry.className = 'btn';
+  retry.textContent = 'Reload document';
+  retry.addEventListener('click', () => window.location.reload());
+  document.getElementById('doc')!.replaceChildren(heading, message, retry);
+});
 
 async function updateInferenceSettings(url: string, settings: InferenceSettings): Promise<void> {
   const response = await fetch(url, {
@@ -537,7 +542,9 @@ async function init(): Promise<void> {
   installInDocumentNavigation(document.body, { document, history: window.history, location: window.location });
 
   const sourcePath = documentRoute === '/' ? '' : `?${new URLSearchParams({ path: documentRoute }).toString()}`;
-  const boot = (await (await fetch(`/api/bootstrap${sourcePath}`)).json()) as Bootstrap;
+  const response = await fetch(`/api/bootstrap${sourcePath}`);
+  if (!response.ok) throw await responseError(response);
+  const boot = (await response.json()) as Bootstrap;
   applyTitle(boot.title);
   renderDoc(boot.html);
   installImageViewer(document.getElementById('doc')!);

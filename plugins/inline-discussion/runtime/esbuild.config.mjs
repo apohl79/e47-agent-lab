@@ -66,7 +66,9 @@ await build({
 
 await build({
   entryPoints: [join(__dirname, 'src/web/app.ts')],
-  outfile: join(distDir, 'app.js'),
+  outdir: distDir,
+  splitting: true,
+  chunkNames: 'chunks/[name]-[hash]',
   bundle: true,
   platform: 'browser',
   target: 'es2022',

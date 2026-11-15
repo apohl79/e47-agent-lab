@@ -2385,7 +2385,7 @@ async function handle(state: ServerState, req: IncomingMessage, res: ServerRespo
       return;
     }
   }
-  if (req.method === 'GET' && /^\/(app\.js|app\.css|favicon\.svg)$/.test(url.pathname)) {
+  if (req.method === 'GET' && /^\/(app\.js|app\.css|favicon\.svg|chunks\/[a-zA-Z0-9_-]+(?:\.[a-zA-Z0-9_-]+)*\.js)$/.test(url.pathname)) {
     if (state.staticDir) {
       const file = url.pathname.slice(1);
       const body = readFileSync(join(state.staticDir, file));

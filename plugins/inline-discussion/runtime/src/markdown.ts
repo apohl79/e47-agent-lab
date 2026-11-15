@@ -280,8 +280,7 @@ export function trackedTaskCheckbox(markdown: string, blockId: string, checkboxI
 }
 
 function rewriteDocumentUrls(fragmentHtml: string, documentPath?: string): string {
-  const dom = new JSDOM(`<div id="root">${fragmentHtml}</div>`);
-  const root = dom.window.document.getElementById('root')!;
+  const root = JSDOM.fragment(`<div id="root">${fragmentHtml}</div>`).firstElementChild!;
   for (const image of Array.from(root.querySelectorAll<HTMLImageElement>('img[src]'))) {
     const source = image.getAttribute('src')?.trim();
     if (!source || !documentPath || !isRelativeUrl(source)) continue;
@@ -328,13 +327,12 @@ function decodeLinkPath(path: string): string {
 }
 
 function preserveInlineSemantics(fragmentHtml: string): string {
-  const dom = new JSDOM(`<div id="root">${fragmentHtml}</div>`);
-  const root = dom.window.document.getElementById('root')!;
+  const root = JSDOM.fragment(`<div id="root">${fragmentHtml}</div>`).firstElementChild!;
   for (const el of Array.from(root.querySelectorAll<HTMLElement>('[style]'))) {
     const style = el.getAttribute('style') ?? '';
     if (!hasLineThrough(style)) continue;
 
-    const del = dom.window.document.createElement('del');
+    const del = root.ownerDocument.createElement('del');
     while (el.firstChild) del.appendChild(el.firstChild);
     el.replaceWith(del);
   }
@@ -346,8 +344,7 @@ function hasLineThrough(style: string): boolean {
 }
 
 function injectBlockIdViaDom(fragmentHtml: string, block: Block, headingIds: Map<string, number>): string {
-  const dom = new JSDOM(`<div id="root">${fragmentHtml}</div>`);
-  const root = dom.window.document.getElementById('root')!;
+  const root = JSDOM.fragment(`<div id="root">${fragmentHtml}</div>`).firstElementChild!;
   if (block.kind === 'list' || block.kind === 'blockquote') {
     for (const [index, input] of Array.from(root.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')).entries()) {
       input.setAttribute('data-task-checkbox-index', String(index));
