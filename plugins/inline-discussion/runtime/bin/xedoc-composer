@@ -1,0 +1,98 @@
+#!/usr/bin/env python3
+import json
+import os
+from pathlib import Path
+import sys
+import time
+
+MAX_BYTES = 256 * 1024
+MAX_NODES = 1000
+MAX_DEPTH = 16
+EXCLUDED_DIRECTORIES = {
+    ".git", ".hg", ".svn", "node_modules", "vendor", "target",
+    ".venv", "venv", ".tox", ".nox", "__pycache__",
+    ".cache", ".mypy_cache", ".pytest_cache", ".ruff_cache",
+}
+
+
+def render_tree(tree, expanded):
+    return [
+        {"title": title, "children": render_tree(value, expanded), "expanded": expanded}
+        if isinstance(value, dict) else {"title": title, "target": value}
+        for title, value in sorted(
+            tree.items(), key=lambda item: (not isinstance(item[1], dict), item[0].casefold(), item[0])
+        )
+    ]
+
+
+def walk_error(error):
+    raise error
+
+
+try:
+    line = sys.stdin.buffer.readline(MAX_BYTES + 1)
+    if len(line) > MAX_BYTES:
+        raise ValueError("Composer request exceeds 256 KiB.")
+    request = json.loads(line)
+    if not isinstance(request, dict) or (
+        request.get("protocol") != "xedoc.plugin-composer/v1"
+        or request.get("panelId") != "discussion"
+        or request.get("buttonId") != "documents"
+    ):
+        raise ValueError("Unsupported composer request.")
+    root_value = request.get("projectRoot")
+    if not isinstance(root_value, str) or not Path(root_value).is_absolute():
+        raise ValueError("An absolute projectRoot is required.")
+    root = Path(root_value).resolve(strict=True)
+    if not root.is_dir():
+        raise ValueError("projectRoot must be a directory.")
+    tree = {}
+    node_count = 0
+    document_count = 0
+    deadline = time.monotonic() + 8
+    for directory, directories, files in os.walk(root, onerror=walk_error, followlinks=False):
+        if time.monotonic() > deadline:
+            raise ValueError("Document scan exceeded 8 seconds; open a smaller project directory.")
+        directories[:] = sorted(
+            name for name in directories
+            if name not in EXCLUDED_DIRECTORIES and not (Path(directory) / name).is_symlink()
+        )
+        for name in sorted(files):
+            if time.monotonic() > deadline:
+                raise ValueError("Document scan exceeded 8 seconds; open a smaller project directory.")
+            if Path(name).suffix.lower() not in {".md", ".markdown"}:
+                continue
+            path = Path(directory) / name
+            try:
+                target = path.resolve(strict=True)
+                target.relative_to(root)
+            except (OSError, RuntimeError, ValueError):
+                continue
+            if not target.is_file():
+                continue
+            parts = path.relative_to(root).parts
+            if len(parts) > MAX_DEPTH:
+                raise ValueError("Document tree exceeds 16 levels; open a smaller project directory.")
+            branch = tree
+            for part in parts[:-1]:
+                if part not in branch:
+                    branch[part] = {}
+                    node_count += 1
+                branch = branch[part]
+            branch[parts[-1]] = target.as_uri()
+            node_count += 1
+            document_count += 1
+            if node_count > MAX_NODES:
+                raise ValueError("Document tree exceeds 1000 items; open a smaller project directory.")
+    result = {"items": render_tree(tree, document_count <= 15)}
+    if not document_count:
+        result["emptyMessage"] = "No Markdown documents found in this project."
+    output = json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n"
+    if len(output) > MAX_BYTES:
+        raise ValueError("Document tree exceeds 256 KiB; open a smaller project directory.")
+except (OSError, RuntimeError, ValueError) as error:
+    output = json.dumps({
+        "items": [],
+        "emptyMessage": f"Cannot list Markdown documents: {error}",
+    }).encode("utf-8") + b"\n"
+sys.stdout.buffer.write(output)

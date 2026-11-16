@@ -53,6 +53,14 @@ by `./install.sh`; the plugin supports Codex, Claude Code, and Xedoc.
 
 The Xedoc manifest contributes an embedded discussion panel and a **Start
 discussion** action for local `.md` and `.markdown` links in model responses.
+The **Discuss a document** composer button lists project Markdown files,
+including ignored and untracked files, and opens the selected document in a new
+panel. Its tree starts fully expanded for up to 15 documents and collapsed for
+larger projects. VCS metadata, `node_modules`, `vendor`, `target`, Python virtual
+environments, and cache directories are excluded; directory symlinks and file
+symlinks escaping the project are not followed. Trees beyond 1000 total items,
+16 levels, or 256 KiB show an explicit limit message; use a smaller project
+directory in that case. Opening the menu requires only Python, not inference.
 The discuss skill prefers that same panel when an active Xedoc GUI session is
 available. Thread-agent conversations, direct main-agent conversations, Apply,
 and Finish use the existing session bridges without a skill handoff.
