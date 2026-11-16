@@ -47,6 +47,7 @@ export function createTaskSidebar(
   let expanded = '';
   let busy = false;
   const notes = new Map<string, string>();
+  const quickActions = new Map<string, { action: string; revision: number }>();
   type ClassificationDraft = { revision: number; route: Task['route']; humanDelegable: boolean; classificationConfidence: number; readinessConfidence: number; reason: string };
   const drafts = new Map<string, ClassificationDraft>();
   const routes: Array<[Task['route'], string]> = [
@@ -63,6 +64,7 @@ export function createTaskSidebar(
       error.textContent = snapshot.error ?? `Task ${id} is unavailable. Reload the document to refresh its register.`;
       return;
     }
+    quickActions.delete(id);
     expanded = id;
     filter.value = 'all';
     setMode(true);
@@ -92,6 +94,97 @@ export function createTaskSidebar(
       a.textContent = name;
       parent.append(a);
     } else detail(parent, name, value);
+  }
+  function actionsFor(task: Task): Array<[string, string]> {
+    const actions: Array<[string, string]> = [];
+    if (task.state === 'awaiting_approval') actions.push(['approve', 'Approve preparation']);
+    if (['needs_input', 'blocked'].includes(task.state)) actions.push(['resume', 'Answer / resume']);
+    if (task.state === 'ready_for_review') actions.push(['accept', 'Accept outcome'], ['request_changes', 'Request changes']);
+    else if (!['completed', 'cancelled'].includes(task.state)) actions.push(['accept', 'Mark outcome complete']);
+    if (!['completed', 'cancelled'].includes(task.state)) actions.push(['cancel', 'Cancel task']);
+    return actions;
+  }
+  async function runAction(task: Task, action: string, expectedRevision: number, note: HTMLTextAreaElement): Promise<void> {
+    let text = notes.get(task.id) ?? '';
+    if (action === 'approve') {
+      const accepted = await modalConfirm({
+        title: 'Approve preparation',
+        body: `${task.scope}\n\nPermissions: ${task.permissions.join(', ')}\n\nAcceptance: ${task.acceptance}\n\nStop: ${task.stopCondition}\n\nThis records approval only. It does not launch a session or authorize external actions.`,
+        primaryLabel: 'Approve preparation',
+      });
+      if (!accepted) return;
+      text = 'Approved displayed preparation scope';
+    } else if (!text.trim()) {
+      error.textContent = action === 'accept' ? 'Outcome-level acceptance evidence is required.' : 'An answer, feedback, or reason is required.';
+      note.focus();
+      return;
+    }
+    busy = true;
+    render();
+    try {
+      snapshot = await command(action, task.id, expectedRevision, text);
+      notes.delete(task.id);
+      quickActions.delete(task.id);
+      error.textContent = '';
+    } catch (failure) {
+      error.textContent = failure instanceof Error ? failure.message : String(failure);
+    } finally {
+      busy = false;
+      render();
+    }
+  }
+  function renderQuickState(task: Task): HTMLElement {
+    const cell = document.createElement('div');
+    cell.className = 'task-quick-state';
+    const select = document.createElement('select');
+    select.id = `task-quick-select-${task.id}`;
+    select.setAttribute('aria-label', `Quick state for ${task.id}`);
+    const actions = actionsFor(task);
+    const current = document.createElement('option');
+    current.value = '';
+    current.textContent = label(task.state);
+    select.append(current);
+    const destinations: Record<string, string> = { approve: 'ready', resume: 'ready', request_changes: 'awaiting approval', accept: 'completed', cancel: 'cancelled' };
+    for (const [action, text] of actions) {
+      const option = document.createElement('option');
+      option.value = action; option.textContent = `${destinations[action]} · ${text}`;
+      option.disabled = action === 'approve' && task.readinessConfidence <= 90;
+      select.append(option);
+    }
+    select.disabled = busy || !actions.length;
+    const pending = quickActions.get(task.id);
+    const selected = actions.find(([action]) => action === pending?.action);
+    select.value = selected?.[0] ?? '';
+    select.addEventListener('change', () => {
+      if (select.value) quickActions.set(task.id, { action: select.value, revision: snapshot.revision });
+      else quickActions.delete(task.id);
+      if (expanded === task.id) expanded = '';
+      render();
+      (document.getElementById(`task-quick-note-${task.id}`) ?? document.getElementById(`task-quick-apply-${task.id}`) ?? document.getElementById(select.id))?.focus();
+    });
+    cell.append(select);
+    if (selected && pending) {
+      const note = document.createElement('textarea');
+      note.id = `task-quick-note-${task.id}`;
+      note.setAttribute('aria-label', `Quick action evidence for ${task.id}`);
+      note.placeholder = 'Answer, feedback, or outcome evidence';
+      note.value = notes.get(task.id) ?? '';
+      note.disabled = busy;
+      note.addEventListener('input', () => notes.set(task.id, note.value));
+      if (selected[0] !== 'approve') cell.append(note);
+      const apply = document.createElement('button');
+      apply.id = `task-quick-apply-${task.id}`;
+      apply.className = 'btn'; apply.textContent = selected[1];
+      apply.disabled = busy || (selected[0] === 'approve' && task.readinessConfidence <= 90);
+      apply.addEventListener('click', () => void runAction(task, selected[0], pending.revision, note));
+      const cancel = document.createElement('button');
+      cancel.className = 'btn'; cancel.textContent = 'Cancel quick action'; cancel.disabled = busy;
+      cancel.addEventListener('click', () => { quickActions.delete(task.id); render(); document.getElementById(select.id)?.focus(); });
+      const notice = document.createElement('p');
+      notice.textContent = `Current: ${label(task.state)}. ${selected[0] === 'approve' ? 'Review scope in the confirmation. No session will start.' : 'Evidence or a reason is required before applying.'}`;
+      cell.append(notice, apply, cancel);
+    }
+    return cell;
   }
   function renderTask(task: Task): HTMLElement {
     const row = document.createElement('section');
@@ -206,12 +299,7 @@ export function createTaskSidebar(
     history.append(historyTitle);
     for (const entry of task.history) detail(history, `${entry.at} · ${entry.actor} · ${label(entry.state)}`, entry.note);
     details.append(history);
-    const actions: Array<[string, string]> = [];
-    if (task.state === 'awaiting_approval') actions.push(['approve', 'Approve preparation']);
-    if (['needs_input', 'blocked'].includes(task.state)) actions.push(['resume', 'Answer / resume']);
-    if (task.state === 'ready_for_review') actions.push(['accept', 'Accept outcome'], ['request_changes', 'Request changes']);
-    else if (!['completed', 'cancelled'].includes(task.state)) actions.push(['accept', 'Mark outcome complete']);
-    if (!['completed', 'cancelled'].includes(task.state)) actions.push(['cancel', 'Cancel task']);
+    const actions = actionsFor(task);
     const note = document.createElement('textarea');
     note.setAttribute('aria-label', `Answer or review evidence for ${task.id}`);
     note.placeholder = 'Answer, feedback, or outcome evidence';
@@ -234,35 +322,7 @@ export function createTaskSidebar(
       button.textContent = text;
       button.hidden = true;
       button.disabled = busy || (action === 'approve' && task.readinessConfidence <= 90);
-      button.addEventListener('click', async () => {
-        const expectedRevision = snapshot.revision;
-        let text = notes.get(task.id) ?? '';
-        if (action === 'approve') {
-          const accepted = await modalConfirm({
-            title: 'Approve preparation',
-            body: `${task.scope}\n\nPermissions: ${task.permissions.join(', ')}\n\nAcceptance: ${task.acceptance}\n\nStop: ${task.stopCondition}\n\nThis records approval only. It does not launch a session or authorize external actions.`,
-            primaryLabel: 'Approve preparation',
-          });
-          if (!accepted) return;
-          text = 'Approved displayed preparation scope';
-        } else if (!text.trim()) {
-          error.textContent = action === 'accept' ? 'Outcome-level acceptance evidence is required.' : 'An answer, feedback, or reason is required.';
-          note.focus();
-          return;
-        }
-        busy = true;
-        render();
-        try {
-          snapshot = await command(action, task.id, expectedRevision, text);
-          notes.delete(task.id);
-          error.textContent = '';
-        } catch (failure) {
-          error.textContent = failure instanceof Error ? failure.message : String(failure);
-        } finally {
-          busy = false;
-          render();
-        }
-      });
+      button.addEventListener('click', () => void runAction(task, action, snapshot.revision, note));
       details.append(button);
       actionButtons.push(button);
     }
@@ -302,13 +362,15 @@ export function createTaskSidebar(
       choose.setAttribute('aria-expanded', String(expanded === task.id));
       choose.setAttribute('aria-controls', `task-details-${task.id}`);
       choose.addEventListener('click', () => {
+        quickActions.delete(task.id);
         expanded = expanded === task.id ? '' : task.id;
         render();
         document.getElementById(`task-toggle-${task.id}`)?.focus();
       });
       choose.id = `task-toggle-${task.id}`;
       tr.insertCell().append(choose);
-      for (const value of [label(task.state), routes.find(([route]) => route === task.route)![1], task.humanDelegable ? 'Yes' : 'No', `${task.classificationConfidence}% / ${task.readinessConfidence}%`, task.owner || 'Unassigned']) {
+      tr.insertCell().append(renderQuickState(task));
+      for (const value of [routes.find(([route]) => route === task.route)![1], task.humanDelegable ? 'Yes' : 'No', `${task.classificationConfidence}% / ${task.readinessConfidence}%`, task.owner || 'Unassigned']) {
         tr.insertCell().textContent = value;
       }
       if (expanded === task.id) {

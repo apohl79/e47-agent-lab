@@ -166,3 +166,35 @@ test('unavailable tracked tasks open their error without visually toggling compl
   assert.equal(dom.window.document.querySelector('[role="alert"]')!.textContent, 'Register missing');
   dom.window.close();
 });
+
+test('collapsed quick actions require evidence and retain their revision and draft after a stale write', async () => {
+  const { root, doc, markdown } = fixture();
+  const dom = new JSDOM(`<main id="doc">${renderDoc(markdown).html}</main>`);
+  const calls: Array<{ action: string; revision: number; note: string }> = [];
+  const sidebar = createTaskSidebar(dom.window.document, async (action, _id, revision, note) => {
+    calls.push({ action, revision, note });
+    throw new Error('stale register revision');
+  });
+  const snapshot = documentTaskSnapshot(doc, root);
+  sidebar.update(snapshot);
+  const host = dom.window.document.getElementById('task-sidebar')!;
+  const select = host.querySelector<HTMLSelectElement>('[aria-label="Quick state for TASK-042"]')!;
+  assert.equal(Array.from(select.options).some((option) => option.value === 'start'), false);
+  select.value = 'accept';
+  select.dispatchEvent(new dom.window.Event('change'));
+  assert.equal(host.querySelector('.task-detail-row'), null);
+  const apply = () => Array.from(host.querySelectorAll('button')).find((button) => button.textContent === 'Mark outcome complete')!.click();
+  apply();
+  assert.equal(calls.length, 0);
+  assert.match(host.querySelector('[role="alert"]')!.textContent!, /evidence is required/);
+  const note = host.querySelector('textarea')!;
+  note.value = 'Verified scoped outcome';
+  note.dispatchEvent(new dom.window.Event('input'));
+  sidebar.update({ ...snapshot, revision: snapshot.revision + 1 });
+  apply();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(calls, [{ action: 'accept', revision: snapshot.revision, note: 'Verified scoped outcome' }]);
+  assert.equal(host.querySelector('textarea')!.value, 'Verified scoped outcome');
+  assert.match(host.querySelector('[role="alert"]')!.textContent!, /stale register revision/);
+  dom.window.close();
+});

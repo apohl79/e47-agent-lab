@@ -110,6 +110,14 @@ does not apply it: use the displayed button and supply outcome evidence,
 feedback, or a reason. Preparation approval has a separate scope confirmation
 and never starts an agent session.
 
+Each collapsed table row also has a State dropdown. Choose an available
+transition to reveal a compact evidence field and action button in that cell;
+the task does not need to expand. Approval opens the same scope confirmation.
+Quick actions and expanded controls share validation and notes. Opening one
+closes the other for that task, retaining its draft. Cancel a quick action to
+reset it; if the register changed, cancel and reselect rather than retrying a
+stale action. Completed and cancelled rows have read-only status dropdowns.
+
 “Edit classification” changes route, independent human delegability, and both
 confidence scores with a required reason. Saving invalidates prior approval.
 It does not transfer ownership or accept a handoff. Active work and outcomes
