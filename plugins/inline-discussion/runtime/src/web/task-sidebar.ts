@@ -298,20 +298,30 @@ export function createTaskSidebar(
       tr.dataset.selected = String(expanded === task.id);
       const choose = document.createElement('button');
       choose.className = 'task-title-button'; choose.textContent = task.title;
+      choose.setAttribute('aria-label', task.title);
+      choose.setAttribute('aria-expanded', String(expanded === task.id));
+      choose.setAttribute('aria-controls', `task-details-${task.id}`);
       choose.addEventListener('click', () => {
-        expanded = task.id; render();
-        list.querySelector<HTMLElement>('.task-sidebar-item a')?.focus();
+        expanded = expanded === task.id ? '' : task.id;
+        render();
+        document.getElementById(`task-toggle-${task.id}`)?.focus();
       });
+      choose.id = `task-toggle-${task.id}`;
       tr.insertCell().append(choose);
       for (const value of [label(task.state), routes.find(([route]) => route === task.route)![1], task.humanDelegable ? 'Yes' : 'No', `${task.classificationConfidence}% / ${task.readinessConfidence}%`, task.owner || 'Unassigned']) {
         tr.insertCell().textContent = value;
       }
+      if (expanded === task.id) {
+        const detailsRow = body.insertRow();
+        detailsRow.id = `task-details-${task.id}`;
+        detailsRow.className = 'task-detail-row';
+        const cell = detailsRow.insertCell();
+        cell.colSpan = head.cells.length;
+        cell.append(renderTask(task));
+      }
     }
     tableWrap.append(table);
-    const selected = snapshot.tasks.find((task) => task.id === expanded);
-    const panel = selected ? renderTask(selected) : document.createElement('p');
-    if (!selected) panel.textContent = 'Select a task to view scope, evidence, history, and controls.';
-    list.replaceChildren(tableWrap, panel);
+    list.replaceChildren(tableWrap);
     for (const task of snapshot.tasks) {
       const target = document.getElementById(`task-${task.id}`);
       if (!target) continue;

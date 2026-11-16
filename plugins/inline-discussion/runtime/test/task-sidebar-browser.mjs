@@ -27,7 +27,8 @@ update({ action: 'classify', id: 'TASK-042', task: {
   scope: 'Prepare a local capacity report', permissions: ['read_sources', 'write_artifacts', 'update_task_status'],
   acceptance: 'Measured demand and headroom', stopCondition: 'Final user review',
 } });
-writeFileSync(doc, '# Today\n\n<!-- task-register: tasks.json -->\n\n- [ ] Capacity review <!-- task-id: TASK-042 -->\n\nDiscuss this paragraph.\n');
+update({ action: 'create', id: 'TASK-043', task: { title: 'Second task', source: 'https://example.test/43' } });
+writeFileSync(doc, '# Today\n\n<!-- task-register: tasks.json -->\n\n- [ ] Capacity review <!-- task-id: TASK-042 -->\n- [ ] Second task <!-- task-id: TASK-043 -->\n\nDiscuss this paragraph.\n');
 const server = await createServer({
   docPath: doc, projectRoot: root, sessionDir: join(root, 'session'), prefsPath: join(root, 'prefs.json'),
   staticDir: join(runtime, 'dist'), shutdownOnFinish: false,
@@ -44,6 +45,23 @@ try {
   assert.equal(read().revision, initialRevision, 'checkbox navigation does not mutate or complete');
   assert.equal(await page.locator('#task-TASK-042 input').isChecked(), false);
   assert.match(await page.locator('#task-sidebar').innerText(), /Capacity review/);
+  const taskToggle = page.getByRole('button', { name: 'Capacity review', exact: true });
+  assert.equal(await taskToggle.getAttribute('aria-expanded'), 'true');
+  assert.equal(await page.locator('#task-details-TASK-042 > td').getAttribute('colspan'), '6');
+  assert.equal(await page.locator('#task-details-TASK-042').evaluate((row) => row.previousElementSibling.querySelector('button').textContent), 'Capacity review');
+  const evidence = page.getByLabel('Answer or review evidence for TASK-042');
+  await evidence.fill('Keep this draft while collapsed');
+  await taskToggle.click();
+  assert.equal(await page.locator('.task-detail-row').count(), 0);
+  assert.equal(await taskToggle.getAttribute('aria-expanded'), 'false');
+  await page.keyboard.press('Space');
+  assert.equal(await evidence.inputValue(), 'Keep this draft while collapsed');
+  await page.getByRole('button', { name: 'Second task', exact: true }).click();
+  assert.equal(await page.locator('.task-detail-row').count(), 1);
+  assert.equal(await page.locator('#task-details-TASK-043').isVisible(), true);
+  await taskToggle.click();
+  assert.equal(await evidence.inputValue(), 'Keep this draft while collapsed');
+  await evidence.fill('');
   const transition = page.getByLabel('Change state for TASK-042');
   const applyState = async (action, name) => {
     await transition.selectOption(action);
@@ -77,7 +95,7 @@ try {
   // A live register update must not silently rebase an edited classification.
   await page.getByLabel('Classification reason', { exact: true }).fill('Stale draft');
   update({ action: 'classify', id: 'TASK-042', task: { route: 'verify_first' } });
-  await page.waitForFunction(() => document.querySelector('.task-table tbody')?.textContent.includes('Verify first'));
+  await page.waitForFunction(() => document.querySelector('#task-toggle-TASK-042')?.closest('tr')?.textContent.includes('Verify first'));
   await page.getByRole('button', { name: 'Save classification', exact: true }).click();
   await page.waitForFunction(() => document.querySelector('[role="alert"]')?.textContent.includes('revision'));
   assert.equal(read().tasks[0].route, 'verify_first');
@@ -88,7 +106,7 @@ try {
   await page.getByLabel('Human-delegable independently of classification').uncheck();
   await page.getByLabel('Classification reason', { exact: true }).fill('Local preparation is safe and ready');
   await page.getByRole('button', { name: 'Save classification', exact: true }).click();
-  await page.waitForFunction(() => document.querySelector('.task-table tbody')?.textContent.includes('Agent-preparable'));
+  await page.waitForFunction(() => document.querySelector('#task-toggle-TASK-042')?.closest('tr')?.textContent.includes('Agent-preparable'));
   assert.equal(read().tasks[0].humanDelegable, false);
   await applyState('approve', 'Approve preparation');
   await page.locator('#modal-root').getByRole('button', { name: 'Approve preparation', exact: true }).click();

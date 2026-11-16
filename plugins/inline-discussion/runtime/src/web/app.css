@@ -18,15 +18,17 @@
 #task-sidebar select { width: 100%; padding: 6px; color: var(--fg); background: var(--bg); border: 1px solid var(--border); }
 #task-sidebar > select { max-width: 260px; }
 #task-sidebar textarea { width: 100%; box-sizing: border-box; min-height: 70px; background: var(--bg); color: var(--fg); border: 1px solid var(--border); }
-.task-workspace { display: grid; grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr); gap: 24px; align-items: start; }
-.task-table-scroll { overflow: auto; min-width: 0; max-height: max(200px, calc(100dvh - 260px)); }
+.task-table-scroll { overflow-x: auto; min-width: 0; }
 .task-table { width: 100%; border-collapse: collapse; text-align: left; }
 .task-table caption { text-align: left; padding: 12px 0; color: var(--muted); }
 .task-table th, .task-table td { padding: 12px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
 .task-table th { color: var(--muted); font-size: 12px; }
 .task-table tr[data-selected="true"] { background: var(--accent-soft); }
 .task-title-button { font: inherit; font-weight: 600; text-align: left; color: var(--accent); background: none; border: 0; cursor: pointer; padding: 0; min-width: 140px; }
-.task-sidebar-item { padding: 16px; border: 1px solid var(--border); border-radius: var(--radius); overflow-wrap: anywhere; min-width: 0; }
+.task-title-button::before { content: '▸ '; }
+.task-title-button[aria-expanded="true"]::before { content: '▾ '; }
+.task-detail-row > td { background: var(--bg); }
+.task-sidebar-item { padding: 8px; overflow-wrap: anywhere; min-width: 0; max-width: calc(100vw - 84px); }
 .task-sidebar-item > a { display: block; color: var(--fg); font-weight: 600; }
 .task-sidebar-item p { margin: 8px 0; }
 .task-sidebar-item .btn { display: block; margin-top: 8px; white-space: normal; }
@@ -42,7 +44,6 @@ body.task-mode #doc { display: none; }
 [data-task-id] { scroll-margin-top: 80px; }
 @media (max-width: 1000px) {
   #task-sidebar { padding: 16px; }
-  .task-workspace { grid-template-columns: minmax(0, 1fr); }
 }
 
 :root {

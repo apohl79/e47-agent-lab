@@ -132,10 +132,18 @@ test('sidebar filters, navigates and retains input across live updates without r
   const host = dom.window.document.getElementById('task-sidebar')!;
   assert.match(host.textContent!, /Capacity review/);
   (host.querySelector('.task-title-button') as HTMLButtonElement).click();
+  assert.equal(host.querySelector('.task-title-button')!.getAttribute('aria-expanded'), 'true');
+  assert.equal(host.querySelector('.task-sidebar-item')!.closest('tr')!.previousElementSibling!.querySelector('.task-title-button')!.textContent, 'Capacity review');
+  assert.equal(host.querySelector<HTMLTableCellElement>('.task-detail-row > td')!.colSpan, 6);
   const note = host.querySelector('textarea')!;
   note.value = 'Keep my draft';
   note.dispatchEvent(new dom.window.Event('input'));
   sidebar.update({ ...snapshot, revision: snapshot.revision + 1 });
+  assert.equal(host.querySelector('textarea')!.value, 'Keep my draft');
+  (host.querySelector('.task-title-button') as HTMLButtonElement).click();
+  assert.equal(host.querySelector('.task-sidebar-item'), null);
+  assert.equal(host.querySelector('.task-title-button')!.getAttribute('aria-expanded'), 'false');
+  (host.querySelector('.task-title-button') as HTMLButtonElement).click();
   assert.equal(host.querySelector('textarea')!.value, 'Keep my draft');
   assert.equal(dom.window.document.getElementById('task-TASK-042'), target);
   host.querySelector('a')!.click();

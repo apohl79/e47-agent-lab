@@ -90,17 +90,20 @@ completion only. Tracked checkboxes cannot bypass final review.
 The renderer associates each task item with `data-task-id` and a
 `#task-TASK-042` navigation anchor. The browser builds its Tasks table from the
 referenced register and shows only tasks referenced by the open document.
-The table, detail pane, and inline badges show **current** state, including when viewing
+The table, expanded task details, and inline badges show **current** state, including when viewing
 an older document; stored Markdown remains a historical snapshot unless an
 authorized workflow explicitly refreshes the current document. Ordinary
 Markdown viewers show the saved snapshot without the task controls.
 
 The toolbar switches between Document and Tasks at every panel width.
-Clicking a tracked checkbox opens that task's detail pane; it does not toggle
+Clicking a tracked checkbox expands that task's row in the table; it does not toggle
 completion or write Markdown. Ordinary checkboxes retain their normal behavior.
 The table shows state, classification, independent human delegability, both
-confidence scores, and owner. Select a task to inspect scope, evidence, history,
-and source/session/deliverable links. Its title returns to the document anchor.
+confidence scores, and owner. Click a task's table title to expand or collapse
+its details directly below the item. Only one task expands at a time; drafts
+survive collapse and switching tasks. Details include scope, evidence, history,
+and source/session/deliverable links. The title inside the expanded details
+returns to the document anchor.
 
 The state dropdown offers only available user actions. Selecting an action
 does not apply it: use the displayed button and supply outcome evidence,
