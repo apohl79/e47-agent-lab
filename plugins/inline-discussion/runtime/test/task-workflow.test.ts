@@ -93,9 +93,12 @@ test('actual HTTP API approves scoped work, rejects stale commands and checkbox 
     assert.equal(boot.tasks.tasks[0]!.state, 'awaiting_approval');
     const post = (body: object) => fetch(`${base}/api/tasks/command`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
     assert.equal((await post({ action: 'approve', id: 'TASK-042', expectedRevision: 0 })).status, 409);
+    assert.equal((await post({ action: 'start', id: 'TASK-042', expectedRevision: boot.tasks.revision })).status, 409);
     const approved = await post({ action: 'approve', id: 'TASK-042', expectedRevision: boot.tasks.revision });
     assert.equal(approved.status, 200);
     assert.equal(readTaskRegister(path).tasks[0]!.state, 'ready');
+    assert.equal((await post({ action: 'classify', id: 'TASK-042', expectedRevision: boot.tasks.revision + 1, task: { route: 'you' } })).status, 409);
+    assert.equal((await post({ action: 'classify', id: 'TASK-042', expectedRevision: boot.tasks.revision + 1, note: 'Reject scope change', task: { scope: 'Different' } })).status, 409);
     const blockedCheckbox = await fetch(`${base}/api/task-checkboxes`, {
       method: 'PATCH', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ blockId: boot.blockIds.at(-1), checkboxIndex: 0, checked: true }),
@@ -128,6 +131,7 @@ test('sidebar filters, navigates and retains input across live updates without r
   sidebar.update(snapshot);
   const host = dom.window.document.getElementById('task-sidebar')!;
   assert.match(host.textContent!, /Capacity review/);
+  (host.querySelector('.task-title-button') as HTMLButtonElement).click();
   const note = host.querySelector('textarea')!;
   note.value = 'Keep my draft';
   note.dispatchEvent(new dom.window.Event('input'));
@@ -139,6 +143,18 @@ test('sidebar filters, navigates and retains input across live updates without r
   const filter = host.querySelector('select')!;
   filter.value = 'completed';
   filter.dispatchEvent(new dom.window.Event('change'));
-  assert.equal(host.querySelectorAll('.task-sidebar-item').length, 0);
+  assert.equal(host.querySelectorAll('tbody tr').length, 0);
+  dom.window.close();
+});
+
+test('unavailable tracked tasks open their error without visually toggling completion', () => {
+  const dom = new JSDOM('<main id="doc"><li data-task-id="TASK-MISSING"><input type="checkbox"></li></main>');
+  const sidebar = createTaskSidebar(dom.window.document, async () => { throw new Error('must not persist'); });
+  sidebar.update({ enabled: true, revision: 0, tasks: [], error: 'Register missing' });
+  const input = dom.window.document.querySelector('input')!;
+  input.click();
+  assert.equal(input.checked, false);
+  assert.equal(dom.window.document.getElementById('task-sidebar')!.hidden, false);
+  assert.equal(dom.window.document.querySelector('[role="alert"]')!.textContent, 'Register missing');
   dom.window.close();
 });

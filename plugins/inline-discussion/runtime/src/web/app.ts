@@ -551,11 +551,11 @@ async function init(): Promise<void> {
   state.readOnly = boot.readOnly === true;
   state.sourceView = boot.sourceView === true;
   state.documentPath = boot.documentPath ?? (documentRoute === '/' ? '' : documentRoute);
-  const taskSidebar = createTaskSidebar(document, async (action, id, expectedRevision, note) => {
+  const taskSidebar = createTaskSidebar(document, async (action, id, expectedRevision, note, task) => {
     const response = await fetch('/api/tasks/command', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ action, id, expectedRevision, note, documentPath: state.documentPath }),
+      body: JSON.stringify({ action, id, expectedRevision, note, task, documentPath: state.documentPath }),
     });
     if (!response.ok) throw await responseError(response);
     return await response.json() as TaskSnapshot;

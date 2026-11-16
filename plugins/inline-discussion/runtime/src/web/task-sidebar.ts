@@ -4,13 +4,12 @@ import { modalConfirm } from './modal.ts';
 const label = (value: string) => value.replaceAll('_', ' ');
 export function createTaskSidebar(
   document: Document,
-  command: (action: string, id: string, revision: number, note: string) => Promise<TaskSnapshot>,
+  command: (action: string, id: string, revision: number, note: string, task?: Partial<Task>) => Promise<TaskSnapshot>,
 ): { update(snapshot: TaskSnapshot): void; refresh(): void } {
   const host = document.createElement('aside');
   host.id = 'task-sidebar';
   host.setAttribute('aria-label', 'Tasks');
   host.hidden = true;
-  host.dataset.collapsed = 'true';
   const doc = document.getElementById('doc');
   if (doc) doc.before(host); else document.body.append(host);
   const toggle = document.createElement('button');
@@ -20,24 +19,27 @@ export function createTaskSidebar(
   toggle.hidden = true;
   toggle.setAttribute('aria-controls', host.id);
   toggle.setAttribute('aria-expanded', 'false');
-  toggle.addEventListener('click', () => {
-    const open = host.dataset.collapsed === 'true';
-    host.dataset.collapsed = String(!open);
+  function setMode(open: boolean): void {
+    host.hidden = !open || !snapshot.enabled;
+    document.body.classList.toggle('task-mode', open && snapshot.enabled);
+    toggle.textContent = open ? 'Document' : 'Tasks';
     toggle.setAttribute('aria-expanded', String(open));
-  });
+  }
+  toggle.addEventListener('click', () => setMode(host.hidden));
   const controls = document.getElementById('controls');
   if (controls) controls.prepend(toggle); else host.before(toggle);
   const heading = document.createElement('h2');
-  heading.textContent = 'Tasks · current status';
+  heading.textContent = 'Tasks';
   const filter = document.createElement('select');
   filter.setAttribute('aria-label', 'Filter tasks by status');
-  for (const value of ['open', ...TASK_STATES]) {
+  for (const value of ['open', 'all', ...TASK_STATES]) {
     const option = document.createElement('option');
     option.value = value;
-    option.textContent = value === 'open' ? 'All open tasks' : label(value);
+      option.textContent = value === 'open' ? 'All open tasks' : value === 'all' ? 'All tasks' : label(value);
     filter.append(option);
   }
   const list = document.createElement('div');
+  list.className = 'task-workspace';
   const error = document.createElement('p');
   error.setAttribute('role', 'alert');
   host.append(heading, filter, error, list);
@@ -45,6 +47,28 @@ export function createTaskSidebar(
   let expanded = '';
   let busy = false;
   const notes = new Map<string, string>();
+  type ClassificationDraft = { revision: number; route: Task['route']; humanDelegable: boolean; classificationConfidence: number; readinessConfidence: number; reason: string };
+  const drafts = new Map<string, ClassificationDraft>();
+  const routes: Array<[Task['route'], string]> = [
+    ['agent', 'Fully agent-executable'], ['agent_preparable', 'Agent-preparable'],
+    ['human_delegable', 'Human-delegable'], ['you', 'Personal'], ['verify_first', 'Verify first'],
+  ];
+  doc?.addEventListener('click', (event) => {
+    const input = (event.target as Element).closest<HTMLInputElement>('input[type="checkbox"]');
+    const id = input?.closest<HTMLElement>('[data-task-id]')?.dataset.taskId;
+    if (!id) return;
+    event.preventDefault();
+    if (!snapshot.tasks.some((task) => task.id === id)) {
+      setMode(true);
+      error.textContent = snapshot.error ?? `Task ${id} is unavailable. Reload the document to refresh its register.`;
+      return;
+    }
+    expanded = id;
+    filter.value = 'all';
+    setMode(true);
+    render();
+    list.querySelector<HTMLElement>('.task-sidebar-item textarea, .task-sidebar-item a')?.focus();
+  });
   function detail(parent: HTMLElement, name: string, value: string): void {
     if (!value) return;
     const line = document.createElement('p');
@@ -79,6 +103,7 @@ export function createTaskSidebar(
       const target = document.getElementById(`task-${task.id}`);
       if (!target) return;
       event.preventDefault();
+      setMode(false);
       target.scrollIntoView({ block: 'center', behavior: 'smooth' });
     });
     const status = document.createElement('span');
@@ -86,14 +111,83 @@ export function createTaskSidebar(
     status.dataset.state = task.state;
     status.textContent = label(task.state);
     const details = document.createElement('details');
-    details.open = expanded === task.id;
+    details.open = true;
     const summary = document.createElement('summary');
     summary.textContent = `${task.id} · ${task.owner || 'Unassigned'}`;
     details.append(summary);
-    details.addEventListener('toggle', () => { if (details.open) expanded = task.id; else if (expanded === task.id) expanded = ''; });
     detail(details, 'Route', label(task.route));
     detail(details, 'Human delegation', task.humanDelegable ? `${task.candidateDelegate || 'Unassigned'} · ${task.handoff}` : 'Not proposed');
     detail(details, 'Confidence', `classification ${task.classificationConfidence}% · readiness ${task.readinessConfidence}%`);
+    if (!['in_progress', 'ready_for_review', 'completed', 'cancelled'].includes(task.state)) {
+      const editor = document.createElement('details');
+      const editorTitle = document.createElement('summary');
+      editorTitle.textContent = 'Edit classification';
+      editor.open = drafts.has(task.id);
+      editor.append(editorTitle);
+      const draft = drafts.get(task.id) ?? {
+        revision: snapshot.revision, route: task.route, humanDelegable: task.humanDelegable,
+        classificationConfidence: task.classificationConfidence, readinessConfidence: task.readinessConfidence, reason: '',
+      };
+      const remember = () => drafts.set(task.id, draft);
+      const field = (name: string, input: HTMLElement) => {
+        input.setAttribute('aria-label', name);
+        const wrapper = document.createElement('label');
+        wrapper.className = 'task-field';
+        wrapper.append(document.createTextNode(name), input);
+        editor.append(wrapper);
+      };
+      const route = document.createElement('select');
+      for (const [value, text] of routes) {
+        const option = document.createElement('option'); option.value = value; option.textContent = text; route.append(option);
+      }
+      route.value = draft.route;
+      route.disabled = busy;
+      route.addEventListener('change', () => { draft.route = route.value as Task['route']; remember(); });
+      field('Classification', route);
+      const delegable = document.createElement('input');
+      delegable.type = 'checkbox';
+      delegable.checked = draft.humanDelegable;
+      delegable.disabled = busy;
+      delegable.addEventListener('change', () => { draft.humanDelegable = delegable.checked; remember(); });
+      field('Human-delegable independently of classification', delegable);
+      for (const [key, name] of [['classificationConfidence', 'Classification confidence (%)'], ['readinessConfidence', 'Readiness confidence (%)']] as const) {
+        const input = document.createElement('input');
+        input.type = 'number'; input.min = '0'; input.max = '100'; input.step = '1';
+        input.value = String(draft[key]); input.required = true; input.disabled = busy;
+        input.addEventListener('input', () => { draft[key] = input.valueAsNumber; remember(); });
+        field(name, input);
+      }
+      const reason = document.createElement('textarea');
+      reason.value = draft.reason;
+      reason.required = true; reason.disabled = busy;
+      reason.addEventListener('input', () => { draft.reason = reason.value; remember(); });
+      field('Classification reason', reason);
+      const notice = document.createElement('p');
+      notice.textContent = 'Saving clears prior approval. Active work and outcomes under review must be stopped or returned for changes before reclassification.';
+      editor.append(notice);
+      const save = document.createElement('button');
+      save.className = 'btn'; save.textContent = 'Save classification'; save.disabled = busy;
+      save.addEventListener('click', async () => {
+        if (!draft.reason.trim() || !Array.from(editor.querySelectorAll('input')).every((input) => input.reportValidity())) {
+          error.textContent = 'A reason and confidence values from 0 to 100 are required.';
+          return;
+        }
+        busy = true; render();
+        try {
+          const { revision, reason: note, ...patch } = draft;
+          snapshot = await command('classify', task.id, revision, note, patch);
+          drafts.delete(task.id);
+          error.textContent = '';
+        } catch (failure) {
+          error.textContent = `${failure instanceof Error ? failure.message : String(failure)}. Discard classification edits to use current values.`;
+        } finally { busy = false; render(); }
+      });
+      const discard = document.createElement('button');
+      discard.className = 'btn'; discard.textContent = 'Discard classification edits'; discard.disabled = busy;
+      discard.addEventListener('click', () => { drafts.delete(task.id); error.textContent = ''; render(); });
+      editor.append(save, discard);
+      details.append(editor);
+    }
     detail(details, 'Scope', task.scope);
     detail(details, 'Permissions', task.permissions.join(', '));
     detail(details, 'Acceptance', task.acceptance);
@@ -124,10 +218,21 @@ export function createTaskSidebar(
     note.value = notes.get(task.id) ?? '';
     note.addEventListener('input', () => notes.set(task.id, note.value));
     if (actions.some(([action]) => action !== 'approve')) details.append(note);
+    const transition = document.createElement('select');
+    transition.setAttribute('aria-label', `Change state for ${task.id}`);
+    const current = document.createElement('option');
+    current.value = ''; current.textContent = `Current: ${label(task.state)}`;
+    transition.append(current);
+    const actionButtons: HTMLButtonElement[] = [];
     for (const [action, text] of actions) {
+      const option = document.createElement('option');
+      option.value = action; option.textContent = text;
+      option.disabled = busy || (action === 'approve' && task.readinessConfidence <= 90);
+      transition.append(option);
       const button = document.createElement('button');
       button.className = 'btn';
       button.textContent = text;
+      button.hidden = true;
       button.disabled = busy || (action === 'approve' && task.readinessConfidence <= 90);
       button.addEventListener('click', async () => {
         const expectedRevision = snapshot.revision;
@@ -159,16 +264,54 @@ export function createTaskSidebar(
         }
       });
       details.append(button);
+      actionButtons.push(button);
+    }
+    if (actions.length) {
+      transition.disabled = busy;
+      transition.addEventListener('change', () => {
+        actionButtons.forEach((button, index) => { button.hidden = actions[index]![0] !== transition.value; });
+      });
+      details.insertBefore(transition, note);
     }
     row.append(jump, status, details);
     return row;
   }
   function render(): void {
-    host.hidden = !snapshot.enabled;
+    if (!snapshot.enabled) setMode(false);
     toggle.hidden = !snapshot.enabled;
-    document.body.classList.toggle('has-task-sidebar', snapshot.enabled);
     if (snapshot.error) error.textContent = snapshot.error;
-    list.replaceChildren(...snapshot.tasks.filter((task) => filter.value === 'open' ? !['completed', 'cancelled'].includes(task.state) : task.state === filter.value).map(renderTask));
+    const visible = snapshot.tasks.filter((task) => filter.value === 'all' || (filter.value === 'open' ? !['completed', 'cancelled'].includes(task.state) : task.state === filter.value));
+    const tableWrap = document.createElement('div');
+    tableWrap.className = 'task-table-scroll';
+    const table = document.createElement('table');
+    table.className = 'task-table';
+    const caption = document.createElement('caption');
+    caption.textContent = `${visible.length} tasks · select a task to review or edit`;
+    const head = table.createTHead().insertRow();
+    for (const name of ['Task', 'State', 'Classification', 'Human-delegable', 'Confidence / readiness', 'Owner']) {
+      const cell = document.createElement('th'); cell.scope = 'col'; cell.textContent = name; head.append(cell);
+    }
+    table.prepend(caption);
+    const body = table.createTBody();
+    for (const task of visible) {
+      const tr = body.insertRow();
+      tr.dataset.selected = String(expanded === task.id);
+      const choose = document.createElement('button');
+      choose.className = 'task-title-button'; choose.textContent = task.title;
+      choose.addEventListener('click', () => {
+        expanded = task.id; render();
+        list.querySelector<HTMLElement>('.task-sidebar-item a')?.focus();
+      });
+      tr.insertCell().append(choose);
+      for (const value of [label(task.state), routes.find(([route]) => route === task.route)![1], task.humanDelegable ? 'Yes' : 'No', `${task.classificationConfidence}% / ${task.readinessConfidence}%`, task.owner || 'Unassigned']) {
+        tr.insertCell().textContent = value;
+      }
+    }
+    tableWrap.append(table);
+    const selected = snapshot.tasks.find((task) => task.id === expanded);
+    const panel = selected ? renderTask(selected) : document.createElement('p');
+    if (!selected) panel.textContent = 'Select a task to view scope, evidence, history, and controls.';
+    list.replaceChildren(tableWrap, panel);
     for (const task of snapshot.tasks) {
       const target = document.getElementById(`task-${task.id}`);
       if (!target) continue;
@@ -180,7 +323,7 @@ export function createTaskSidebar(
       }
       badge.textContent = ` · Current: ${label(task.state)}`;
       const checkbox = target.querySelector<HTMLInputElement>('input[type="checkbox"]');
-      if (checkbox) { checkbox.checked = task.state === 'completed'; checkbox.disabled = true; }
+      if (checkbox) { checkbox.checked = task.state === 'completed'; checkbox.disabled = false; checkbox.title = 'Open task controls to review or change this task'; }
     }
   }
   filter.addEventListener('change', render);

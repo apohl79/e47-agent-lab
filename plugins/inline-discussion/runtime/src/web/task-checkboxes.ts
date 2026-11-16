@@ -9,8 +9,8 @@ export type TaskCheckboxChangeHandler = (change: TaskCheckboxChange, input: HTML
 export function bindTaskCheckboxes(root: ParentNode, onChange: TaskCheckboxChangeHandler): void {
   for (const input of root.querySelectorAll<HTMLInputElement>('input[data-task-checkbox-index]')) {
     if (input.closest('[data-task-id]')) {
-      input.disabled = true;
-      input.title = 'Review and accept this tracked task in the task sidebar';
+      input.disabled = false;
+      input.title = 'Open task controls to review or change this task';
       continue;
     }
     if (input.dataset.taskCheckboxBound) continue;

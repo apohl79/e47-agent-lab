@@ -1172,7 +1172,14 @@ async function handle(state: ServerState, req: IncomingMessage, res: ServerRespo
     res.setHeader('content-type', 'application/json');
     try {
       if (!documentPath) throw new Error('Markdown document required');
-      if (!['approve', 'resume', 'request_changes', 'accept', 'cancel'].includes(body.action)) throw new Error('unsupported user task command');
+      if (!['classify', 'approve', 'resume', 'request_changes', 'accept', 'cancel'].includes(body.action)) throw new Error('unsupported user task command');
+      if (body.action === 'classify') {
+        if (!body.note?.trim()) throw new Error('classification reason is required');
+        const fields = ['route', 'humanDelegable', 'classificationConfidence', 'readinessConfidence'];
+        if (!body.task || !Object.keys(body.task).length || Object.keys(body.task).some((key) => !fields.includes(key))) {
+          throw new Error('unsupported classification field');
+        }
+      }
       const binding = documentTaskBinding(readFileSync(documentPath, 'utf8'));
       if (!body.id || !binding?.ids.includes(body.id)) throw new Error('task does not belong to document');
       const path = documentTaskRegisterPath(documentPath, state.projectRoot ?? resolveServeRoot(state.docPath));

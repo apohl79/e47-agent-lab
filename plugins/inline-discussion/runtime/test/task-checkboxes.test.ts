@@ -15,3 +15,14 @@ test('bindTaskCheckboxes enables rendered task inputs and reports their block-lo
   assert.deepEqual(changes, [{ blockId: 'tasks', checkboxIndex: 0, checked: true }]);
   dom.window.close();
 });
+
+test('tracked checkbox navigation never invokes ordinary Markdown persistence', () => {
+  const dom = new JSDOM('<main><ul data-block-id="tasks"><li data-task-id="TASK-042"><input type="checkbox" disabled data-task-checkbox-index="0"> Tracked</li></ul></main>');
+  const changes: TaskCheckboxChange[] = [];
+  bindTaskCheckboxes(dom.window.document, (change) => changes.push(change));
+  const input = dom.window.document.querySelector('input')!;
+  assert.equal(input.disabled, false);
+  input.click();
+  assert.deepEqual(changes, []);
+  dom.window.close();
+});

@@ -1,6 +1,6 @@
 ---
 name: writing
-description: "Write inline-discussion documents with local source links, Mermaid diagrams, and persistent task-register metadata for the task sidebar. Use when writing content that will be opened in the inline-discussion browser."
+description: "Write inline-discussion documents with local source links, Mermaid diagrams, and persistent task-register metadata for Tasks mode. Use when writing content that will be opened in the inline-discussion browser."
 ---
 
 # Inline-discussion writing conventions
@@ -57,7 +57,7 @@ For a document with several major sections, add a concise table of contents afte
 
 Always prefer a fenced `mermaid` diagram over prose when expressing structure, flow, sequence, state, or relationships. Prefer Mermaid over an SVG or PNG as well. Keep prose for explanation that a diagram cannot express, and keep screenshots or other images whose exact visual appearance is the evidence.
 
-## Persistent tasks and the sidebar
+## Persistent tasks and Tasks mode
 
 Opt in per document. Put exactly one standalone declaration after the title,
 surrounded by blank lines. Resolve its JSON path relative to the Markdown file;
@@ -83,17 +83,36 @@ when moving or carrying a task to another document. Leave ordinary untracked
 checkboxes unchanged.
 
 Keep human-readable titles, rationale, evidence links, and dated notes in
-Markdown. Do not write executable HTML, duplicate the sidebar as a Markdown
+Markdown. Do not write executable HTML, duplicate Tasks mode as a Markdown
 table, or encode lifecycle state in checkbox syntax. The checkbox represents
 completion only. Tracked checkboxes cannot bypass final review.
 
 The renderer associates each task item with `data-task-id` and a
-`#task-TASK-042` navigation anchor. The browser builds its sidebar from the
+`#task-TASK-042` navigation anchor. The browser builds its Tasks table from the
 referenced register and shows only tasks referenced by the open document.
-The sidebar and inline badges show **current** state, including when viewing
+The table, detail pane, and inline badges show **current** state, including when viewing
 an older document; stored Markdown remains a historical snapshot unless an
 authorized workflow explicitly refreshes the current document. Ordinary
-Markdown viewers show the saved snapshot without the sidebar.
+Markdown viewers show the saved snapshot without the task controls.
+
+The toolbar switches between Document and Tasks at every panel width.
+Clicking a tracked checkbox opens that task's detail pane; it does not toggle
+completion or write Markdown. Ordinary checkboxes retain their normal behavior.
+The table shows state, classification, independent human delegability, both
+confidence scores, and owner. Select a task to inspect scope, evidence, history,
+and source/session/deliverable links. Its title returns to the document anchor.
+
+The state dropdown offers only available user actions. Selecting an action
+does not apply it: use the displayed button and supply outcome evidence,
+feedback, or a reason. Preparation approval has a separate scope confirmation
+and never starts an agent session.
+
+“Edit classification” changes route, independent human delegability, and both
+confidence scores with a required reason. Saving invalidates prior approval.
+It does not transfer ownership or accept a handoff. Active work and outcomes
+under review cannot be reclassified; return review work for changes first.
+Completed and cancelled tasks are read-only. Live updates retain drafts;
+stale saves are rejected. Discard classification edits to load current values.
 
 Register changes arrive over the existing live-event connection without
 rerendering the document or interrupting discussions. Missing registers,
@@ -168,7 +187,7 @@ States: `identified` → `awaiting_approval` → `ready` → `in_progress` →
 it to `awaiting_approval`. User cancellation ends at `cancelled`.
 
 The CLI runs as an agent. It cannot approve, resume, accept, cancel, or request
-review changes on the user's behalf. Only explicit sidebar actions do that.
+review changes on the user's behalf. Only explicit user actions in Tasks mode do that.
 Approval requires execution readiness **strictly greater than 90**, an agent
 route, complete scope/acceptance/stop instructions, and completed dependencies.
 Classification confidence is not execution readiness or authorization.
