@@ -28,7 +28,7 @@ update({ action: 'classify', id: 'TASK-042', task: {
   acceptance: 'Measured demand and headroom', stopCondition: 'Final user review',
 } });
 update({ action: 'create', id: 'TASK-043', task: { title: 'Second task', source: 'https://example.test/43' } });
-writeFileSync(doc, '# Today\n\n<!-- task-register: tasks.json -->\n\n- [ ] Capacity review <!-- task-id: TASK-042 -->\n- [ ] Second task <!-- task-id: TASK-043 -->\n\nDiscuss this paragraph.\n');
+writeFileSync(doc, '# Today\n\n<!-- task-register: tasks.json -->\n\n## Urgent next steps for today\n\n- [ ] Capacity review <!-- task-id: TASK-042 -->\n\n## Tasks for today\n\n### Planning\n\n- [ ] Second task <!-- task-id: TASK-043 -->\n\nDiscuss this paragraph.\n');
 const server = await createServer({
   docPath: doc, projectRoot: root, sessionDir: join(root, 'session'), prefsPath: join(root, 'prefs.json'),
   staticDir: join(runtime, 'dist'), shutdownOnFinish: false,
@@ -47,7 +47,16 @@ try {
   assert.match(await page.locator('#task-sidebar').innerText(), /Capacity review/);
   const taskToggle = page.getByRole('button', { name: 'Capacity review', exact: true });
   assert.equal(await taskToggle.getAttribute('aria-expanded'), 'true');
-  assert.equal(await page.locator('#task-details-TASK-042 > td').getAttribute('colspan'), '6');
+  assert.equal(await page.locator('#task-details-TASK-042 > td').getAttribute('colspan'), '7');
+  const category = page.getByLabel('Filter tasks by category');
+  assert.deepEqual(await category.locator('option').allTextContents(), ['All categories', 'Urgent next steps for today', 'Tasks for today / Planning']);
+  await category.selectOption('Tasks for today / Planning');
+  assert.equal(await page.locator('#task-toggle-TASK-042').count(), 0);
+  assert.equal(await page.locator('#task-toggle-TASK-043').isVisible(), true);
+  assert.equal(read().revision, initialRevision, 'category filtering is view-only');
+  await page.getByRole('button', { name: 'Document', exact: true }).click();
+  await page.locator('#task-TASK-042 input').click();
+  assert.equal(await category.inputValue(), '', 'checkbox navigation clears the category filter');
   assert.equal(await page.locator('#task-details-TASK-042').evaluate((row) => row.previousElementSibling.querySelector('button').textContent), 'Capacity review');
   const evidence = page.getByLabel('Answer or review evidence for TASK-042');
   await evidence.fill('Keep this draft while collapsed');
@@ -95,6 +104,22 @@ try {
   await page.waitForFunction(() => document.querySelector('#task-quick-select-TASK-043')?.disabled);
   assert.equal(read().tasks[1].state, 'completed');
   assert.equal(await secondQuick.isDisabled(), true);
+  await category.selectOption('Tasks for today / Planning');
+  await page.getByLabel('Filter tasks by status').selectOption('open');
+  assert.equal(await page.locator('.task-table tbody tr').count(), 0, 'category and state filters combine');
+  await page.getByLabel('Filter tasks by status').selectOption('completed');
+  assert.equal(await page.locator('#task-toggle-TASK-043').isVisible(), true);
+  const revisionBeforeHeadingEdit = read().revision;
+  writeFileSync(doc, readFileSync(doc, 'utf8').replace('### Planning', '### Follow-up'));
+  await page.waitForFunction(() => Array.from(document.querySelectorAll('[aria-label="Filter tasks by category"] option')).some(option => option.textContent === 'Tasks for today / Follow-up'));
+  assert.equal(await category.inputValue(), '', 'removed categories reset on live document updates');
+  assert.equal(read().revision, revisionBeforeHeadingEdit, 'heading changes do not mutate the register');
+  await page.getByLabel('Filter tasks by status').selectOption('all');
+  await page.screenshot({ path: join(root, 'categories-desktop.png'), fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  await page.screenshot({ path: join(root, 'categories-mobile.png'), fullPage: true });
+  await page.setViewportSize({ width: 1440, height: 1000 });
   await taskToggle.click();
   const transition = page.getByLabel('Change state for TASK-042');
   const applyState = async (action, name) => {

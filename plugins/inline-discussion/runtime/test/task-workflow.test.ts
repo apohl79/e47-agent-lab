@@ -73,6 +73,29 @@ test('document binding survives carryover, ignores code, and rejects missing/dup
   assert.match(documentTaskSnapshot(join(elsewhere, 'outside.md'), elsewhere).error!, /outside project/);
 });
 
+test('task categories follow document sections, ignore nested headings, and refresh without register writes', () => {
+  const { root, doc, path, update } = fixture();
+  update({ action: 'create', id: 'TASK-043', task: { title: 'Second task', source: 'https://example.test/43' } });
+  const markdown = '# Today\n\n<!-- task-register: tasks.json -->\n\n- [ ] Capacity review <!-- task-id: TASK-042 -->\n\n## Initiatives\n\n### SAP\n\n> ## Not a category\n\n- [ ] Second task <!-- task-id: TASK-043 -->\n\n  ### Internal task heading\n';
+  writeFileSync(doc, markdown);
+  const dom = new JSDOM(`<body><button id="task-sidebar-toggle"></button><main id="doc">${renderDoc(markdown).html}</main></body>`);
+  const document = dom.window.document;
+  const sidebar = createTaskSidebar(document, async () => { throw new Error('Categories must not write'); });
+  const revision = readTaskRegister(path).revision;
+  sidebar.update(documentTaskSnapshot(doc, root));
+  const filter = document.querySelector<HTMLSelectElement>('[aria-label="Filter tasks by category"]')!;
+  assert.deepEqual(Array.from(filter.options, option => option.textContent), ['All categories', 'Uncategorized', 'Initiatives / SAP']);
+  filter.value = 'Initiatives / SAP';
+  filter.dispatchEvent(new dom.window.Event('change'));
+  assert.equal(document.querySelector('#task-toggle-TASK-042'), null);
+  assert.ok(document.querySelector('#task-toggle-TASK-043'));
+  document.querySelector('#doc')!.innerHTML = renderDoc(markdown.replace('### SAP', '### CPL')).html;
+  sidebar.refresh();
+  assert.equal(filter.value, '');
+  assert.match(document.querySelector('.task-table')!.textContent!, /Initiatives \/ CPL/);
+  assert.equal(readTaskRegister(path).revision, revision);
+});
+
 test('task ID comments do not activate tracking without document opt-in', () => {
   const markdown = '# Ordinary checklist\n\n- [ ] Editable <!-- task-id: TASK-042 -->\n';
   const rendered = renderDoc(markdown);
@@ -134,7 +157,7 @@ test('sidebar filters, navigates and retains input across live updates without r
   (host.querySelector('.task-title-button') as HTMLButtonElement).click();
   assert.equal(host.querySelector('.task-title-button')!.getAttribute('aria-expanded'), 'true');
   assert.equal(host.querySelector('.task-sidebar-item')!.closest('tr')!.previousElementSibling!.querySelector('.task-title-button')!.textContent, 'Capacity review');
-  assert.equal(host.querySelector<HTMLTableCellElement>('.task-detail-row > td')!.colSpan, 6);
+  assert.equal(host.querySelector<HTMLTableCellElement>('.task-detail-row > td')!.colSpan, 7);
   const note = host.querySelector('textarea')!;
   note.value = 'Keep my draft';
   note.dispatchEvent(new dom.window.Event('input'));

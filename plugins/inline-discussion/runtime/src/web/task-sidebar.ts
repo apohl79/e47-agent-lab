@@ -38,11 +38,16 @@ export function createTaskSidebar(
       option.textContent = value === 'open' ? 'All open tasks' : value === 'all' ? 'All tasks' : label(value);
     filter.append(option);
   }
+  const categoryFilter = document.createElement('select');
+  categoryFilter.setAttribute('aria-label', 'Filter tasks by category');
+  const filters = document.createElement('div');
+  filters.className = 'task-filters';
+  filters.append(filter, categoryFilter);
   const list = document.createElement('div');
   list.className = 'task-workspace';
   const error = document.createElement('p');
   error.setAttribute('role', 'alert');
-  host.append(heading, filter, error, list);
+  host.append(heading, filters, error, list);
   let snapshot: TaskSnapshot = { enabled: false, revision: 0, tasks: [] };
   let expanded = '';
   let busy = false;
@@ -67,6 +72,7 @@ export function createTaskSidebar(
     quickActions.delete(id);
     expanded = id;
     filter.value = 'all';
+    categoryFilter.value = '';
     setMode(true);
     render();
     list.querySelector<HTMLElement>('.task-sidebar-item textarea, .task-sidebar-item a')?.focus();
@@ -340,7 +346,31 @@ export function createTaskSidebar(
     if (!snapshot.enabled) setMode(false);
     toggle.hidden = !snapshot.enabled;
     if (snapshot.error) error.textContent = snapshot.error;
-    const visible = snapshot.tasks.filter((task) => filter.value === 'all' || (filter.value === 'open' ? !['completed', 'cancelled'].includes(task.state) : task.state === filter.value));
+    const categories = new Map<string, string>();
+    const sections: Array<{ level: number; title: string }> = [];
+    for (const element of doc?.querySelectorAll<HTMLElement>('h1, h2, h3, h4, h5, h6, [data-task-id]') ?? []) {
+      if (element.dataset.taskId) {
+        categories.set(element.dataset.taskId, sections.map((section) => section.title).join(' / ') || 'Uncategorized');
+      } else if (element.parentElement === doc) {
+        const level = Number(element.tagName.slice(1));
+        while (sections.length && sections.at(-1)!.level >= level) sections.pop();
+        if (level > 1) sections.push({ level, title: element.textContent?.trim() ?? '' });
+      }
+    }
+    const categoryFor = (task: Task) => categories.get(task.id) ?? 'Uncategorized';
+    const selectedCategory = categoryFilter.value;
+    const allCategories = [...new Set(snapshot.tasks.map(categoryFor))];
+    categoryFilter.replaceChildren();
+    for (const value of ['', ...allCategories]) {
+      const option = document.createElement('option');
+      option.value = value;
+      option.textContent = value || 'All categories';
+      categoryFilter.append(option);
+    }
+    categoryFilter.value = allCategories.includes(selectedCategory) ? selectedCategory : '';
+    const visible = snapshot.tasks.filter((task) =>
+      (!categoryFilter.value || categoryFor(task) === categoryFilter.value) &&
+      (filter.value === 'all' || (filter.value === 'open' ? !['completed', 'cancelled'].includes(task.state) : task.state === filter.value)));
     const tableWrap = document.createElement('div');
     tableWrap.className = 'task-table-scroll';
     const table = document.createElement('table');
@@ -348,7 +378,7 @@ export function createTaskSidebar(
     const caption = document.createElement('caption');
     caption.textContent = `${visible.length} tasks · select a task to review or edit`;
     const head = table.createTHead().insertRow();
-    for (const name of ['Task', 'State', 'Classification', 'Human-delegable', 'Confidence / readiness', 'Owner']) {
+    for (const name of ['Task', 'State', 'Category', 'Classification', 'Human-delegable', 'Confidence / readiness', 'Owner']) {
       const cell = document.createElement('th'); cell.scope = 'col'; cell.textContent = name; head.append(cell);
     }
     table.prepend(caption);
@@ -370,7 +400,7 @@ export function createTaskSidebar(
       choose.id = `task-toggle-${task.id}`;
       tr.insertCell().append(choose);
       tr.insertCell().append(renderQuickState(task));
-      for (const value of [routes.find(([route]) => route === task.route)![1], task.humanDelegable ? 'Yes' : 'No', `${task.classificationConfidence}% / ${task.readinessConfidence}%`, task.owner || 'Unassigned']) {
+      for (const value of [categoryFor(task), routes.find(([route]) => route === task.route)![1], task.humanDelegable ? 'Yes' : 'No', `${task.classificationConfidence}% / ${task.readinessConfidence}%`, task.owner || 'Unassigned']) {
         tr.insertCell().textContent = value;
       }
       if (expanded === task.id) {
@@ -399,5 +429,6 @@ export function createTaskSidebar(
     }
   }
   filter.addEventListener('change', render);
+  categoryFilter.addEventListener('change', render);
   return { update(value) { snapshot = value; error.textContent = value.error ?? ''; render(); }, refresh: render };
 }

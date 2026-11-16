@@ -16,7 +16,8 @@
 }
 #task-sidebar h2 { margin: 0 0 16px; font-size: 24px; }
 #task-sidebar select { width: 100%; padding: 6px; color: var(--fg); background: var(--bg); border: 1px solid var(--border); }
-#task-sidebar > select { max-width: 260px; }
+.task-filters { display: flex; flex-wrap: wrap; gap: 8px; }
+#task-sidebar .task-filters select { max-width: 260px; }
 #task-sidebar textarea { width: 100%; box-sizing: border-box; min-height: 70px; background: var(--bg); color: var(--fg); border: 1px solid var(--border); }
 .task-table-scroll { overflow-x: auto; min-width: 0; }
 .task-table { width: 100%; border-collapse: collapse; text-align: left; }

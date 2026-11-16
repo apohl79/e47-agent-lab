@@ -1,6 +1,6 @@
 {
   "name": "inline-discussion",
-  "version": "2.5.0",
+  "version": "2.6.0",
   "description": "Inline-discussion browser UI for markdown docs with threaded AI conversations.",
   "author": {
     "name": "apohl79"

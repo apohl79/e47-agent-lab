@@ -105,6 +105,17 @@ survive collapse and switching tasks. Details include scope, evidence, history,
 and source/session/deliverable links. The title inside the expanded details
 returns to the document anchor.
 
+The Category column and category filter come from the document's section
+headings, independently of status and classification. Use normal `##` headings
+such as “Urgent next steps for today” and “Tasks for today”; subsection paths
+are preserved, e.g. “Next actions by initiative / SAP OEM Voice”. The document
+title is excluded; tasks before any section are “Uncategorized”. Quoted or
+task-internal headings do not change categories. Category and status filters
+combine. Live document updates refresh categories; a removed selected category
+resets to all categories. Clicking a tracked checkbox clears filters to reveal
+its task. Categories are document-specific and do not mutate the register or
+carry urgency forward independently of the new day's headings.
+
 The state dropdown offers only available user actions. Selecting an action
 does not apply it: use the displayed button and supply outcome evidence,
 feedback, or a reason. Preparation approval has a separate scope confirmation
