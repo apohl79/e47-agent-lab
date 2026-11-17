@@ -24,7 +24,7 @@
           {
             "id": "documents",
             "title": "Documents",
-            "icon": "\ud83d\udcc4",
+            "icon": "\u25a4",
             "mode": "menu",
             "entrypoint": "./runtime/bin/xedoc-composer",
             "interpreter": "python"
@@ -60,5 +60,5 @@
       "Open docs/architecture.md in inline discussion."
     ]
   },
-  "version": "2.8.0"
+  "version": "2.8.1"
 }

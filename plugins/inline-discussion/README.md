@@ -53,7 +53,7 @@ by `./install.sh`; the plugin supports Codex, Claude Code, and Xedoc.
 
 The Xedoc manifest contributes an embedded discussion panel and a **Start
 discussion** action for local `.md` and `.markdown` links in model responses.
-The **📄 Documents** composer button lists project Markdown files,
+The **▤ Documents** composer button lists project Markdown files,
 including ignored and untracked files, and opens the selected document in a new
 panel. Its tree starts fully expanded for up to 15 documents and collapsed for
 larger projects. VCS metadata, `node_modules`, `vendor`, `target`, Python virtual
