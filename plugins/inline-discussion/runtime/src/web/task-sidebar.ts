@@ -53,12 +53,84 @@ export function createTaskSidebar(
   let busy = false;
   const notes = new Map<string, string>();
   const quickActions = new Map<string, { action: string; revision: number }>();
-  type ClassificationDraft = { revision: number; route: Task['route']; humanDelegable: boolean; classificationConfidence: number; readinessConfidence: number; reason: string };
+  type ClassificationDraft = { revision: number; route: Task['route']; classificationConfidence: number; readinessConfidence: number; reason: string };
   const drafts = new Map<string, ClassificationDraft>();
+  const quickClassifications = new Set<string>();
   const routes: Array<[Task['route'], string]> = [
     ['agent', 'Fully agent-executable'], ['agent_preparable', 'Agent-preparable'],
     ['human_delegable', 'Human-delegable'], ['you', 'Personal'], ['verify_first', 'Verify first'],
   ];
+  const canClassify = (task: Task) => !['in_progress', 'ready_for_review', 'completed', 'cancelled'].includes(task.state);
+  function classificationDraft(task: Task): ClassificationDraft {
+    return drafts.get(task.id) ?? {
+      revision: snapshot.revision, route: task.route,
+      classificationConfidence: task.classificationConfidence, readinessConfidence: task.readinessConfidence, reason: '',
+    };
+  }
+  async function saveClassification(task: Task, draft: ClassificationDraft): Promise<void> {
+    if (!draft.reason.trim()) {
+      error.textContent = 'A classification reason is required.';
+      return;
+    }
+    busy = true;
+    render();
+    try {
+      const { revision, reason: note, ...patch } = draft;
+      snapshot = await command('classify', task.id, revision, note, patch);
+      drafts.delete(task.id);
+      quickClassifications.delete(task.id);
+      error.textContent = '';
+    } catch (failure) {
+      error.textContent = `${failure instanceof Error ? failure.message : String(failure)}. Discard classification edits to use current values.`;
+    } finally { busy = false; render(); }
+  }
+  function renderQuickClassification(task: Task): HTMLElement {
+    const cell = document.createElement('div');
+    cell.className = 'task-quick-state';
+    const select = document.createElement('select');
+    select.id = `task-quick-classification-${task.id}`;
+    select.setAttribute('aria-label', `Quick classification for ${task.id}`);
+    for (const [value, text] of routes) {
+      const option = document.createElement('option');
+      option.value = value; option.textContent = text; select.append(option);
+    }
+    const pending = quickClassifications.has(task.id);
+    select.value = pending ? drafts.get(task.id)!.route : task.route;
+    select.disabled = busy || !canClassify(task);
+    select.addEventListener('change', () => {
+      const draft = classificationDraft(task);
+      draft.route = select.value as Task['route'];
+      drafts.set(task.id, draft);
+      quickClassifications.add(task.id);
+      quickActions.delete(task.id);
+      if (expanded === task.id) expanded = '';
+      render();
+      document.getElementById(`task-quick-classification-reason-${task.id}`)?.focus();
+    });
+    cell.append(select);
+    if (pending) {
+      const draft = drafts.get(task.id)!;
+      const reason = document.createElement('textarea');
+      reason.id = `task-quick-classification-reason-${task.id}`;
+      reason.setAttribute('aria-label', `Classification reason for ${task.id}`);
+      reason.placeholder = 'Classification reason';
+      reason.value = draft.reason;
+      reason.disabled = busy;
+      reason.addEventListener('input', () => { draft.reason = reason.value; });
+      const notice = document.createElement('p');
+      notice.textContent = 'Unsaved · saving clears prior approval.';
+      const save = document.createElement('button');
+      save.className = 'btn'; save.textContent = 'Save classification'; save.disabled = busy || !canClassify(task);
+      save.addEventListener('click', () => void saveClassification(task, draft));
+      const discard = document.createElement('button');
+      discard.className = 'btn'; discard.textContent = 'Discard classification edits'; discard.disabled = busy;
+      discard.addEventListener('click', () => {
+        drafts.delete(task.id); quickClassifications.delete(task.id); error.textContent = ''; render();
+      });
+      cell.append(reason, notice, save, discard);
+    }
+    return cell;
+  }
   doc?.addEventListener('click', (event) => {
     const input = (event.target as Element).closest<HTMLInputElement>('input[type="checkbox"]');
     const id = input?.closest<HTMLElement>('[data-task-id]')?.dataset.taskId;
@@ -70,6 +142,7 @@ export function createTaskSidebar(
       return;
     }
     quickActions.delete(id);
+    quickClassifications.delete(id);
     expanded = id;
     filter.value = 'all';
     categoryFilter.value = '';
@@ -164,6 +237,7 @@ export function createTaskSidebar(
     select.addEventListener('change', () => {
       if (select.value) quickActions.set(task.id, { action: select.value, revision: snapshot.revision });
       else quickActions.delete(task.id);
+      quickClassifications.delete(task.id);
       if (expanded === task.id) expanded = '';
       render();
       (document.getElementById(`task-quick-note-${task.id}`) ?? document.getElementById(`task-quick-apply-${task.id}`) ?? document.getElementById(select.id))?.focus();
@@ -215,18 +289,15 @@ export function createTaskSidebar(
     summary.textContent = `${task.id} · ${task.owner || 'Unassigned'}`;
     details.append(summary);
     detail(details, 'Route', label(task.route));
-    detail(details, 'Human delegation', task.humanDelegable ? `${task.candidateDelegate || 'Unassigned'} · ${task.handoff}` : 'Not proposed');
+    if (task.route === 'human_delegable') detail(details, 'Human delegation', `${task.candidateDelegate || 'Unassigned'} · ${task.handoff}`);
     detail(details, 'Confidence', `classification ${task.classificationConfidence}% · readiness ${task.readinessConfidence}%`);
-    if (!['in_progress', 'ready_for_review', 'completed', 'cancelled'].includes(task.state)) {
+    if (canClassify(task)) {
       const editor = document.createElement('details');
       const editorTitle = document.createElement('summary');
       editorTitle.textContent = 'Edit classification';
       editor.open = drafts.has(task.id);
       editor.append(editorTitle);
-      const draft = drafts.get(task.id) ?? {
-        revision: snapshot.revision, route: task.route, humanDelegable: task.humanDelegable,
-        classificationConfidence: task.classificationConfidence, readinessConfidence: task.readinessConfidence, reason: '',
-      };
+      const draft = classificationDraft(task);
       const remember = () => drafts.set(task.id, draft);
       const field = (name: string, input: HTMLElement) => {
         input.setAttribute('aria-label', name);
@@ -243,12 +314,6 @@ export function createTaskSidebar(
       route.disabled = busy;
       route.addEventListener('change', () => { draft.route = route.value as Task['route']; remember(); });
       field('Classification', route);
-      const delegable = document.createElement('input');
-      delegable.type = 'checkbox';
-      delegable.checked = draft.humanDelegable;
-      delegable.disabled = busy;
-      delegable.addEventListener('change', () => { draft.humanDelegable = delegable.checked; remember(); });
-      field('Human-delegable independently of classification', delegable);
       for (const [key, name] of [['classificationConfidence', 'Classification confidence (%)'], ['readinessConfidence', 'Readiness confidence (%)']] as const) {
         const input = document.createElement('input');
         input.type = 'number'; input.min = '0'; input.max = '100'; input.step = '1';
@@ -271,19 +336,11 @@ export function createTaskSidebar(
           error.textContent = 'A reason and confidence values from 0 to 100 are required.';
           return;
         }
-        busy = true; render();
-        try {
-          const { revision, reason: note, ...patch } = draft;
-          snapshot = await command('classify', task.id, revision, note, patch);
-          drafts.delete(task.id);
-          error.textContent = '';
-        } catch (failure) {
-          error.textContent = `${failure instanceof Error ? failure.message : String(failure)}. Discard classification edits to use current values.`;
-        } finally { busy = false; render(); }
+        await saveClassification(task, draft);
       });
       const discard = document.createElement('button');
       discard.className = 'btn'; discard.textContent = 'Discard classification edits'; discard.disabled = busy;
-      discard.addEventListener('click', () => { drafts.delete(task.id); error.textContent = ''; render(); });
+      discard.addEventListener('click', () => { drafts.delete(task.id); quickClassifications.delete(task.id); error.textContent = ''; render(); });
       editor.append(save, discard);
       details.append(editor);
     }
@@ -378,7 +435,7 @@ export function createTaskSidebar(
     const caption = document.createElement('caption');
     caption.textContent = `${visible.length} tasks · select a task to review or edit`;
     const head = table.createTHead().insertRow();
-    for (const name of ['Task', 'State', 'Category', 'Classification', 'Human-delegable', 'Confidence / readiness', 'Owner']) {
+    for (const name of ['Task', 'State', 'Category', 'Classification', 'Confidence / readiness', 'Owner']) {
       const cell = document.createElement('th'); cell.scope = 'col'; cell.textContent = name; head.append(cell);
     }
     table.prepend(caption);
@@ -393,6 +450,7 @@ export function createTaskSidebar(
       choose.setAttribute('aria-controls', `task-details-${task.id}`);
       choose.addEventListener('click', () => {
         quickActions.delete(task.id);
+        quickClassifications.delete(task.id);
         expanded = expanded === task.id ? '' : task.id;
         render();
         document.getElementById(`task-toggle-${task.id}`)?.focus();
@@ -400,7 +458,9 @@ export function createTaskSidebar(
       choose.id = `task-toggle-${task.id}`;
       tr.insertCell().append(choose);
       tr.insertCell().append(renderQuickState(task));
-      for (const value of [categoryFor(task), routes.find(([route]) => route === task.route)![1], task.humanDelegable ? 'Yes' : 'No', `${task.classificationConfidence}% / ${task.readinessConfidence}%`, task.owner || 'Unassigned']) {
+      tr.insertCell().textContent = categoryFor(task);
+      tr.insertCell().append(renderQuickClassification(task));
+      for (const value of [`${task.classificationConfidence}% / ${task.readinessConfidence}%`, task.owner || 'Unassigned']) {
         tr.insertCell().textContent = value;
       }
       if (expanded === task.id) {

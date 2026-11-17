@@ -10,7 +10,6 @@ export interface Task {
   route: TaskRoute;
   classificationConfidence: number;
   readinessConfidence: number;
-  humanDelegable: boolean;
   candidateDelegate: string;
   handoff: 'none' | 'proposed' | 'accepted';
   scope: string;

@@ -28,6 +28,10 @@ update({ action: 'classify', id: 'TASK-042', task: {
   acceptance: 'Measured demand and headroom', stopCondition: 'Final user review',
 } });
 update({ action: 'create', id: 'TASK-043', task: { title: 'Second task', source: 'https://example.test/43' } });
+assert.equal('humanDelegable' in read().tasks[0], false, 'new tasks have a single route');
+const legacy = read();
+legacy.tasks[0].humanDelegable = true;
+writeFileSync(register, JSON.stringify(legacy));
 writeFileSync(doc, '# Today\n\n<!-- task-register: tasks.json -->\n\n## Urgent next steps for today\n\n- [ ] Capacity review <!-- task-id: TASK-042 -->\n\n## Tasks for today\n\n### Planning\n\n- [ ] Second task <!-- task-id: TASK-043 -->\n\nDiscuss this paragraph.\n');
 const server = await createServer({
   docPath: doc, projectRoot: root, sessionDir: join(root, 'session'), prefsPath: join(root, 'prefs.json'),
@@ -47,7 +51,9 @@ try {
   assert.match(await page.locator('#task-sidebar').innerText(), /Capacity review/);
   const taskToggle = page.getByRole('button', { name: 'Capacity review', exact: true });
   assert.equal(await taskToggle.getAttribute('aria-expanded'), 'true');
-  assert.equal(await page.locator('#task-details-TASK-042 > td').getAttribute('colspan'), '7');
+  assert.equal(await page.locator('#task-details-TASK-042 > td').getAttribute('colspan'), '6');
+  assert.equal(await page.getByRole('columnheader', { name: 'Human-delegable', exact: true }).count(), 0);
+  assert.equal(await page.getByLabel('Human-delegable independently of classification').count(), 0);
   const category = page.getByLabel('Filter tasks by category');
   assert.deepEqual(await category.locator('option').allTextContents(), ['All categories', 'Urgent next steps for today', 'Tasks for today / Planning']);
   await category.selectOption('Tasks for today / Planning');
@@ -72,6 +78,47 @@ try {
   assert.equal(await evidence.inputValue(), 'Keep this draft while collapsed');
   await evidence.fill('');
   await taskToggle.click();
+  // Classification is editable without opening details, but never saves silently.
+  const quickClassification = page.getByLabel('Quick classification for TASK-042', { exact: true });
+  const classificationReason = page.getByLabel('Classification reason for TASK-042', { exact: true });
+  const classificationRow = page.locator('tr').filter({ has: page.locator('#task-toggle-TASK-042') });
+  const beforeQuickClassification = read().revision;
+  await quickClassification.selectOption('you');
+  assert.equal(await page.locator('.task-detail-row').count(), 0);
+  assert.equal(read().revision, beforeQuickClassification);
+  await classificationRow.getByRole('button', { name: 'Save classification', exact: true }).click();
+  assert.match(await page.getByRole('alert').innerText(), /reason is required/);
+  await classificationReason.fill('Personal decision in acceptance fixture');
+  await classificationRow.getByRole('button', { name: 'Save classification', exact: true }).click();
+  await classificationReason.waitFor({ state: 'detached' });
+  assert.equal(await quickClassification.inputValue(), 'you');
+  assert.equal(read().tasks[0].route, 'you');
+  await quickClassification.selectOption('agent');
+  await classificationReason.fill('Keep this stale classification draft');
+  update({ action: 'classify', id: 'TASK-042', task: { route: 'verify_first' } });
+  await page.waitForFunction(() => document.querySelector('#task-quick-select-TASK-042 option')?.textContent === 'awaiting approval');
+  await classificationRow.getByRole('button', { name: 'Save classification', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('[role="alert"]')?.textContent.includes('revision'));
+  assert.equal(read().tasks[0].route, 'verify_first');
+  assert.equal(await classificationReason.inputValue(), 'Keep this stale classification draft');
+  await classificationRow.getByRole('button', { name: 'Discard classification edits', exact: true }).click();
+  assert.equal(await quickClassification.inputValue(), 'verify_first');
+  await quickClassification.selectOption('human_delegable');
+  await classificationReason.fill('Requires another person, no useful agent deliverable');
+  await classificationRow.getByRole('button', { name: 'Save classification', exact: true }).click();
+  await classificationReason.waitFor({ state: 'detached' });
+  assert.equal(read().tasks[0].route, 'human_delegable');
+  assert.equal(read().tasks[0].state, 'identified');
+  assert.equal(await page.getByLabel('Quick state for TASK-042', { exact: true }).locator('option[value="approve"]').count(), 0);
+  const approval = await page.request.post(`http://127.0.0.1:${server.port}/api/tasks/command`, {
+    data: { action: 'approve', id: 'TASK-042', expectedRevision: read().revision },
+  });
+  assert.equal(approval.status(), 409);
+  await quickClassification.selectOption('agent_preparable');
+  await classificationReason.fill('Restore local preparation route');
+  await classificationRow.getByRole('button', { name: 'Save classification', exact: true }).click();
+  await classificationReason.waitFor({ state: 'detached' });
+  assert.equal(await quickClassification.inputValue(), 'agent_preparable');
   // Collapsed rows expose guarded status changes without expanding details.
   const secondQuick = page.getByLabel('Quick state for TASK-043', { exact: true });
   await secondQuick.selectOption('accept');
@@ -93,7 +140,7 @@ try {
   await secondQuick.selectOption('accept');
   assert.equal(await page.locator('.task-detail-row').count(), 0);
   update({ action: 'classify', id: 'TASK-043', task: { route: 'you' } });
-  await page.waitForFunction(() => document.querySelector('#task-toggle-TASK-043')?.closest('tr')?.textContent.includes('Personal'));
+  await page.waitForFunction(() => document.querySelector('#task-quick-classification-TASK-043')?.value === 'you');
   await secondRow.getByRole('button', { name: 'Mark outcome complete', exact: true }).click();
   await page.waitForFunction(() => document.querySelector('[role="alert"]')?.textContent.includes('revision'));
   assert.equal(read().tasks[1].state, 'identified', 'quick actions must reject stale revisions');
@@ -104,6 +151,7 @@ try {
   await page.waitForFunction(() => document.querySelector('#task-quick-select-TASK-043')?.disabled);
   assert.equal(read().tasks[1].state, 'completed');
   assert.equal(await secondQuick.isDisabled(), true);
+  assert.equal(await page.getByLabel('Quick classification for TASK-043', { exact: true }).isDisabled(), true);
   await category.selectOption('Tasks for today / Planning');
   await page.getByLabel('Filter tasks by status').selectOption('open');
   assert.equal(await page.locator('.task-table tbody tr').count(), 0, 'category and state filters combine');
@@ -142,25 +190,26 @@ try {
   await taskToggle.click();
   await page.getByText('Edit classification', { exact: true }).click();
   await page.getByLabel('Classification', { exact: true }).selectOption('you');
-  await page.getByLabel('Human-delegable independently of classification').check();
+  assert.equal(await page.getByLabel('Human-delegable independently of classification').count(), 0);
   await page.getByLabel('Classification confidence (%)', { exact: true }).fill('98');
   await page.getByLabel('Readiness confidence (%)', { exact: true }).fill('91');
-  await page.getByLabel('Classification reason', { exact: true }).fill('Personal decision; a colleague can prepare context');
+  await page.getByLabel('Classification reason', { exact: true }).fill('Requires a personal decision');
   await page.getByRole('button', { name: 'Save classification', exact: true }).click();
   await page.waitForFunction(() => document.querySelector('.task-status')?.textContent === 'identified');
+  assert.equal(await quickClassification.inputValue(), 'you', 'expanded save immediately updates the main row without reload');
   assert.equal(read().tasks[0].approval, undefined, 'reclassification clears prior approval');
-  assert.equal(read().tasks[0].humanDelegable, true);
+  assert.equal(read().tasks[0].route, 'you');
   assert.equal(read().tasks[0].classificationConfidence, 98);
   await page.reload();
   await page.getByRole('button', { name: 'Tasks', exact: true }).click();
   await page.getByRole('button', { name: 'Capacity review', exact: true }).click();
-  assert.match(await page.locator('.task-table tbody').innerText(), /Personal/);
+  assert.equal(await quickClassification.inputValue(), 'you');
   await page.getByText('Edit classification', { exact: true }).click();
   assert.equal(await page.getByLabel('Classification', { exact: true }).inputValue(), 'you');
   // A live register update must not silently rebase an edited classification.
   await page.getByLabel('Classification reason', { exact: true }).fill('Stale draft');
   update({ action: 'classify', id: 'TASK-042', task: { route: 'verify_first' } });
-  await page.waitForFunction(() => document.querySelector('#task-toggle-TASK-042')?.closest('tr')?.textContent.includes('Verify first'));
+  await page.waitForFunction(() => document.querySelector('#task-quick-classification-TASK-042')?.value === 'verify_first');
   await page.getByRole('button', { name: 'Save classification', exact: true }).click();
   await page.waitForFunction(() => document.querySelector('[role="alert"]')?.textContent.includes('revision'));
   assert.equal(read().tasks[0].route, 'verify_first');
@@ -168,11 +217,10 @@ try {
   await page.getByRole('button', { name: 'Discard classification edits', exact: true }).click();
   await page.getByText('Edit classification', { exact: true }).click();
   await page.getByLabel('Classification', { exact: true }).selectOption('agent_preparable');
-  await page.getByLabel('Human-delegable independently of classification').uncheck();
   await page.getByLabel('Classification reason', { exact: true }).fill('Local preparation is safe and ready');
   await page.getByRole('button', { name: 'Save classification', exact: true }).click();
-  await page.waitForFunction(() => document.querySelector('#task-toggle-TASK-042')?.closest('tr')?.textContent.includes('Agent-preparable'));
-  assert.equal(read().tasks[0].humanDelegable, false);
+  await page.waitForFunction(() => document.querySelector('#task-quick-classification-TASK-042')?.value === 'agent_preparable');
+  assert.equal(read().tasks[0].route, 'agent_preparable');
   await applyState('approve', 'Approve preparation');
   await page.locator('#modal-root').getByRole('button', { name: 'Approve preparation', exact: true }).click();
   await page.waitForFunction(() => document.querySelector('.task-status')?.textContent === 'ready');

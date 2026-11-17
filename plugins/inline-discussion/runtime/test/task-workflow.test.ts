@@ -26,7 +26,6 @@ function fixture() {
     route: 'agent_preparable', classificationConfidence: 99, readinessConfidence: 94,
     scope: 'Prepare a local report', permissions: ['read_sources', 'write_artifacts', 'update_task_status'],
     acceptance: 'Evidence-backed report', stopCondition: 'User review', dependencies: [],
-    humanDelegable: true, candidateDelegate: 'Service owner', handoff: 'proposed',
   } });
   return { root, path, doc, markdown, update };
 }
@@ -53,6 +52,22 @@ test('register gates approval, readiness, revision, scope, waiting and final acc
   update({ action: 'accept', id: 'TASK-042', note: 'Report satisfies the scoped outcome' }, 'user');
   assert.equal(readTaskRegister(path).tasks[0]!.state, 'completed');
   assert.throws(() => update({ action: 'classify', id: 'TASK-042' }), /terminal/);
+});
+
+test('route alone controls automation and old delegation flags remain readable', () => {
+  const { path, update } = fixture();
+  assert.equal('humanDelegable' in readTaskRegister(path).tasks[0]!, false);
+  const legacy = JSON.parse(readFileSync(path, 'utf8'));
+  legacy.tasks[0].humanDelegable = true;
+  writeFileSync(path, JSON.stringify(legacy));
+  update({ action: 'approve', id: 'TASK-042' }, 'user');
+  update({ action: 'classify', id: 'TASK-042', task: { route: 'human_delegable', candidateDelegate: 'Service owner', handoff: 'proposed' } });
+  assert.equal(readTaskRegister(path).tasks[0]!.state, 'identified');
+  assert.throws(() => update({ action: 'approve', id: 'TASK-042' }, 'user'), /not awaiting approval/);
+  assert.throws(() => update({ action: 'start', id: 'TASK-042', task: { session: 'not-started' } }), /not ready/);
+  update({ action: 'classify', id: 'TASK-042', task: { route: 'agent' } });
+  update({ action: 'approve', id: 'TASK-042' }, 'user');
+  assert.equal(readTaskRegister(path).tasks[0]!.state, 'ready');
 });
 
 test('document binding survives carryover, ignores code, and rejects missing/duplicate/outside registers', () => {
@@ -157,7 +172,7 @@ test('sidebar filters, navigates and retains input across live updates without r
   (host.querySelector('.task-title-button') as HTMLButtonElement).click();
   assert.equal(host.querySelector('.task-title-button')!.getAttribute('aria-expanded'), 'true');
   assert.equal(host.querySelector('.task-sidebar-item')!.closest('tr')!.previousElementSibling!.querySelector('.task-title-button')!.textContent, 'Capacity review');
-  assert.equal(host.querySelector<HTMLTableCellElement>('.task-detail-row > td')!.colSpan, 7);
+  assert.equal(host.querySelector<HTMLTableCellElement>('.task-detail-row > td')!.colSpan, 6);
   const note = host.querySelector('textarea')!;
   note.value = 'Keep my draft';
   note.dispatchEvent(new dom.window.Event('input'));

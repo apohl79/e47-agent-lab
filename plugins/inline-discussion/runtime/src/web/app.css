@@ -41,7 +41,6 @@
 .task-sidebar-item details { margin-top: 12px; }
 .task-field { display: grid; gap: 6px; margin: 12px 0; }
 .task-field input[type="number"] { padding: 6px; background: var(--bg); color: var(--fg); border: 1px solid var(--border); }
-.task-field input[type="checkbox"] { justify-self: start; }
 .task-status { display: block; margin: 5px 0; color: var(--muted); }
 .task-status[data-state="needs_input"], .task-status[data-state="blocked"] { color: var(--warning); }
 .task-status[data-state="ready_for_review"], .task-status[data-state="completed"] { color: var(--success); }

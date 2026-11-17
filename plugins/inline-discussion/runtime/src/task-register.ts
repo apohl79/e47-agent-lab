@@ -17,7 +17,7 @@ function validateTask(task: Task): void {
   check(typeof task.id === 'string' && /^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/.test(task.id), 'invalid task ID');
   for (const key of TEXT_FIELDS) check(typeof task[key] === 'string', `invalid ${key}`);
   check(task.title.trim() && task.source.trim(), 'title and source required');
-  check(typeof task.humanDelegable === 'boolean' && ['none', 'proposed', 'accepted'].includes(task.handoff), 'invalid delegation');
+  check(['none', 'proposed', 'accepted'].includes(task.handoff), 'invalid delegation');
   check(TASK_STATES.includes(task.state) && ROUTES.includes(task.route), 'invalid task state or route');
   for (const key of ['classificationConfidence', 'readinessConfidence'] as const) {
     check(Number.isFinite(task[key]) && task[key] >= 0 && task[key] <= 100, `invalid ${key}`);
@@ -57,7 +57,7 @@ export function applyTaskCommand(register: TaskRegister, command: TaskCommand, a
       id: command.id ?? `TASK-${randomUUID().slice(0, 8)}`,
       title: input.title ?? '', source: input.source ?? '', owner: input.owner ?? '',
       state: 'identified', route: 'verify_first', classificationConfidence: 0, readinessConfidence: 0,
-      humanDelegable: false, candidateDelegate: '', handoff: 'none',
+      candidateDelegate: '', handoff: 'none',
       scope: '', permissions: [], acceptance: '', stopCondition: '', dependencies: [],
       firstSeen: now.slice(0, 10), updatedAt: now, revision: 1, progress: '', question: '',
       session: '', deliverable: '', evidence: '', history: [],
@@ -71,7 +71,7 @@ export function applyTaskCommand(register: TaskRegister, command: TaskCommand, a
     if (command.action === 'classify') {
       check(!['in_progress', 'ready_for_review'].includes(task.state), 'stop active/review work before changing scope');
       const patch = command.task ?? {};
-      for (const key of [...TEXT_FIELDS, 'route', 'classificationConfidence', 'readinessConfidence', 'permissions', 'dependencies', 'humanDelegable', 'handoff'] as const) {
+      for (const key of [...TEXT_FIELDS, 'route', 'classificationConfidence', 'readinessConfidence', 'permissions', 'dependencies', 'handoff'] as const) {
         if (patch[key] !== undefined) Object.assign(task, { [key]: patch[key] });
       }
       task.approval = undefined;

@@ -98,7 +98,7 @@ Markdown viewers show the saved snapshot without the task controls.
 The toolbar switches between Document and Tasks at every panel width.
 Clicking a tracked checkbox expands that task's row in the table; it does not toggle
 completion or write Markdown. Ordinary checkboxes retain their normal behavior.
-The table shows state, classification, independent human delegability, both
+The table shows state, a single automation-first classification, both
 confidence scores, and owner. Click a task's table title to expand or collapse
 its details directly below the item. Only one task expands at a time; drafts
 survive collapse and switching tasks. Details include scope, evidence, history,
@@ -129,7 +129,9 @@ closes the other for that task, retaining its draft. Cancel a quick action to
 reset it; if the register changed, cancel and reselect rather than retrying a
 stale action. Completed and cancelled rows have read-only status dropdowns.
 
-“Edit classification” changes route, independent human delegability, and both
+The Classification dropdown also works in collapsed rows: choose a route,
+enter a reason, and explicitly save or discard it. It does not launch work.
+“Edit classification” changes route and both
 confidence scores with a required reason. Saving invalidates prior approval.
 It does not transfer ownership or accept a handoff. Active work and outcomes
 under review cannot be reclassified; return review work for changes first.
@@ -185,9 +187,6 @@ Create a task, then classify it with a second command using the new revision:
     "route": "agent_preparable",
     "classificationConfidence": 95,
     "readinessConfidence": 94,
-    "humanDelegable": true,
-    "candidateDelegate": "Service owner",
-    "handoff": "proposed",
     "scope": "Prepare a local capacity recommendation; do not apply it",
     "permissions": ["read_sources", "write_artifacts", "update_task_status"],
     "acceptance": "Recommendation cites measured demand and failure headroom",
@@ -197,11 +196,19 @@ Create a task, then classify it with a second command using the new revision:
 }
 ```
 
-Routes: `agent` (fully executable deliverable), `agent_preparable`,
-`human_delegable`, `you`, `verify_first`. Human delegation is also an independent
-dimension: keep `humanDelegable`, `candidateDelegate`, and `handoff`
-(`none`, `proposed`, `accepted`) even for agent routes. An unaccepted suggestion
-does not transfer ownership. Evidence is required before recording acceptance.
+Choose one automation-first route: `agent` (can finish the scoped deliverable
+without further user input), `agent_preparable` (can prepare useful work before
+a human decision), `human_delegable` (another person must do the work; no
+feasible agent deliverable), `you` (requires the user's personal action), or
+`verify_first` (insufficient evidence to decide). Prefer an agent route whenever
+feasible; the fact that a person could also do the work is not a classification.
+Do not write `humanDelegable`; that obsolete field in older registers is ignored.
+For `human_delegable`, record `candidateDelegate` and `handoff`
+(`none`, `proposed`, `accepted`) when known. An unaccepted suggestion does not
+transfer ownership. Evidence is required before recording acceptance.
+If an agent can prepare only part of a human obligation, define that bounded
+deliverable separately and preserve the parent obligation. Agent-executable
+does not bypass scope approval or final user review.
 
 States: `identified` → `awaiting_approval` → `ready` → `in_progress` →
 `ready_for_review` → `completed`; active work can stop at `needs_input` or
