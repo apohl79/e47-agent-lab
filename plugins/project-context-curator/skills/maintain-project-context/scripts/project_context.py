@@ -3914,7 +3914,17 @@ def refresh_git_store_project_metadata(
     if not isinstance(existing, dict):
         return False
     remote_url = repo_remote_url(repo)
-    if remote_url is None or existing.get("remote_url") == remote_url:
+    if remote_url is None:
+        return False
+    owner = domain_stores.project_root(sys.modules[__name__], root, project_id)
+    owned = (
+        load_git_store_manifest(owner) if owner.resolve() != root.resolve() else None
+    )
+    owned_stale = (
+        owned is not None and project_id in owned["projects"]
+        and owned["projects"][project_id].get("remote_url") != remote_url
+    )
+    if existing.get("remote_url") == remote_url and not owned_stale:
         return False
     duplicates = tuple(
         other
@@ -3927,16 +3937,14 @@ def refresh_git_store_project_metadata(
             + ", ".join(duplicates)
             + ". Consider consolidating with git-store-bind --match-remote."
         )
-    manifest["projects"][project_id] = git_project_metadata(repo, existing)
-    manifest["updated_at"] = now_iso()
-    write_git_json(root, git_store_manifest_path(root), manifest)
-    owner = domain_stores.project_root(sys.modules[__name__], root, project_id)
-    if owner.resolve() != root.resolve():
-        owned = load_git_store_manifest(owner)
-        if project_id in owned["projects"]:
-            owned["projects"][project_id] = deepcopy(manifest["projects"][project_id])
-            owned["updated_at"] = manifest["updated_at"]
-            write_git_json(owner, git_store_manifest_path(owner), owned)
+    if existing.get("remote_url") != remote_url:
+        manifest["projects"][project_id] = git_project_metadata(repo, existing)
+        manifest["updated_at"] = now_iso()
+        write_git_json(root, git_store_manifest_path(root), manifest)
+    if owned_stale:
+        owned["projects"][project_id] = deepcopy(manifest["projects"][project_id])
+        owned["updated_at"] = now_iso()
+        write_git_json(owner, git_store_manifest_path(owner), owned)
     return True
 
 

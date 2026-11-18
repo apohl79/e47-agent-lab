@@ -296,3 +296,12 @@ def test_remote_refresh_updates_owning_domain_store_manifest(tmp_path: Path) -> 
         run_git(child_remote, "show", "main:project-context-store.json").stdout
     )
     assert published["projects"][project_id]["remote_url"] == expected
+
+    # A domain manifest that lags the root manifest is healed on the next refresh.
+    data = manifest(child)
+    data["projects"][project_id].pop("remote_url")
+    (child / "project-context-store.json").write_text(json.dumps(data) + "\n", encoding="utf-8")
+    run_git(child, "commit", "-am", "Lagging domain manifest")
+    run_git(child, "push", "origin", "main")
+    successful("update", repo=repo, env=env)
+    assert manifest(child)["projects"][project_id]["remote_url"] == expected
