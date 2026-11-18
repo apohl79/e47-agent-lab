@@ -3930,6 +3930,13 @@ def refresh_git_store_project_metadata(
     manifest["projects"][project_id] = git_project_metadata(repo, existing)
     manifest["updated_at"] = now_iso()
     write_git_json(root, git_store_manifest_path(root), manifest)
+    owner = domain_stores.project_root(sys.modules[__name__], root, project_id)
+    if owner.resolve() != root.resolve():
+        owned = load_git_store_manifest(owner)
+        if project_id in owned["projects"]:
+            owned["projects"][project_id] = deepcopy(manifest["projects"][project_id])
+            owned["updated_at"] = manifest["updated_at"]
+            write_git_json(owner, git_store_manifest_path(owner), owned)
     return True
 
 

@@ -27,7 +27,7 @@
       ]
     },
     "project-context-curator": {
-      "version": "5.11.1",
+      "version": "5.11.2",
       "hosts": [
         "codex",
         "claude",

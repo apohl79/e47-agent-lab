@@ -275,3 +275,24 @@ def test_shared_project_retains_exactly_one_canonical_owner(tmp_path: Path) -> N
     assert project_id in metadata["domains"]["shared"]
     assert metadata["project_owners"][project_id] == "cpl"
     assert len(tuple(store.glob(f"**/projects/{project_id}/context.json"))) == 1
+
+
+def test_remote_refresh_updates_owning_domain_store_manifest(tmp_path: Path) -> None:
+    env, repo, store, _root_remote, project_id = configured_store(
+        tmp_path, source_remote=None
+    )
+    child_remote = domain_remote(tmp_path)
+    place_domain(repo, env, "cpl", child_remote)
+    child = store / "stores/cpl"
+    assert "remote_url" not in manifest(child)["projects"][project_id]
+
+    run_git(repo, "remote", "add", "origin", "https://github.com/acme/service.git")
+    successful("update", repo=repo, env=env)
+
+    expected = "github.com/acme/service"
+    assert manifest(store)["projects"][project_id]["remote_url"] == expected
+    assert manifest(child)["projects"][project_id]["remote_url"] == expected
+    published = json.loads(
+        run_git(child_remote, "show", "main:project-context-store.json").stdout
+    )
+    assert published["projects"][project_id]["remote_url"] == expected
