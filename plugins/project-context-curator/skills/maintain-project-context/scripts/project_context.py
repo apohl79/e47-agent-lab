@@ -4023,28 +4023,38 @@ def validate_read_only_destinations(root: Path, *paths: Path) -> None:
 
 
 def git_store_attach(args: argparse.Namespace) -> None:
+    read_only = not args.writable
+    label = "Read-only" if read_only else "Writable"
     root = validate_git_store_root(args.store)
     if not git_store_manifest_path(root).is_file():
-        raise SystemExit("Read-only attachment requires an existing store manifest.")
+        raise SystemExit(f"{label} attachment requires an existing store manifest.")
     manifest = load_git_store_manifest(root)
     validate_read_only_destinations(root)
+    if not read_only:
+        git_store_upstream(root)
     config = global_config()
     existing = configured_git_store(config)
     if config:
         if not (
-            existing and existing.get("read_only")
+            existing and bool(existing.get("read_only")) == read_only
             and existing["path"] == str(root)
             and existing["store_id"] == manifest["store_id"]
         ):
             raise SystemExit(
-                "Use a fresh PROJECT_CONTEXT_CURATOR_CONFIG_DIR for read-only attachment; "
+                f"Use a fresh PROJECT_CONTEXT_CURATOR_CONFIG_DIR for {label.lower()} attachment; "
                 "existing configuration will not be replaced."
             )
     else:
-        configure_git_store(root, manifest, {}, read_only=True)
-    print(f"Read-only Git context store attached: {root}")
+        configure_git_store(root, manifest, {}, read_only=read_only)
+    print(f"{label} Git context store attached: {root}")
     print(f"Store id: {manifest['store_id']}")
-    print("Snapshot only: no automatic Git sync or publication. Use --project-store-id for reads.")
+    if read_only:
+        print("Snapshot only: no automatic Git sync or publication. Use --project-store-id for reads.")
+    else:
+        print(
+            "Writes use --project-store-id and publish per the store's write mode; "
+            "run git-store-publish until publication completes."
+        )
 
 
 def apply_git_store_migration(root: Path, plan: dict[str, Any]) -> None:
@@ -5781,11 +5791,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     attach_parser = subparsers.add_parser(
         "git-store-attach",
-        help="Attach an existing store snapshot for read-only use without migration or publication",
+        help="Attach an existing store checkout for read-only or writable use without migration",
     )
     add_repo(attach_parser)
     attach_parser.add_argument("--store", type=Path, required=True)
-    attach_parser.add_argument("--read-only", action="store_true", required=True)
+    attach_mode = attach_parser.add_mutually_exclusive_group(required=True)
+    attach_mode.add_argument("--read-only", action="store_true")
+    attach_mode.add_argument(
+        "--writable", action="store_true",
+        help="Use a branch checkout with an upstream; writes publish per its write mode",
+    )
     attach_parser.set_defaults(func=git_store_attach)
 
     storage_migrate_parser = subparsers.add_parser(

@@ -140,6 +140,8 @@ with a dedicated domain repository, without its parent store or component
 checkouts. Use project IDs from `git-store-status` for reads. Attachment disables
 canonical writes and automatic Git synchronization; do not attempt migration,
 binding, curation, or publication in that runtime.
+Agents that capture knowledge into an existing store clone use
+`git-store-attach --store <clone> --writable` instead; see `$configure-context-storage`.
 
 To restore a writable cloned store on another machine, select that checkout through
 `storage-migrate --target git-store` and bind each checkout. When the store

@@ -190,3 +190,39 @@ def test_read_only_graph_can_export_outside_snapshot(snapshot, tmp_path):
     assert exported.returncode == 0, exported.stderr
     assert read_json(output)["nodes"]
     assert store_state(clone, remote) == before
+
+
+def test_writable_attach_writes_existing_store_without_migration(snapshot, tmp_path):
+    _clone, remote, client, env, project_id = snapshot
+    writable = tmp_path / "writable"
+    run_git(tmp_path, "clone", str(remote), str(writable))
+    head = run_git(writable, "rev-parse", "HEAD").stdout.strip()
+    detached = tmp_path / "detached"
+    run_git(tmp_path, "clone", str(remote), str(detached))
+    run_git(detached, "checkout", "--detach")
+    rejected = run_context("git-store-attach", "--store", str(detached), "--writable",
+                           repo=client, env=env)
+    assert rejected.returncode == 1
+    assert not Path(env["PROJECT_CONTEXT_CURATOR_CONFIG_DIR"]).exists()
+
+    attached = run_context("git-store-attach", "--store", str(writable), "--writable",
+                           repo=client, env=env)
+    assert attached.returncode == 0, attached.stderr
+    assert run_git(writable, "rev-parse", "HEAD").stdout.strip() == head
+    status = run_context("storage-status", "--format", "json", repo=client, env=env)
+    assert not json.loads(status.stdout).get("read_only")
+    added = run_context(
+        "add-term", "--project-store-id", project_id, "--term", "Attached write",
+        "--definition", "Published from a writable attachment",
+        "--applicability", "domain:voice",
+        "--source", "repo-docs", "--source-remote", "https://github.com/acme/other",
+        "--source-commit", "e" * 40, repo=client, env=env,
+    )
+    assert added.returncode == 0, added.stderr
+    published = run_git(remote, "rev-parse", "refs/heads/main").stdout.strip()
+    assert run_git(writable, "rev-parse", "HEAD").stdout.strip() == published
+    assert run_git(remote, "rev-list", "--count", f"{head}..{published}").stdout.strip() == "1"
+    assert "Attached write" in run_git(
+        remote, "show", "main:scopes/domains/voice/context.json"
+    ).stdout
+    assert list(client.iterdir()) == []

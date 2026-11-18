@@ -43,6 +43,28 @@ No per-run human connector authorization is part of this flow.
 Only knowledge present in the snapshot is available. A standalone domain clone
 does not implicitly include parent-store universal records or other domains.
 Report missing referenced context; do not claim complete cross-store coverage.
+
+## Writable agents on an existing store
+
+An agent that also captures knowledge clones the store on its branch (normally
+`main`) with credentials that can push branches and merge PRs, then attaches it
+writable in the same kind of isolated runtime:
+
+```bash
+python3 <updater> git-store-attach --store <clone> --writable
+python3 <updater> add-pattern --project-store-id <uuid> --name "<name>" \
+  --summary "<fact>" --applicability domain:<domain> --source repo-docs \
+  --source-remote <inspected-url> --source-commit <full-sha>
+python3 <updater> git-store-publish
+```
+
+Writable attachment needs no migration, approval token, or binding and creates
+no store commit. Writes follow the store's write mode: on a protected GitHub
+branch each write becomes a `pcc/context-<sha>` PR that PCC merges when GitHub
+allows it. Rerun `git-store-publish` until it reports completion; a pending
+publication stays queued locally if required checks or approvals block the merge.
+Use the project whose registered remote matches the inspected source, or a
+project without a registered remote (such as a domain umbrella).
 The optional global index is not required for lexical search. Attaching a store
 does not install PCC or grant repository access; unavailable code or credentials
 remain setup blockers. Use a separate writable runtime for curation, never remove

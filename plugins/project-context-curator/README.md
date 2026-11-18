@@ -66,6 +66,8 @@ local configuration, disables mutation commands, and never automatically fetches
 or publishes. Refresh the snapshot explicitly for each run and record its commit;
 parent-store and other-domain knowledge is not implicitly included. See
 `configure-context-storage` for the full bootstrap commands.
+Writing agents attach a branch clone with `--writable`; their writes publish
+through the store's write mode (PRs on protected GitHub branches).
 
 New PCC versions continue to read and write older storage repositories without
 requiring domain submodules. Older PCC versions are not required to understand
