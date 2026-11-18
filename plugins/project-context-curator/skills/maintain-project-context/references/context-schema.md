@@ -340,9 +340,11 @@ the local commit and returns an error.
 Publication settings use native repository-local Git config, not fields in the
 portable catalog or canonical context:
 
-- `project-context-curator.writeMode`: `auto` (default), `direct`, or
-  `pull-request`. Auto detects effective GitHub branch PR, workflow, and
-  required-status-check rules; otherwise it selects direct publication.
+- `project-context-curator.writeMode`: `auto` (default), `direct`,
+  `pull-request`, or `branch`. Auto detects effective GitHub branch PR, workflow,
+  and required-status-check rules; otherwise it selects direct publication.
+  `branch` pushes `pcc/context-<sha>` and leaves PR creation and merge-commit
+  merging to the caller.
 - `project-context-curator.adminMerge`: `true` or `false` (default). True opts
   into the caller's existing admin bypass capability; it grants no rights.
 

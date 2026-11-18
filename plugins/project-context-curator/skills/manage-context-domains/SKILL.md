@@ -26,7 +26,7 @@ copies. Read command help before execution.
    The approved updater operation creates fresh repositories through `gh` and
    links dedicated stores under `stores/<slug>` as Git submodules.
    Inspect effective branch rules and merge settings. Each store uses local
-   `project-context-curator.writeMode` (`auto`, `direct`, or `pull-request`);
+   `project-context-curator.writeMode` (`auto`, `direct`, `pull-request`, or `branch`);
    auto selects PRs for GitHub PR/workflow/status-check rules. PR publication
    requires authenticated `gh` and merge commits enabled. Follow
    `$configure-context-storage` for per-checkout settings and explicit approval

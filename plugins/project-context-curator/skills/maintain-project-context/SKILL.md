@@ -187,9 +187,12 @@ git -C <store-checkout> config --local project-context-curator.writeMode pull-re
 git -C <store-checkout> config --local project-context-curator.adminMerge false
 ```
 
-`writeMode` accepts `auto` (default), `direct`, or `pull-request`. Auto selects
+`writeMode` accepts `auto` (default), `direct`, `pull-request`, or `branch`. Auto selects
 PR publication when GitHub's effective branch rules require PRs, workflows, or
-status checks; other stores use direct pushes. PR publication uses authenticated
+status checks; other stores use direct pushes. `branch` serves callers without
+`gh`: PCC pushes `pcc/context-<sha>` and `git-store-publish` exits non-zero
+naming it; open a PR from it, merge with a merge commit, then rerun
+`git-store-publish`. `pull-request` publication uses authenticated
 `gh` and requires merge commits enabled to preserve canonical commit identity.
 `adminMerge` defaults to `false`; enable it only after explicit approval to use
 the caller's existing bypass rights. It grants no permissions and does not

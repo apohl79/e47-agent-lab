@@ -78,7 +78,11 @@ new multi-store layouts or PR publication.
 Each store checkout selects its own write flow through native local Git config.
 `project-context-curator.writeMode` defaults to `auto`: GitHub branch rules
 requiring PRs, workflows, or status checks select PR publication; otherwise PCC
-uses direct pushes. Set `direct` or `pull-request` explicitly when needed:
+uses direct pushes. Set `direct` or `pull-request` explicitly when needed. Set
+`branch` where `gh` is unavailable, such as cloud agents: PCC pushes
+`pcc/context-<sha>`, `git-store-publish` exits non-zero naming it, and the
+caller opens a PR, merges it with a merge commit, then reruns
+`git-store-publish` to finish:
 
 ```bash
 git -C <store-checkout> config --local project-context-curator.writeMode pull-request

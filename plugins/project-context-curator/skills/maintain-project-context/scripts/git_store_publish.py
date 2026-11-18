@@ -18,6 +18,8 @@ PENDING_FILE = "project-context-curator-publication.json"
 QUEUE_FILE = "project-context-curator-publish-queue.json"
 WORKER_SECONDS = 900
 RETRY_SECONDS = 15
+# Modes that publish through a reviewed PR; "branch" leaves PR creation and merge to the caller.
+PR_MODES = {"pull-request", "branch"}
 
 
 def pending_path(pc: Any, root: Path) -> Path:
@@ -76,8 +78,8 @@ def _json(pc: Any, root: Path, *arguments: str) -> Any:
 
 def policy(pc: Any, root: Path, upstream: Any, *, detect: bool = True) -> dict[str, Any]:
     mode = pc.git_config_value(root, "project-context-curator.writeMode") or "auto"
-    if mode not in {"auto", "direct", "pull-request"}:
-        raise SystemExit("project-context-curator.writeMode must be auto, direct, or pull-request.")
+    if mode not in {"auto", "direct", *PR_MODES}:
+        raise SystemExit("project-context-curator.writeMode must be auto, direct, pull-request, or branch.")
     admin = pc.git_config_value(root, "project-context-curator.adminMerge") or "false"
     if admin not in {"true", "false"}:
         raise SystemExit("project-context-curator.adminMerge must be true or false.")
@@ -157,8 +159,22 @@ def publish(pc: Any, root: Path, upstream: Any, selected: dict[str, Any]) -> Non
     if _contains(pc, root, head, remote_head):
         _finish(pc, root, upstream, head, path)
         return
-    if not _contains(pc, root, remote_head, head):
+    branch = f"pcc/context-{head}"
+    # A handed-off PR may already be open, so a later base change is the reviewer's merge concern.
+    if not (saved and selected["mode"] == "branch") and not _contains(pc, root, remote_head, head):
         raise SystemExit("Remote main advanced; synchronize before creating or merging the context PR.")
+    if selected["mode"] == "branch":
+        if not path.exists():
+            _save(path, identity)
+        pc.git_checked(
+            root, "push", upstream.remote, f"{head}:refs/heads/{branch}",
+            action="context PR branch push",
+        )
+        raise SystemExit(
+            f"Context publication branch: {branch} (head {head}). Open a PR from it into "
+            f"{upstream.branch}, merge it with a merge commit (not squash or rebase) once "
+            "required checks pass, then rerun git-store-publish."
+        )
     repository = selected["repository"]
     metadata = _json(
         pc, root, "api", "--hostname", "github.com", f"repos/{repository}",
@@ -167,7 +183,6 @@ def publish(pc: Any, root: Path, upstream: Any, selected: dict[str, Any]) -> Non
         raise SystemExit("PCC pull-request publication requires merge commits enabled to preserve canonical commit identity.")
     if not path.exists():
         _save(path, identity)
-    branch = f"pcc/context-{head}"
     pc.git_checked(
         root, "push", upstream.remote, f"{head}:refs/heads/{branch}",
         action="context PR branch push",
@@ -222,10 +237,10 @@ def deferred(pc: Any, root: Path, children: dict[str, Path]) -> bool:
             policy(pc, child, pc.git_store_upstream(child, allow_detached=True), detect=False)
         return True
     return any(
-        policy(
-            pc, child, pc.git_store_upstream(child, allow_detached=True)
-        )["mode"] == "pull-request"
-        for child in children.values()
+            policy(
+                pc, child, pc.git_store_upstream(child, allow_detached=True)
+            )["mode"] in PR_MODES
+            for child in children.values()
     )
 
 

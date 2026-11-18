@@ -388,3 +388,45 @@ def test_invalid_settings_also_block_writes_when_publication_is_already_queued(t
     assert result.returncode != 0
     assert "writeMode" in result.stderr
     assert store_context_path(env, repo, store).read_bytes() == before
+
+
+def remote_clone(tmp_path: Path, remote: Path, name: str) -> Path:
+    clone = tmp_path / name
+    run_git(tmp_path, "clone", "--quiet", str(remote), str(clone))
+    (tmp_path / f"{name}-hooks").mkdir()
+    for key, value in [("user.name", "Reviewer"), ("user.email", "reviewer@example.invalid"),
+                       ("commit.gpgsign", "false"), ("core.hooksPath", str(tmp_path / f"{name}-hooks"))]:
+        run_git(clone, "config", key, value)
+    return clone
+
+
+def test_branch_mode_hands_pr_to_caller_without_github_cli(tmp_path: Path) -> None:
+    env, repo, store, remote = github_store(tmp_path, "branch")
+    assert add_term(repo, env, "Handoff", "The caller opens and merges the PR").returncode == 0
+    committed = run_git(store, "rev-parse", "HEAD").stdout.strip()
+    branch = f"pcc/context-{committed}"
+
+    pending = publish(repo, env)
+
+    assert pending.returncode != 0
+    assert f"Context publication branch: {branch}" in pending.stderr
+    assert run_git(remote, "rev-parse", f"refs/heads/{branch}").stdout.strip() == committed
+    assert publication_events(env) == []
+    # Main advances while the handed-off PR waits for review; merging it must still finish.
+    unrelated = remote_clone(tmp_path, remote, "unrelated")
+    run_git(unrelated, "commit", "--allow-empty", "-m", "Unrelated change")
+    run_git(unrelated, "push", "--quiet", "origin", "main")
+    assert publish(repo, env).returncode != 0
+    reviewer = remote_clone(tmp_path, remote, "reviewer")
+    run_git(reviewer, "merge", "--no-ff", f"origin/{branch}", "-m", "Merge context PR")
+    run_git(reviewer, "push", "--quiet", "origin", "main")
+
+    result = publish(repo, env)
+
+    assert result.returncode == 0, result.stderr
+    assert "publication complete" in result.stdout.lower()
+    remote_head = run_git(remote, "rev-parse", "main").stdout.strip()
+    run_git(remote, "merge-base", "--is-ancestor", committed, remote_head)
+    assert run_git(store, "rev-parse", "HEAD").stdout.strip() == remote_head
+    assert not (store / ".git/project-context-curator-publication.json").exists()
+    assert publication_events(env) == []

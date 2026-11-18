@@ -2032,7 +2032,7 @@ def push_git_store(
 ) -> subprocess.CompletedProcess[str]:
     try:
         selected = git_store_publish.policy(sys.modules[__name__], root, upstream)
-        if selected["mode"] == "pull-request":
+        if selected["mode"] in git_store_publish.PR_MODES:
             git_store_publish.publish(sys.modules[__name__], root, upstream, selected)
             return subprocess.CompletedProcess(["gh", "pr", "merge"], 0, "", "")
         if git_store_publish.pending_path(sys.modules[__name__], root).exists():
@@ -2084,7 +2084,7 @@ def prepare_git_store(root: Path, upstream: GitUpstream, *, defer: bool = False)
     pending = git_store_publish.pending_path(sys.modules[__name__], root).exists()
     queued = git_store_publish.queue_path(sys.modules[__name__], root).exists()
     if remote_exists and not pending and not (defer and queued):
-        if selected["mode"] == "pull-request":
+        if selected["mode"] in git_store_publish.PR_MODES:
             remote_head = git_store_publish._fetch(sys.modules[__name__], root, upstream)
             git_store_publish.synchronize(sys.modules[__name__], root, remote_head)
         else:
