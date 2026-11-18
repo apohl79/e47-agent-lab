@@ -90,6 +90,32 @@ def test_remote_capture_requires_valid_matching_remote_and_commit(
     assert not (unrelated / "docs/context").exists()
 
 
+def test_remote_capture_accepts_any_inspected_remote_for_remoteless_project(
+    tmp_path: Path,
+) -> None:
+    env, _repo, store, _remote, project_id = configured_store(
+        tmp_path, source_remote=None
+    )
+    assert "remote_url" not in manifest(store)["projects"][project_id]
+    unrelated = tmp_path / "unrelated"
+    unrelated.mkdir()
+    successful(
+        "add-pattern", "--project-store-id", project_id,
+        "--name", "Umbrella evidence", "--summary", "Seen in a member repo",
+        "--applicability", "domain:cpl", "--source", "repo-docs",
+        "--source-remote", "https://github.com/acme/member",
+        "--source-commit", "c" * 40, repo=unrelated, env=env,
+    )
+    search = successful(
+        "search", "--project-store-id", project_id, "--query", "Umbrella evidence",
+        repo=unrelated, env=env,
+    )
+    assert "Umbrella evidence" in search.stdout
+    assert "github.com/acme/member" in json.dumps(
+        read_json(store / "scopes/domains/cpl/context.json")
+    )
+
+
 def test_register_remote_only_project_then_bootstrap_in_domain_store(
     tmp_path: Path,
 ) -> None:

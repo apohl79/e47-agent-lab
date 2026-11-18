@@ -320,7 +320,8 @@ canonical context through `--project-store-id` without a source checkout.
 Source-derived remote capture includes `--source-remote` and a full
 `--source-commit` SHA only after inspecting actual source at that revision.
 For remote-only `--source repo-docs` additions these flags are required, and the
-source remote must match the registered project. User-confirmed decisions may
+source remote must match the project's registered remote when it has one;
+projects without a registered remote accept any inspected remote. User-confirmed decisions may
 omit remote evidence; their provenance must not fabricate a local commit.
 `git-store-register --remote <url> --name <name> [--domain <existing-domain>]`
 previews remote-only registration. Approved execution with the identical inputs

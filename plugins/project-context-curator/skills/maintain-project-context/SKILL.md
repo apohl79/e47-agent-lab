@@ -254,7 +254,9 @@ path exists. Domain or universal capture still requires verified applicability;
 remote source access does not broaden scope.
 
 For remote-only `--source repo-docs` additions, both `--source-remote` and a full
-`--source-commit` are required, and the remote must match the registered project.
+`--source-commit` are required. When the project has a registered remote, the
+source remote must match it; a project without one (for example a domain
+umbrella) accepts any inspected source remote.
 For explicitly user-confirmed decisions, use `--source user-confirmed`; remote
 evidence flags may be omitted. Remote-only provenance uses a portable project
 URI rather than inventing a local checkout or local Git commit.

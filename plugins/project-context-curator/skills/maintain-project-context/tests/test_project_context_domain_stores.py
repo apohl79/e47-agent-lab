@@ -44,7 +44,7 @@ def tree_snapshot(*roots: Path, include_git: bool = True) -> dict[str, bytes]:
 def configured_store(
     tmp_path: Path,
     domain: str = "cpl",
-    source_remote: str = "https://github.com/acme/service.git",
+    source_remote: str | None = "https://github.com/acme/service.git",
 ):
     env = isolated_environment(tmp_path / "xdg")
     hooks = tmp_path / "test-hooks"
@@ -63,7 +63,8 @@ def configured_store(
         env[f"GIT_CONFIG_VALUE_{index}"] = value
     repo = tmp_path / "service"
     initialize_git_repository(repo)
-    run_git(repo, "remote", "add", "origin", source_remote)
+    if source_remote is not None:
+        run_git(repo, "remote", "add", "origin", source_remote)
     successful("init", "--visibility", "local", repo=repo, env=env)
     successful(
         "add-term", "--term", "Ledger", "--definition", "Durable ledger",

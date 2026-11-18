@@ -6416,7 +6416,8 @@ def main(argv: list[str] | None = None) -> int:
         project_id = TARGET_PROJECT_ID or git_store_project_binding(context_repo(args.repo))
         if project_id:
             _store, _root, manifest = require_configured_git_store()
-            if manifest["projects"][project_id].get("remote_url") != SOURCE_REMOTE:
+            registered = manifest["projects"][project_id].get("remote_url")
+            if registered is not None and registered != SOURCE_REMOTE:
                 raise SystemExit("Source remote does not match the selected project's registered remote.")
     root = git_store_mutation_root(args)
     if root is None:
