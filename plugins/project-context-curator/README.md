@@ -86,14 +86,12 @@ caller opens a PR, merges it with a merge commit, then reruns
 
 ```bash
 git -C <store-checkout> config --local project-context-curator.writeMode pull-request
-git -C <store-checkout> config --local project-context-curator.adminMerge false
 ```
 
 These settings are local to each checkout, including dedicated domain stores;
-they are not tracked or transferred to another machine. `adminMerge` defaults to
-`false`; enable it only with explicit approval to use the caller's existing
-GitHub bypass rights. It cannot bypass rules the caller lacks permission to
-bypass.
+they are not tracked or transferred to another machine. PCC never requests an
+admin merge. It merges a context PR once the destination's rules allow it, or
+completes when the destination's own automation merges the PR.
 PR publication requires `gh` authentication and merge commits enabled on the
 destination, preserving canonical commit identities.
 

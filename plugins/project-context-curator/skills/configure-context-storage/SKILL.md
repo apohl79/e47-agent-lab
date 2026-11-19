@@ -126,7 +126,6 @@ Use native Git config in each canonical checkout, including domain submodules:
 
 ```bash
 git -C <store-checkout> config --local project-context-curator.writeMode pull-request
-git -C <store-checkout> config --local project-context-curator.adminMerge false
 ```
 
 `writeMode` accepts `auto` (default), `direct`, `pull-request`, or `branch`. Auto inspects
@@ -137,9 +136,9 @@ exits non-zero naming it; the caller opens a PR, merges it with a merge commit,
 and reruns `git-store-publish`. `pull-request` publication
 requires authenticated `gh` and merge commits enabled to preserve commit
 identities. Do not change repository protections or force direct mode to evade
-them. `adminMerge` defaults to `false`; set `true` only after explicit approval
-to request merging with the caller's existing bypass rights. It grants no new
-rights and cannot bypass rules the caller lacks permission to bypass.
+them. PCC never requests an admin merge. It merges a context PR once the
+destination's rules allow it, or completes when the destination's own
+automation merges the PR.
 
 Ordinary PR-backed writes save a local commit and queue publication. A bounded
 worker retries every 15 seconds for up to 15 minutes, releasing store locks

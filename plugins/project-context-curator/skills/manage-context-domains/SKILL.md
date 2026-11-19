@@ -29,9 +29,8 @@ copies. Read command help before execution.
    `project-context-curator.writeMode` (`auto`, `direct`, `pull-request`, or `branch`);
    auto selects PRs for GitHub PR/workflow/status-check rules. PR publication
    requires authenticated `gh` and merge commits enabled. Follow
-   `$configure-context-storage` for per-checkout settings and explicit approval
-   before opting into `project-context-curator.adminMerge=true`; the default is
-   `false`, and this setting grants no bypass rights.
+   `$configure-context-storage` for per-checkout settings. PCC never requests
+   an admin merge.
 4. In local runtime, manage membership locally. Dedicated repositories require
    an explicitly approved switch to Git-store runtime through
    `$configure-context-storage`; do not silently switch storage.

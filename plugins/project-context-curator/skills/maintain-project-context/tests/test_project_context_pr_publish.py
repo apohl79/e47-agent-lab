@@ -276,19 +276,22 @@ def test_successful_pr_merge_preserves_commit_and_synchronizes_main(tmp_path: Pa
     assert "--admin" not in merges[0]
 
 
-def test_admin_merge_setting_is_applied_only_when_enabled(tmp_path: Path) -> None:
+def test_publication_never_requests_admin_merge(tmp_path: Path) -> None:
     env, repo, store, _remote = github_store(tmp_path)
     run_git(store, "config", "project-context-curator.adminMerge", "true")
-    assert add_term(repo, env, "Admin", "Approved repository admin merge policy").returncode == 0
+    assert add_term(repo, env, "Admin", "Merges wait for required checks").returncode == 0
+    assert publish(repo, {**env, "FAKE_GH_PENDING": "1"}).returncode != 0
+    journal = store / ".git/project-context-curator-publication.json"
+    legacy = {**read_json(journal), "admin_merge": True}
+    journal.write_text(json.dumps(legacy) + "\n", encoding="utf-8")
 
     result = publish(repo, env)
 
     assert result.returncode == 0, result.stderr
     merges = [event for event in publication_events(env) if event[:2] == ["pr", "merge"]]
-    assert len(merges) == 1
-    assert "--admin" in merges[0]
-    assert "--merge" in merges[0]
-    assert "--match-head-commit" in merges[0]
+    assert len(merges) == 2
+    assert all("--admin" not in merge for merge in merges)
+    assert not journal.exists()
 
 
 def test_noop_publisher_does_not_open_pr(tmp_path: Path) -> None:
@@ -356,7 +359,6 @@ def test_bounded_worker_releases_write_lock_between_pending_attempts(tmp_path: P
     ("key", "value"),
     [
         ("project-context-curator.writeMode", "guess"),
-        ("project-context-curator.adminMerge", "yes"),
     ],
 )
 def test_invalid_write_settings_fail_before_canonical_mutation(

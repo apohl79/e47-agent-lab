@@ -184,7 +184,6 @@ settings rather than tracked configuration:
 
 ```bash
 git -C <store-checkout> config --local project-context-curator.writeMode pull-request
-git -C <store-checkout> config --local project-context-curator.adminMerge false
 ```
 
 `writeMode` accepts `auto` (default), `direct`, `pull-request`, or `branch`. Auto selects
@@ -194,10 +193,10 @@ status checks; other stores use direct pushes. `branch` serves callers without
 naming it; open a PR from it, merge with a merge commit, then rerun
 `git-store-publish`. `pull-request` publication uses authenticated
 `gh` and requires merge commits enabled to preserve canonical commit identity.
-`adminMerge` defaults to `false`; enable it only after explicit approval to use
-the caller's existing bypass rights. It grants no permissions and does not
-override rules the caller cannot bypass. Reapply chosen settings on another
-machine; every checkout has its own policy.
+PCC never requests an admin merge. It merges a context PR once the
+destination's rules allow it, or completes when the destination's own
+automation merges the PR. Reapply chosen settings on another machine; every
+checkout has its own policy.
 
 Ordinary PR-backed writes return after committing locally and queuing a bounded
 background worker. It retries every 15 seconds for up to 15 minutes and releases

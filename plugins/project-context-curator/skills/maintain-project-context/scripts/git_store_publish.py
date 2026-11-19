@@ -80,9 +80,6 @@ def policy(pc: Any, root: Path, upstream: Any, *, detect: bool = True) -> dict[s
     mode = pc.git_config_value(root, "project-context-curator.writeMode") or "auto"
     if mode not in {"auto", "direct", *PR_MODES}:
         raise SystemExit("project-context-curator.writeMode must be auto, direct, pull-request, or branch.")
-    admin = pc.git_config_value(root, "project-context-curator.adminMerge") or "false"
-    if admin not in {"true", "false"}:
-        raise SystemExit("project-context-curator.adminMerge must be true or false.")
     remote = pc.normalize_remote_url(upstream.push_url) or ""
     repository = remote.removeprefix("github.com/")
     github = remote.startswith("github.com/") and len(repository.split("/")) == 2
@@ -92,7 +89,7 @@ def policy(pc: Any, root: Path, upstream: Any, *, detect: bool = True) -> dict[s
         mode = "direct"
         if github:
             if not pc.git_remote_branch_exists(root, upstream):
-                return {"mode": mode, "repository": repository, "admin_merge": admin == "true"}
+                return {"mode": mode, "repository": repository}
             branch = _json(
                 pc, root, "api", "--hostname", "github.com",
                 f"repos/{repository}/branches/{upstream.branch}",
@@ -109,7 +106,7 @@ def policy(pc: Any, root: Path, upstream: Any, *, detect: bool = True) -> dict[s
                 if any(rule.get("type") in {"pull_request", "workflows", "required_status_checks"}
                        for rule in rules):
                     mode = "pull-request"
-    return {"mode": mode, "repository": repository, "admin_merge": admin == "true"}
+    return {"mode": mode, "repository": repository}
 
 
 def _fetch(pc: Any, root: Path, upstream: Any) -> str:
@@ -153,7 +150,8 @@ def publish(pc: Any, root: Path, upstream: Any, selected: dict[str, Any]) -> Non
         "head": head, "remote": upstream.remote, "branch": upstream.branch,
         "push_url": upstream.push_url, **selected,
     }
-    if saved and saved != identity:
+    # Journals from earlier versions may carry the removed admin_merge setting.
+    if saved and {key: saved.get(key) for key in identity} != identity:
         raise SystemExit("Pending PR publication changed; retain its commit and original write settings before retrying.")
     remote_head = _fetch(pc, root, upstream)
     if _contains(pc, root, head, remote_head):
@@ -211,13 +209,11 @@ def publish(pc: Any, root: Path, upstream: Any, selected: dict[str, Any]) -> Non
     # Never merge a stale canonical snapshot into a concurrently changed base.
     if _fetch(pc, root, upstream) != remote_head:
         raise SystemExit("Remote main changed while preparing the context PR; publication retained locally.")
-    arguments = [
+    _gh(
+        pc, root,
         "pr", "merge", number, "--repo", f"github.com/{repository}",
         "--merge", "--match-head-commit", head,
-    ]
-    if selected["admin_merge"]:
-        arguments.append("--admin")
-    _gh(pc, root, *arguments)
+    )
     _finish(pc, root, upstream, head, path)
 
 

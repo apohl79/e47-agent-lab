@@ -345,14 +345,12 @@ portable catalog or canonical context:
   and required-status-check rules; otherwise it selects direct publication.
   `branch` pushes `pcc/context-<sha>` and leaves PR creation and merge-commit
   merging to the caller.
-- `project-context-curator.adminMerge`: `true` or `false` (default). True opts
-  into the caller's existing admin bypass capability; it grants no rights.
 
 Configure every store checkout separately, including domain submodules and
 clones on another machine. PR publication requires authenticated `gh`, a
 github.com push URL, and merge commits enabled to preserve canonical commit
-identities. Pending publication is verified against the destination branch's
-ancestry before reporting success.
+identities. PCC never requests an admin merge. Pending publication is verified
+against the destination branch's ancestry before reporting success.
 
 Ordinary PR-backed mutations commit locally, then queue a bounded background
 worker. It retries at 15-second intervals for up to 15 minutes, releasing store
