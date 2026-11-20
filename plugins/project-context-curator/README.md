@@ -73,6 +73,38 @@ New PCC versions continue to read and write older storage repositories without
 requiring domain submodules. Older PCC versions are not required to understand
 new multi-store layouts or PR publication.
 
+## Install
+
+Install directly through your host's plugin manager; `install.sh` is optional.
+Add the E47 marketplace once, then install Project Context Curator:
+
+### Xedoc
+
+```bash
+xedoc plugin marketplace add apohl79/e47-agent-lab
+xedoc plugin add project-context-curator@e47
+```
+
+### Codex
+
+```bash
+codex plugin marketplace add apohl79/e47-agent-lab
+codex plugin add project-context-curator@e47
+```
+
+### Claude Code
+
+```bash
+claude plugin marketplace add apohl79/e47-agent-lab
+claude plugin install project-context-curator@e47
+```
+
+Alternatively, use the [marketplace installer](../../README.md#install), which
+installs all plugins supported by the selected host. Native plugin installs do
+not run `install.sh --with-context-runtime`; if shared-context retrieval needs
+the optional pinned runtime, the session hook reports that and asks before
+running `global-upgrade`.
+
 ## Git-store publication
 
 Each store checkout selects its own write flow through native local Git config.
@@ -139,5 +171,5 @@ graph search, relationship filters, and node details.
 Use the curator when a repository needs persistent terminology, architecture
 decisions, component ownership, or cross-project context. It also fits context
 hygiene reviews and graph exploration. The plugin supports Xedoc, Codex, and
-Claude Code; install it through the [marketplace README](../../README.md#install), then
-invoke the relevant `project-context-curator:*` skill.
+Claude Code; after installation, invoke the relevant
+`project-context-curator:*` skill.
