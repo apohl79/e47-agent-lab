@@ -226,8 +226,50 @@ dependencies, and the approved scope fingerprint.
 Allowed preparation permissions are `read_sources`, `write_artifacts`,
 `write_isolated_code`, `run_local_checks`, and `update_task_status`.
 These never authorize messages, source-system changes, publishing, Git pushes,
-merges, deployment, or configuration application. Approval records permission
-but **does not launch or schedule a session**.
+merges, deployment, or configuration application.
+
+### Approval dispatch
+
+Approval and user resume persist `ready`, then notify the owning main session
+through the existing host bridge. The confirmation explains that this may start
+scoped preparation through the repository's dispatch workflow. The plugin never
+creates a worker itself. Without an owning session or after a notification
+failure, approval remains saved; the response reports pending delivery. Do not
+reapprove or assume a worker started. Read the register before retrying.
+
+The main-session event is JSON with `type: "inline-discussion.task-ready"`,
+`projectRoot`, `registerPath`, `documentPath`, `taskId`, `taskRevision` and
+`approval`. It is a hint to reread the register, not an executable scope.
+Use the repo's dispatch skill (for example `briefing-dispatch`); if none exists,
+leave the task queued. Do not silently launch the rest of the ready backlog.
+
+Claim before creating an idle worker, then bind its actual session before
+sending any work. Both commands use the latest register `expectedRevision`:
+
+```json
+{"action":"claim","expectedRevision":12,"id":"TASK-042","expectedTaskRevision":4,"claimId":"unique-dispatch-uuid"}
+```
+
+```json
+{"action":"bind","expectedRevision":13,"id":"TASK-042","claimId":"unique-dispatch-uuid","task":{"session":"actual-worker-thread-id"}}
+```
+
+`claim` atomically checks the task revision, current approval, readiness,
+dependencies and absence of a previous claim. It stores `dispatch.id` and
+`dispatch.approval` without changing `ready`. `bind` requires that valid claim
+and refuses another session when one is already recorded. Reuse the recorded
+session after user resume/review; check it is idle before sending.
+
+Pass the claim ID to the worker. Its `start` command must include top-level
+`claimId` and `task.session` equal to the bound real session. Existing explicitly
+authorized manual starts without a dispatch claim remain supported.
+Reclassification or user resume invalidates the prior claim; stale workers
+cannot start under it. Never release a claim by timeout or retry creation/send
+after an ambiguous failure. Report the durable claim/session for reconciliation;
+this favors a visible stalled dispatch over duplicate execution.
+
+Workers still stop at input or final review. Only the user accepts outcomes.
+No dispatcher may approve tasks or enlarge the approved scope.
 
 Agent command payloads:
 

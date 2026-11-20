@@ -27,6 +27,10 @@ function validateTask(task: Task): void {
   }
   check(task.permissions.every((value) => PERMISSIONS.includes(value)), 'only preparation permissions are supported');
   check(Number.isSafeInteger(task.revision) && task.revision >= 1 && Array.isArray(task.history), 'invalid task revision/history');
+  if (task.dispatch !== undefined) {
+    check(typeof task.dispatch?.id === 'string' && /^[A-Za-z0-9_-]{1,100}$/.test(task.dispatch.id)
+      && typeof task.dispatch.approval === 'string' && task.dispatch.approval.length === 64, 'invalid dispatch claim');
+  }
 }
 export function readTaskRegister(path: string): TaskRegister {
   const value = JSON.parse(readFileSync(path, 'utf8')) as TaskRegister;
@@ -75,18 +79,40 @@ export function applyTaskCommand(register: TaskRegister, command: TaskCommand, a
         if (patch[key] !== undefined) Object.assign(task, { [key]: patch[key] });
       }
       task.approval = undefined;
+      task.dispatch = undefined;
       task.state = ['agent', 'agent_preparable', 'verify_first'].includes(task.route) ? 'awaiting_approval' : 'identified';
     } else if (command.action === 'approve') {
       check(task.state === 'awaiting_approval', 'task is not awaiting approval');
       ready(task, next);
       task.approval = scopeFingerprint(task);
+      task.dispatch = undefined;
       task.state = 'ready';
+    } else if (command.action === 'claim' || command.action === 'bind') {
+      check(task.state === 'ready', 'task is not ready');
+      ready(task, next);
+      check(task.approval === scopeFingerprint(task), 'scope approval missing or invalidated');
+      check(typeof command.claimId === 'string' && /^[A-Za-z0-9_-]{1,100}$/.test(command.claimId), 'dispatch claim ID required');
+      if (command.action === 'claim') {
+        check(command.expectedTaskRevision === task.revision - 1, 'stale task approval event; reload before dispatch');
+        check(!task.dispatch, 'task dispatch is already claimed; do not launch another session');
+        task.dispatch = { id: command.claimId, approval: task.approval };
+      } else {
+        check(task.dispatch?.id === command.claimId && task.dispatch.approval === task.approval, 'dispatch claim missing or invalidated');
+        const session = command.task?.session;
+        check(typeof session === 'string' && session.trim(), 'session reference required');
+        check(!task.session || task.session === session, 'task already belongs to another session');
+        task.session = session;
+      }
     } else if (command.action === 'start') {
       check(task.state === 'ready', 'task is not ready');
       ready(task, next);
       check(task.approval === scopeFingerprint(task), 'scope approval missing or invalidated');
       const session = command.task?.session;
       check(typeof session === 'string' && session.trim(), 'session reference required');
+      if (task.dispatch || command.claimId !== undefined) {
+        check(task.dispatch?.id === command.claimId && task.dispatch?.approval === task.approval, 'dispatch claim missing or invalidated');
+        check(task.session === session, 'worker does not match bound dispatch session');
+      }
       task.session = session;
       task.state = 'in_progress';
     } else if (['progress', 'needs_input', 'block', 'submit'].includes(command.action)) {
@@ -113,6 +139,7 @@ export function applyTaskCommand(register: TaskRegister, command: TaskCommand, a
       check(task.approval === scopeFingerprint(task), 'scope approval missing or invalidated');
       task.progress = command.note;
       task.question = '';
+      task.dispatch = undefined;
       task.state = 'ready';
     } else if (command.action === 'request_changes') {
       check(task.state === 'ready_for_review' && typeof command.note === 'string' && command.note.trim(), 'review feedback required');

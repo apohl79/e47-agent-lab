@@ -26,12 +26,15 @@ export interface Task {
   deliverable: string;
   evidence: string;
   approval?: string;
+  dispatch?: { id: string; approval: string };
   history: Array<{ at: string; actor: string; state: TaskState; note: string }>;
 }
 export interface TaskRegister { version: 1; revision: number; tasks: Task[] }
 export interface TaskCommand {
-  action: 'create' | 'classify' | 'approve' | 'start' | 'progress' | 'needs_input' | 'block' | 'submit' | 'resume' | 'request_changes' | 'accept' | 'cancel';
+  action: 'create' | 'classify' | 'approve' | 'claim' | 'bind' | 'start' | 'progress' | 'needs_input' | 'block' | 'submit' | 'resume' | 'request_changes' | 'accept' | 'cancel';
   expectedRevision: number;
+  expectedTaskRevision?: number;
+  claimId?: string;
   id?: string;
   note?: string;
   task?: Partial<Task>;
@@ -41,4 +44,5 @@ export interface TaskSnapshot {
   revision: number;
   tasks: Task[];
   error?: string;
+  notification?: string;
 }

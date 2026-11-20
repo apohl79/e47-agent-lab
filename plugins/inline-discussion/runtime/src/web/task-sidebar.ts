@@ -201,7 +201,7 @@ export function createTaskSidebar(
     if (action === 'approve') {
       const accepted = await modalConfirm({
         title: 'Approve preparation',
-        body: `${task.scope}\n\nPermissions: ${task.permissions.join(', ')}\n\nAcceptance: ${task.acceptance}\n\nStop: ${task.stopCondition}\n\nThis records approval only. It does not launch a session or authorize external actions.`,
+        body: `${task.scope}\n\nPermissions: ${task.permissions.join(', ')}\n\nAcceptance: ${task.acceptance}\n\nStop: ${task.stopCondition}\n\nApproval notifies the owning main session and authorizes its configured workflow to start scoped preparation. External actions and final outcome acceptance remain unauthorized.`,
         primaryLabel: 'Approve preparation',
       });
       if (!accepted) return;
@@ -217,7 +217,7 @@ export function createTaskSidebar(
       snapshot = await command(action, task.id, expectedRevision, text);
       notes.delete(task.id);
       quickActions.delete(task.id);
-      error.textContent = '';
+      error.textContent = snapshot.notification ?? '';
     } catch (failure) {
       error.textContent = failure instanceof Error ? failure.message : String(failure);
     } finally {
@@ -274,7 +274,7 @@ export function createTaskSidebar(
       cancel.className = 'btn'; cancel.textContent = 'Cancel quick action'; cancel.disabled = busy;
       cancel.addEventListener('click', () => { quickActions.delete(task.id); render(); document.getElementById(select.id)?.focus(); });
       const notice = document.createElement('p');
-      notice.textContent = `Current: ${label(task.state)}. ${selected[0] === 'approve' ? 'Review scope in the confirmation. No session will start.' : 'Evidence or a reason is required before applying.'}`;
+      notice.textContent = `Current: ${label(task.state)}. ${selected[0] === 'approve' ? 'Review scope in the confirmation. Approval may start scoped preparation through the owning main session.' : 'Evidence or a reason is required before applying.'}`;
       cell.append(notice, apply, cancel);
     }
     return cell;
@@ -363,6 +363,7 @@ export function createTaskSidebar(
     detail(details, 'Stop', task.stopCondition);
     detail(details, 'Dependencies', task.dependencies.join(', '));
     detail(details, 'Progress', task.progress);
+    detail(details, 'Dispatch claim', task.dispatch?.id ?? '');
     detail(details, 'Question', task.question);
     detail(details, 'First seen', task.firstSeen);
     link(details, 'Source', task.source);

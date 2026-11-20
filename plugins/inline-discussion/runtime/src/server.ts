@@ -8,6 +8,7 @@ import { isMarkdownFile, isSourceFile, renderDoc, renderedMarkdownText, renderSo
 import { parseSourceReference, selectedSourceText } from './source-reference.ts';
 import { documentTaskBinding, documentTaskRegisterPath, documentTaskSnapshot } from './task-document.ts';
 import { writeTaskCommand, type TaskCommand } from './task-register.ts';
+import { taskReadyPrompt } from './task-handoff.ts';
 import { parseArchivedThreads } from './archive.ts';
 import { readCodexSessionInferenceSettings, readJsonl, trimTranscript } from './transcript.ts';
 import { appendThreadDetails, removeAllArchivedBlocks, removeArchivedBlockByIndex, removeThreadDetailsById, replaceThreadDetails, updateTaskCheckbox } from './doc-writer.ts';
@@ -1184,8 +1185,24 @@ async function handle(state: ServerState, req: IncomingMessage, res: ServerRespo
       if (!body.id || !binding?.ids.includes(body.id)) throw new Error('task does not belong to document');
       const path = documentTaskRegisterPath(documentPath, state.projectRoot ?? resolveServeRoot(state.docPath));
       if (!path) throw new Error('document has no task register');
-      writeTaskCommand(path, body, 'user');
-      res.end(JSON.stringify(documentTaskSnapshot(documentPath, state.projectRoot ?? resolveServeRoot(state.docPath))));
+      const register = writeTaskCommand(path, body, 'user');
+      let notification: string | undefined;
+      if (body.action === 'approve' || body.action === 'resume') {
+        if (!state.mainSession) {
+          notification = 'Approval saved. No owning main session is connected; task remains queued for dispatch.';
+        } else {
+          try {
+            await state.mainSession.send(taskReadyPrompt(
+              state.projectRoot ?? resolveServeRoot(state.docPath), path, documentPath,
+              register.tasks.find((task) => task.id === body.id)!,
+            ));
+            notification = 'Approval saved; owning main session notified. Worker dispatch is tracked in the task register.';
+          } catch (error) {
+            notification = `Approval saved; main-session notification failed: ${error instanceof Error ? error.message : String(error)}. Do not reapprove; inspect the register before retrying dispatch.`;
+          }
+        }
+      }
+      res.end(JSON.stringify({ ...documentTaskSnapshot(documentPath, state.projectRoot ?? resolveServeRoot(state.docPath)), notification }));
     } catch (error) {
       res.statusCode = 409;
       res.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }));
