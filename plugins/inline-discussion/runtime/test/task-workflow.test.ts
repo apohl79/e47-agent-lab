@@ -195,6 +195,7 @@ test('sidebar filters, navigates and retains input across live updates without r
 
 test('unavailable tracked tasks open their error without visually toggling completion', () => {
   const dom = new JSDOM('<main id="doc"><li data-task-id="TASK-MISSING"><input type="checkbox"></li></main>');
+  dom.window.scrollTo = () => {};
   const sidebar = createTaskSidebar(dom.window.document, async () => { throw new Error('must not persist'); });
   sidebar.update({ enabled: true, revision: 0, tasks: [], error: 'Register missing' });
   const input = dom.window.document.querySelector('input')!;

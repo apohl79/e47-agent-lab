@@ -19,11 +19,24 @@ export function createTaskSidebar(
   toggle.hidden = true;
   toggle.setAttribute('aria-controls', host.id);
   toggle.setAttribute('aria-expanded', 'false');
+  const scrollPositions = {
+    document: { left: 0, top: 0 },
+    tasks: { left: 0, top: 0 },
+  };
   function setMode(open: boolean): void {
-    host.hidden = !open || !snapshot.enabled;
-    document.body.classList.toggle('task-mode', open && snapshot.enabled);
+    open = open && snapshot.enabled;
+    const wasOpen = !host.hidden;
+    const view = document.defaultView;
+    if (view && wasOpen !== open) {
+      scrollPositions[wasOpen ? 'tasks' : 'document'] = { left: view.scrollX, top: view.scrollY };
+    }
+    host.hidden = !open;
+    document.body.classList.toggle('task-mode', open);
     toggle.textContent = open ? 'Document' : 'Tasks';
     toggle.setAttribute('aria-expanded', String(open));
+    if (view && wasOpen !== open) {
+      view.scrollTo({ ...scrollPositions[open ? 'tasks' : 'document'], behavior: 'instant' });
+    }
   }
   toggle.addEventListener('click', () => setMode(host.hidden));
   const controls = document.getElementById('controls');
