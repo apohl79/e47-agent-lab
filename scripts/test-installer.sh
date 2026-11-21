@@ -77,4 +77,58 @@ assert_logged "codex plugin add project-context-curator@e47"
 assert_host_not_logged xedoc
 assert_host_not_logged claude
 
+# Exercise the Git Bash branch without requiring symlink privileges.
+cat >"${FAKE_BIN}/uname" <<'EOF'
+#!/usr/bin/env bash
+echo MINGW64_NT
+EOF
+cat >"${FAKE_BIN}/cygpath" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$2"
+EOF
+chmod +x "${FAKE_BIN}/uname" "${FAKE_BIN}/cygpath"
+# Do not replace an existing Unix launcher during the platform simulation.
+TEST_HOME="${TEST_ROOT}/windows home"
+mkdir -p "$TEST_HOME"
+run_installer
+launcher="${TEST_HOME}/.local/bin/inline-discussion"
+test -f "$launcher" && test ! -L "$launcher"
+grep -Fq '@rem e47-managed-cli-launcher' "${launcher}.cmd"
+# The existing tool's usage path exits 1.
+if "$launcher" --help >"${TEST_ROOT}/tool-help.log" 2>&1; then
+    printf 'Expected the tool usage exit status (1).\n' >&2
+    exit 1
+else
+    test "$?" -eq 1
+fi
+grep -Fq 'Usage:' "${TEST_ROOT}/tool-help.log"
+# Reinstallation must recognize its own launchers.
+run_installer --codex
+grep -Fq '# e47-managed-cli-launcher' "$launcher"
+run_installer uninstall
+test ! -e "$launcher"
+test ! -e "${launcher}.cmd"
+
+# Keep unrelated user launchers on both installation and removal.
+printf 'user tool\n' >"$launcher"
+printf 'user cmd\n' >"${launcher}.cmd"
+run_installer
+grep -Fxq 'user tool' "$launcher"
+grep -Fxq 'user cmd' "${launcher}.cmd"
+run_installer uninstall
+grep -Fxq 'user tool' "$launcher"
+grep -Fxq 'user cmd' "${launcher}.cmd"
+
+# Dangling symlinks must not bypass Windows launcher ownership checks.
+outside_launcher="${TEST_ROOT}/outside-launcher"
+outside_cmd="${TEST_ROOT}/outside-launcher.cmd"
+rm -f "$launcher" "${launcher}.cmd"
+ln -s "$outside_launcher" "$launcher"
+ln -s "$outside_cmd" "${launcher}.cmd"
+run_installer
+test -L "$launcher"
+test -L "${launcher}.cmd"
+test ! -e "$outside_launcher"
+test ! -e "$outside_cmd"
+
 printf 'Installer target tests passed.\n'

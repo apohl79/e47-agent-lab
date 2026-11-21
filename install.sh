@@ -457,6 +457,17 @@ resolve_bin_dir() {
     printf "%s\n" "${HOME}/.local/bin"
 }
 
+is_windows() {
+    case "$(uname -s)" in
+        MINGW*|MSYS*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+is_managed_windows_launcher() {
+    [ -f "$1" ] && grep -Fqx '# e47-managed-cli-launcher' "$1"
+}
+
 install_cli_tools() {
     local source="$1"
 
@@ -493,6 +504,26 @@ install_cli_tools() {
         fi
         chmod +x "$launcher" 2>/dev/null || true
         link="${bin_dir}/${tool_name}"
+        if is_windows; then
+            # Git Bash otherwise copies symlinks, breaking launchers that locate
+            # their source tree relative to themselves. No admin rights needed.
+            local cmd_link="${link}.cmd" bash_path launcher_path
+            if [ -L "$link" ] ||
+                { [ -e "$link" ] && ! is_managed_windows_launcher "$link"; } ||
+                [ -L "$cmd_link" ] ||
+                { [ -e "$cmd_link" ] && ! grep -Fqx '@rem e47-managed-cli-launcher' "$cmd_link"; }; then
+                warn "Refusing to replace unmanaged launcher at ${link} or ${cmd_link}."
+                continue
+            fi
+            bash_path="$(cygpath -w "$(command -v bash)")"
+            launcher_path="$(cygpath -w "$launcher")"
+            printf '#!/usr/bin/env bash\n# e47-managed-cli-launcher\nexec %q "$@"\n' "$launcher" >"$link"
+            printf '@rem e47-managed-cli-launcher\n@echo off\nsetlocal DisableDelayedExpansion\n"%s" --login "%s" %%*\n' \
+                "${bash_path//%/%%}" "${launcher_path//%/%%}" >"$cmd_link"
+            chmod +x "$link"
+            ok "CLI tool installed: ${link} and ${cmd_link}"
+            continue
+        fi
         if [ -e "$link" ] && [ ! -L "$link" ]; then
             warn "Refusing to replace existing non-symlink at ${link}; skipping ${tool_name}."
             warn "Remove it manually or move it out of the way and re-run install.sh."
@@ -658,6 +689,16 @@ remove_cli_tools() {
         local dir
         for dir in "${candidates[@]}"; do
             link="${dir}/${tool_name}"
+            if is_managed_windows_launcher "$link"; then
+                rm -f "$link"
+                ok "CLI tool removed: ${link}"
+                removed_any=true
+            fi
+            if [ -f "${link}.cmd" ] && grep -Fqx '@rem e47-managed-cli-launcher' "${link}.cmd"; then
+                rm -f "${link}.cmd"
+                ok "CLI tool removed: ${link}.cmd"
+                removed_any=true
+            fi
             # Only remove symlinks that this installer planted — never touch a
             # real binary the user dropped at the same name.
             if [ -L "$link" ]; then

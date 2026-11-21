@@ -1,0 +1,24 @@
+name: Installer
+on:
+  push:
+    paths:
+      - .gitattributes
+      - install.sh
+      - install.ps1
+      - scripts/test-installer*
+      - .github/workflows/installer.yml
+  pull_request:
+    paths:
+      - .gitattributes
+      - install.sh
+      - install.ps1
+      - scripts/test-installer*
+      - .github/workflows/installer.yml
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test PowerShell entry point and Windows launchers
+        shell: powershell
+        run: .\scripts\test-installer.ps1

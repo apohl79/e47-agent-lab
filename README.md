@@ -14,6 +14,26 @@ Plugin marketplace for Codex, Claude Code, and Xedoc.
 
 ## Install
 
+### Windows (PowerShell)
+
+Install [Git for Windows](https://git-scm.com/download/win) (including Git Bash)
+and the target host CLI first, then reopen PowerShell. Install for Xedoc:
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/apohl79/e47-agent-lab/main/install.ps1))) -Xedoc
+```
+
+Use `-Claude`, `-Codex`, or `-All` instead to select other hosts. From a local
+clone, run `.\install.ps1 -Xedoc`; add `-Action uninstall` to uninstall,
+`-Source PATH` to select a checkout, or `-WithContextRuntime` to provision the
+optional context runtime. No administrator or symlink privileges are needed.
+Standalone tools install into `~/bin` if it exists, otherwise `~/.local/bin`;
+add that directory to your Windows user `PATH` to use their `.cmd` launchers.
+This installs the marketplace; individual plugins and optional services may
+have additional platform requirements.
+
+### macOS / Linux / WSL (Bash)
+
 Install for Xedoc:
 
 ```bash
