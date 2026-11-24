@@ -155,30 +155,8 @@ EOF
 }
 
 ensure_runtime_build() {
-  local install_marker="$SERVER_DIR/node_modules/.inline-discussion-install-complete"
-  if [[ ! -f "$install_marker" ]]; then
-    command -v npm >/dev/null 2>&1 \
-      || { echo "npm required to install server deps (missing $install_marker)" >&2; exit 5; }
-    echo "inline-discussion: installing server dependencies (first launch)…" >&2
-    (cd "$SERVER_DIR" && npm ci --silent --no-audit --no-fund --include=dev --ignore-scripts) >&2 \
-      || { echo "npm ci failed" >&2; exit 5; }
-    : > "$install_marker"
-  fi
-
-  local dist_marker="$SERVER_DIR/dist/index.html"
-  local needs_build=0
-  if [[ ! -f "$dist_marker" || ! -f "$SERVER_DIR/dist/server.js" || ! -f "$SERVER_DIR/dist/session-control.js" || ! -f "$SERVER_DIR/dist/task-control.js" ]]; then
-    needs_build=1
-  elif find "$SERVER_DIR/src" -type f -newer "$dist_marker" -print -quit 2>/dev/null | grep -q .; then
-    needs_build=1
-  fi
-  if (( needs_build )); then
-    command -v npm >/dev/null 2>&1 \
-      || { echo "npm required to rebuild dist/" >&2; exit 5; }
-    echo "inline-discussion: rebuilding dist/ (src/ newer than dist/)…" >&2
-    (cd "$SERVER_DIR" && npm run --silent build) >&2 \
-      || { echo "npm run build failed" >&2; exit 5; }
-  fi
+  node "$SERVER_DIR/bin/prepare-runtime.mjs" >&2 \
+    || { echo "inline-discussion runtime preparation failed" >&2; exit 5; }
 }
 
 agent_shortcut_prompt() {

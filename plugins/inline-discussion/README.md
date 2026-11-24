@@ -65,10 +65,21 @@ The discuss skill prefers that same panel when an active Xedoc GUI session is
 available. Thread-agent conversations, direct main-agent conversations, Apply,
 and Finish use the existing session bridges without a skill handoff.
 
-The runtime ships inside the plugin. First launch provisions its pinned npm
-dependencies and builds the renderer in the plugin directory (Node >=20 and npm
-required). To prepare it ahead of time, run `runtime/bin/xedoc-panel --prepare`
-from this plugin directory. Runtime upgrades fingerprint the package lock.
+The runtime ships inside the plugin. Xedoc versions supporting `gui.prepare`
+provision its pinned npm dependencies and build the renderer during plugin
+installation and marketplace upgrades, rather than on document open (Node >=20
+and npm required). Older hosts retain first-launch preparation. To prepare a
+checkout or older installation ahead of time, run
+`runtime/bin/xedoc-panel --prepare` from this plugin directory. Panel and
+standalone launches share dependency and content-based build fingerprints, so
+switching launch modes does not reinstall dependencies or rebuild unchanged
+sources. After editing the runtime in a filesystem marketplace, prepare it
+again and close/reopen the owning GUI session to replace its loaded runtime.
+Xedoc hosts supporting session runtime reuse also warm the renderer when the GUI
+session opens. Documents share a Node process but keep independent servers,
+threads, inference settings, file watchers, and Apply/Finish/Pause state. Closing
+a document releases only its server; closing the owning session releases the
+warm process. Older hosts keep the one-process-per-document behavior.
 The standalone browser renderer remains supported; Codex and Claude retain their
 existing skill and CLI flows.
 

@@ -29,6 +29,21 @@ npm run build
 ./bin/inline-discussion -a xedoc ../../../README.md
 ```
 
+`node bin/prepare-runtime.mjs` installs the pinned dependencies and builds all
+runtime entrypoints ahead of use. Xedoc invokes this through `gui.prepare` at
+plugin installation and marketplace update time. Both launchers reuse its
+readiness fingerprints; a normal document open performs no npm install or build.
+Older hosts and locally edited runtimes retain an on-demand preparation fallback.
+
+The Xedoc panel opts into `reuse: "session"`. Supporting hosts prewarm one Node
+process per owning GUI session and exchange `xedoc.plugin-panel-runtime/v1`
+JSON lines on its retained stdin/stdout. Each document gets its own HTTP server
+and session directory. Closing, pausing, or finishing one document does not close
+its siblings. Session close, logout, or plugin disable releases the warm process.
+The ordinary one-shot panel protocol remains supported on older hosts.
+After editing a local runtime, prepare it and close/reopen its owning GUI session;
+an already warm process keeps its loaded code.
+
 ## CLI
 
 ```

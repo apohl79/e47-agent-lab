@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, mkdirSync, closeSync, openSync, chmodSync, realpathSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, mkdirSync, chmodSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -9,15 +9,6 @@ import { fileURLToPath } from 'node:url';
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SERVER_DIR = resolve(HERE, '..');
 const LAUNCHER = join(SERVER_DIR, 'bin', 'inline-discussion');
-
-// The launcher runs `npm install` on first launch if this marker is missing.
-// In the test environment node_modules/ is already installed by whoever ran
-// `npm test`, so we touch the marker to skip that 3–30s step.
-const INSTALL_MARKER = join(SERVER_DIR, 'node_modules', '.inline-discussion-install-complete');
-if (!existsSync(INSTALL_MARKER)) {
-  mkdirSync(dirname(INSTALL_MARKER), { recursive: true });
-  closeSync(openSync(INSTALL_MARKER, 'w'));
-}
 
 // A tiny stand-in for dist/server.js used only by the launcher test.
 // The real server needs a built bundle and agent SDK wiring; the launcher

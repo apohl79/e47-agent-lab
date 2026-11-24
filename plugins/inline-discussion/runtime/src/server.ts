@@ -91,6 +91,7 @@ export interface ServerOptions {
   // Defaults to true for the CLI launcher; tests pass false so subsequent
   // tests aren't killed by the scheduled exit.
   shutdownOnFinish?: boolean;
+  onShutdown?: () => void;
 }
 
 export interface ServerHandle {
@@ -226,6 +227,7 @@ export async function createServer(opts: ServerOptions): Promise<ServerHandle> {
     docReloadTimer: null,
     targetRange: null,
     shutdownOnFinish: opts.shutdownOnFinish !== false,
+    onShutdown: opts.onShutdown ?? (() => process.exit(0)),
     hasMainSession: hasMainSession || mainSession !== null,
     mainSession,
     mainSessionLease: null,
@@ -317,6 +319,7 @@ interface ServerState {
   nextThreadSeq: number;
   nextHighlightSeq: number;
   shutdownOnFinish: boolean;
+  onShutdown: () => void;
   port?: number;
   // Apply-mode state. applying=true means /api/apply has run and the main
   // agent has not yet called /api/apply/done or /api/apply/failed.
@@ -2375,7 +2378,7 @@ async function handle(state: ServerState, req: IncomingMessage, res: ServerRespo
     }
     res.setHeader('content-type', 'application/json');
     res.end(JSON.stringify(result));
-    if (state.shutdownOnFinish) void state.close().finally(() => process.exit(0));
+    if (state.shutdownOnFinish) void state.close().finally(state.onShutdown);
     return;
   }
 
@@ -2395,7 +2398,7 @@ async function handle(state: ServerState, req: IncomingMessage, res: ServerRespo
     pushEvent(state, 'server.paused', { result });
     res.setHeader('content-type', 'application/json');
     res.end(JSON.stringify(result));
-    if (state.shutdownOnFinish) void state.close().finally(() => process.exit(0));
+    if (state.shutdownOnFinish) void state.close().finally(state.onShutdown);
     else void Promise.all([...state.agents.values()].map((agent) => agent.close?.().catch(() => {})));
     return;
   }
