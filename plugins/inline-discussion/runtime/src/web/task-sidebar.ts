@@ -68,6 +68,32 @@ export function createTaskSidebar(
   const notes = new Map<string, string>();
   const actionFeedback = new Map<string, { message: string; failed: boolean }>();
   const quickActions = new Map<string, { action: string; revision: number }>();
+  const expandedActions = new Map<string, { action: string; revision: number }>();
+  const rows = new Map<string, { key: string; elements: HTMLTableRowElement[] }>();
+  let deferred = false;
+  let pointerTarget: Node | null = null;
+  const tableWrap = document.createElement('div');
+  tableWrap.className = 'task-table-scroll';
+  const table = document.createElement('table');
+  table.className = 'task-table';
+  const caption = table.createCaption();
+  const head = table.createTHead().insertRow();
+  for (const name of ['Task', 'State', 'Category', 'Classification', 'Confidence / readiness', 'Owner']) {
+    const cell = document.createElement('th'); cell.scope = 'col'; cell.textContent = name; head.append(cell);
+  }
+  const body = table.createTBody();
+  tableWrap.append(table);
+  list.append(tableWrap);
+  const flush = () => { if (deferred) render(true); };
+  host.addEventListener('focusout', () => setTimeout(flush, 0));
+  host.addEventListener('pointerdown', (event) => { pointerTarget = event.target as Node; }, true);
+  for (const name of ['pointerup', 'pointercancel']) {
+    document.addEventListener(name, () => {
+      pointerTarget = null;
+      setTimeout(flush, 0);
+    }, true);
+  }
+  document.addEventListener('selectionchange', flush);
   type ClassificationDraft = { revision: number; route: Task['route']; classificationConfidence: number; readinessConfidence: number; reason: string };
   const drafts = new Map<string, ClassificationDraft>();
   const quickClassifications = new Set<string>();
@@ -76,9 +102,13 @@ export function createTaskSidebar(
     ['human_delegable', 'Human-delegable'], ['you', 'Personal'], ['verify_first', 'Verify first'],
   ];
   const canClassify = (task: Task) => !['in_progress', 'ready_for_review', 'completed', 'cancelled'].includes(task.state);
-  function classificationDraft(task: Task): ClassificationDraft {
+  function revisionFor(task: Task, renderedRevision: number): number {
+    return snapshot.tasks.find((current) => current.id === task.id)?.revision === task.revision
+      ? snapshot.revision : renderedRevision;
+  }
+  function classificationDraft(task: Task, renderedRevision: number): ClassificationDraft {
     return drafts.get(task.id) ?? {
-      revision: snapshot.revision, route: task.route,
+      revision: revisionFor(task, renderedRevision), route: task.route,
       classificationConfidence: task.classificationConfidence, readinessConfidence: task.readinessConfidence, reason: '',
     };
   }
@@ -97,6 +127,7 @@ export function createTaskSidebar(
     } finally { busy = false; render(); }
   }
   function renderQuickClassification(task: Task): HTMLElement {
+    const renderedRevision = snapshot.revision;
     const cell = document.createElement('div');
     cell.className = 'task-quick-state';
     const select = document.createElement('select');
@@ -110,7 +141,7 @@ export function createTaskSidebar(
     select.value = pending ? drafts.get(task.id)!.route : task.route;
     select.disabled = busy || !canClassify(task);
     select.addEventListener('change', () => {
-      const draft = classificationDraft(task);
+      const draft = classificationDraft(task, renderedRevision);
       draft.route = select.value as Task['route'];
       drafts.set(task.id, draft);
       quickClassifications.add(task.id);
@@ -222,6 +253,7 @@ export function createTaskSidebar(
       snapshot = await command(action === 'approve_with_note' ? 'approve' : action, task.id, expectedRevision, text, preparation);
       notes.delete(task.id);
       quickActions.delete(task.id);
+      expandedActions.delete(task.id);
       actionFeedback.delete(task.id);
       error.textContent = snapshot.notification ?? '';
       if (snapshot.notification) actionFeedback.set(task.id, { message: snapshot.notification, failed: false });
@@ -234,6 +266,7 @@ export function createTaskSidebar(
     }
   }
   function renderQuickState(task: Task): HTMLElement {
+    const renderedRevision = snapshot.revision;
     const cell = document.createElement('div');
     cell.className = 'task-quick-state';
     const select = document.createElement('select');
@@ -255,7 +288,7 @@ export function createTaskSidebar(
     const selected = actions.find(([action]) => action === pending?.action);
     select.value = selected?.[0] ?? '';
     select.addEventListener('change', () => {
-      if (select.value) quickActions.set(task.id, { action: select.value, revision: snapshot.revision });
+      if (select.value) quickActions.set(task.id, { action: select.value, revision: revisionFor(task, renderedRevision) });
       else quickActions.delete(task.id);
       quickClassifications.delete(task.id);
       if (expanded === task.id) expanded = '';
@@ -288,6 +321,7 @@ export function createTaskSidebar(
     return cell;
   }
   function renderTask(task: Task): HTMLElement {
+    const renderedRevision = snapshot.revision;
     const row = document.createElement('section');
     row.className = 'task-sidebar-item';
     const jump = document.createElement('a');
@@ -318,8 +352,11 @@ export function createTaskSidebar(
       editorTitle.textContent = 'Edit classification';
       editor.open = drafts.has(task.id);
       editor.append(editorTitle);
-      const draft = classificationDraft(task);
-      const remember = () => drafts.set(task.id, draft);
+      const draft = classificationDraft(task, renderedRevision);
+      const remember = () => {
+        if (!drafts.has(task.id)) draft.revision = revisionFor(task, renderedRevision);
+        drafts.set(task.id, draft);
+      };
       const field = (name: string, input: HTMLElement) => {
         input.setAttribute('aria-label', name);
         const wrapper = document.createElement('label');
@@ -407,15 +444,18 @@ export function createTaskSidebar(
       const button = document.createElement('button');
       button.className = 'btn';
       button.textContent = text;
-      button.hidden = true;
+      button.hidden = expandedActions.get(task.id)?.action !== action;
       button.disabled = busy;
-      button.addEventListener('click', () => void runAction(task, action, snapshot.revision));
+      button.addEventListener('click', () => void runAction(task, action, expandedActions.get(task.id)?.revision ?? revisionFor(task, renderedRevision)));
       details.append(button);
       actionButtons.push(button);
     }
     if (actions.length) {
+      transition.value = expandedActions.get(task.id)?.action ?? '';
       transition.disabled = busy;
       transition.addEventListener('change', () => {
+        if (transition.value) expandedActions.set(task.id, { action: transition.value, revision: revisionFor(task, renderedRevision) });
+        else expandedActions.delete(task.id);
         actionButtons.forEach((button, index) => { button.hidden = actions[index]![0] !== transition.value; });
       });
       details.insertBefore(transition, note);
@@ -424,7 +464,24 @@ export function createTaskSidebar(
     row.append(jump, status, details);
     return row;
   }
-  function render(): void {
+  function render(background = false): void {
+    const view = document.defaultView;
+    const scroll = { left: view?.scrollX ?? 0, top: view?.scrollY ?? 0 };
+    const horizontal = tableWrap.scrollLeft;
+    const anchor = background ? Array.from(body.rows).find((row) => {
+      const rect = row.getBoundingClientRect();
+      return rect.bottom > 0 && rect.top < (view?.innerHeight ?? 0);
+    }) : undefined;
+    const anchorTop = anchor?.getBoundingClientRect().top ?? 0;
+    const anchorId = anchor?.id || anchor?.querySelector('.task-title-button')?.id;
+    const selection = document.getSelection();
+    const active = document.activeElement;
+    const editing = active?.matches('input, textarea, select, [contenteditable="true"]');
+    const interacting = (element: HTMLElement) => (editing && element.contains(active)) ||
+      (pointerTarget !== null && element.contains(pointerTarget)) ||
+      (!!selection && !selection.isCollapsed &&
+        (element.contains(selection.anchorNode) || element.contains(selection.focusNode)));
+    deferred = false;
     if (!snapshot.enabled) setMode(false);
     toggle.hidden = !snapshot.enabled;
     if (snapshot.error) error.textContent = snapshot.error;
@@ -442,31 +499,38 @@ export function createTaskSidebar(
     const categoryFor = (task: Task) => categories.get(task.id) ?? 'Uncategorized';
     const selectedCategory = categoryFilter.value;
     const allCategories = [...new Set(snapshot.tasks.map(categoryFor))];
-    categoryFilter.replaceChildren();
-    for (const value of ['', ...allCategories]) {
-      const option = document.createElement('option');
-      option.value = value;
-      option.textContent = value || 'All categories';
-      categoryFilter.append(option);
+    if (JSON.stringify(Array.from(categoryFilter.options, (option) => option.value)) !== JSON.stringify(['', ...allCategories])) {
+      if (background && interacting(categoryFilter)) deferred = true;
+      else {
+        categoryFilter.replaceChildren();
+        for (const value of ['', ...allCategories]) {
+          const option = document.createElement('option');
+          option.value = value;
+          option.textContent = value || 'All categories';
+          categoryFilter.append(option);
+        }
+        categoryFilter.value = allCategories.includes(selectedCategory) ? selectedCategory : '';
+      }
     }
-    categoryFilter.value = allCategories.includes(selectedCategory) ? selectedCategory : '';
     const visible = snapshot.tasks.filter((task) =>
-      (!categoryFilter.value || categoryFor(task) === categoryFilter.value) &&
-      (filter.value === 'all' || (filter.value === 'open' ? !['completed', 'cancelled'].includes(task.state) : task.state === filter.value)));
-    const tableWrap = document.createElement('div');
-    tableWrap.className = 'task-table-scroll';
-    const table = document.createElement('table');
-    table.className = 'task-table';
-    const caption = document.createElement('caption');
-    caption.textContent = `${visible.length} tasks · select a task to review or edit`;
-    const head = table.createTHead().insertRow();
-    for (const name of ['Task', 'State', 'Category', 'Classification', 'Confidence / readiness', 'Owner']) {
-      const cell = document.createElement('th'); cell.scope = 'col'; cell.textContent = name; head.append(cell);
-    }
-    table.prepend(caption);
-    const body = table.createTBody();
+      ((!categoryFilter.value || categoryFor(task) === categoryFilter.value) &&
+        (filter.value === 'all' || (filter.value === 'open' ? !['completed', 'cancelled'].includes(task.state) : task.state === filter.value))) ||
+      (background && rows.get(task.id)?.elements.some(interacting)));
+    const captionText = `${visible.length} tasks · select a task to review or edit`;
+    if (caption.textContent !== captionText) caption.textContent = captionText;
+    const next: HTMLTableRowElement[] = [];
     for (const task of visible) {
-      const tr = body.insertRow();
+      const key = JSON.stringify([task, categoryFor(task), expanded === task.id, busy]);
+      const previous = rows.get(task.id);
+      if (background && previous && (previous.key === key || previous.elements.some(interacting))) {
+        if (previous.key !== key) deferred = true;
+        next.push(...previous.elements);
+        continue;
+      }
+      const openDetails = new Map(previous?.elements.flatMap((row) =>
+        Array.from(row.querySelectorAll('details'), (details) => [details.querySelector('summary')?.textContent, details.open] as const)));
+      const tr = document.createElement('tr');
+      const elements = [tr];
       tr.dataset.selected = String(expanded === task.id);
       const choose = document.createElement('button');
       choose.className = 'task-title-button'; choose.textContent = task.title;
@@ -489,16 +553,48 @@ export function createTaskSidebar(
         tr.insertCell().textContent = value;
       }
       if (expanded === task.id) {
-        const detailsRow = body.insertRow();
+        const detailsRow = document.createElement('tr');
         detailsRow.id = `task-details-${task.id}`;
         detailsRow.className = 'task-detail-row';
         const cell = detailsRow.insertCell();
         cell.colSpan = head.cells.length;
         cell.append(renderTask(task));
+        if (background) {
+          for (const details of detailsRow.querySelectorAll('details')) {
+            const open = openDetails.get(details.querySelector('summary')?.textContent);
+            if (open !== undefined) details.open = open;
+          }
+        }
+        elements.push(detailsRow);
+      }
+      rows.set(task.id, { key, elements });
+      next.push(...elements);
+    }
+    const retained = new Set(next);
+    for (const row of Array.from(body.rows)) {
+      if (!retained.has(row)) row.remove();
+    }
+    let cursor = body.firstChild;
+    for (const row of next) {
+      if (row === cursor) cursor = cursor.nextSibling;
+      else body.insertBefore(row, cursor);
+    }
+    while (cursor) {
+      const removed = cursor;
+      cursor = cursor.nextSibling;
+      removed.remove();
+    }
+    for (const id of rows.keys()) {
+      if (!visible.some((task) => task.id === id)) rows.delete(id);
+    }
+    if (background) {
+      if (tableWrap.scrollLeft !== horizontal) tableWrap.scrollLeft = horizontal;
+      const currentAnchor = anchorId ? document.getElementById(anchorId)?.closest('tr') : anchor;
+      const delta = currentAnchor?.isConnected ? currentAnchor.getBoundingClientRect().top - anchorTop : 0;
+      if (view && (view.scrollX !== scroll.left || view.scrollY !== scroll.top + delta)) {
+        view.scrollTo({ left: scroll.left, top: scroll.top + delta, behavior: 'instant' });
       }
     }
-    tableWrap.append(table);
-    list.replaceChildren(tableWrap);
     for (const task of snapshot.tasks) {
       const target = document.getElementById(`task-${task.id}`);
       if (!target) continue;
@@ -508,12 +604,13 @@ export function createTaskSidebar(
         badge.className = 'task-live-status';
         target.append(badge);
       }
-      badge.textContent = ` · Current: ${label(task.state)}`;
+      const text = ` · Current: ${label(task.state)}`;
+      if (badge.textContent !== text) badge.textContent = text;
       const checkbox = target.querySelector<HTMLInputElement>('input[type="checkbox"]');
       if (checkbox) { checkbox.checked = task.state === 'completed'; checkbox.disabled = false; checkbox.title = 'Open task controls to review or change this task'; }
     }
   }
-  filter.addEventListener('change', render);
-  categoryFilter.addEventListener('change', render);
-  return { update(value) { snapshot = value; error.textContent = value.error ?? ''; render(); }, refresh: render };
+  filter.addEventListener('change', () => render());
+  categoryFilter.addEventListener('change', () => render());
+  return { update(value) { snapshot = value; error.textContent = value.error ?? ''; render(true); }, refresh: () => render(true) };
 }

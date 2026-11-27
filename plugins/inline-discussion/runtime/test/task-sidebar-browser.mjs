@@ -93,6 +93,7 @@ try {
   await quickClassification.selectOption('agent');
   await classificationReason.fill('Keep this stale classification draft');
   update({ action: 'classify', id: 'TASK-042', task: { route: 'verify_first' } });
+  await page.locator('#task-sidebar h2').click();
   await page.waitForFunction(() => document.querySelector('#task-quick-select-TASK-042 option')?.textContent === 'awaiting approval');
   await classificationRow.getByRole('button', { name: 'Save classification', exact: true }).click();
   await page.waitForFunction(() => document.querySelector('[role="alert"]')?.textContent.includes('revision'));
@@ -135,6 +136,7 @@ try {
   await secondQuick.selectOption('accept');
   assert.equal(await page.locator('.task-detail-row').count(), 0);
   update({ action: 'classify', id: 'TASK-043', task: { route: 'you' } });
+  await page.locator('#task-sidebar h2').click();
   await page.waitForFunction(() => document.querySelector('#task-quick-classification-TASK-043')?.value === 'you');
   await secondRow.getByRole('button', { name: 'Mark outcome complete', exact: true }).click();
   await page.waitForFunction(() => document.querySelector('[role="alert"]')?.textContent.includes('revision'));
@@ -202,6 +204,7 @@ try {
   // A live register update must not silently rebase an edited classification.
   await page.getByLabel('Classification reason', { exact: true }).fill('Stale draft');
   update({ action: 'classify', id: 'TASK-042', task: { route: 'verify_first' } });
+  await page.locator('#task-sidebar h2').click();
   await page.waitForFunction(() => document.querySelector('#task-quick-classification-TASK-042')?.value === 'verify_first');
   await page.getByRole('button', { name: 'Save classification', exact: true }).click();
   await page.waitForFunction(() => document.querySelector('[role="alert"]')?.textContent.includes('revision'));

@@ -2706,7 +2706,6 @@ function onDocUpdated(evt: { html: string; blockIds: string[]; title?: string; a
   decorateResolvedThreadDetails();
   applyQuoteHighlights();
   window.scrollTo({ top: scroll });
-  scrollToLocationHash();
 }
 
 function applyTitle(title: string): void {

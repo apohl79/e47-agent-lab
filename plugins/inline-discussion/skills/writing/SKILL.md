@@ -139,7 +139,11 @@ Completed and cancelled tasks are read-only. Live updates retain drafts;
 stale saves are rejected. Discard classification edits to load current values.
 
 Register changes arrive over the existing live-event connection without
-rerendering the document or interrupting discussions. Missing registers,
+rerendering the document or replacing unchanged task rows. A row being edited,
+clicked, or text-selected keeps its controls until that interaction ends;
+other rows still update. Drafts, caret position and table scroll remain intact.
+Live document updates do not revisit the URL's navigation anchor. These UI
+protections do not relax stale-revision or approval checks. Missing registers,
 unknown/duplicate IDs, malformed records, and out-of-project paths produce a
 visible task error; never silently create replacement tasks or reset state.
 Task navigation persists across days; discussion threads remain owned by
