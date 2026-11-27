@@ -30,12 +30,10 @@ function fixture() {
   return { root, path, doc, markdown, update };
 }
 
-test('register gates approval, readiness, revision, scope, waiting and final acceptance', () => {
+test('register gates authority, revision, scope, waiting and final acceptance, not confidence', () => {
   const { path, update } = fixture();
   assert.throws(() => update({ action: 'approve', id: 'TASK-042' }), /user action/);
   update({ action: 'classify', id: 'TASK-042', task: { readinessConfidence: 90 } });
-  assert.throws(() => update({ action: 'approve', id: 'TASK-042' }, 'user'), /strictly greater/);
-  update({ action: 'classify', id: 'TASK-042', task: { readinessConfidence: 94 } });
   update({ action: 'approve', id: 'TASK-042' }, 'user');
   assert.throws(() => writeTaskCommand(path, { action: 'start', id: 'TASK-042', expectedRevision: 0 }, 'agent'), /stale/);
   update({ action: 'classify', id: 'TASK-042', task: { scope: 'Changed scope' } });
@@ -135,7 +133,7 @@ test('actual HTTP API approves scoped work, rejects stale commands and checkbox 
     const approved = await post({ action: 'approve', id: 'TASK-042', expectedRevision: boot.tasks.revision });
     assert.equal(approved.status, 200);
     assert.equal(readTaskRegister(path).tasks[0]!.state, 'ready');
-    assert.equal((await post({ action: 'classify', id: 'TASK-042', expectedRevision: boot.tasks.revision + 1, task: { route: 'you' } })).status, 409);
+    assert.equal((await post({ action: 'classify', id: 'TASK-042', expectedRevision: boot.tasks.revision + 1, task: { scope: 'Different' } })).status, 409);
     assert.equal((await post({ action: 'classify', id: 'TASK-042', expectedRevision: boot.tasks.revision + 1, note: 'Reject scope change', task: { scope: 'Different' } })).status, 409);
     const blockedCheckbox = await fetch(`${base}/api/task-checkboxes`, {
       method: 'PATCH', headers: { 'content-type': 'application/json' },
@@ -206,7 +204,7 @@ test('unavailable tracked tasks open their error without visually toggling compl
   dom.window.close();
 });
 
-test('collapsed quick actions require evidence and retain their revision and draft after a stale write', async () => {
+test('collapsed quick actions allow blank notes and retain their revision and draft after a stale write', async () => {
   const { root, doc, markdown } = fixture();
   const dom = new JSDOM(`<main id="doc">${renderDoc(markdown).html}</main>`);
   const calls: Array<{ action: string; revision: number; note: string }> = [];
@@ -224,8 +222,9 @@ test('collapsed quick actions require evidence and retain their revision and dra
   assert.equal(host.querySelector('.task-detail-row'), null);
   const apply = () => Array.from(host.querySelectorAll('button')).find((button) => button.textContent === 'Mark outcome complete')!.click();
   apply();
-  assert.equal(calls.length, 0);
-  assert.match(host.querySelector('[role="alert"]')!.textContent!, /evidence is required/);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(calls, [{ action: 'accept', revision: snapshot.revision, note: '' }]);
+  calls.length = 0;
   const note = host.querySelector('textarea')!;
   note.value = 'Verified scoped outcome';
   note.dispatchEvent(new dom.window.Event('input'));

@@ -27,6 +27,7 @@ function validateTask(task: Task): void {
   }
   check(task.permissions.every((value) => PERMISSIONS.includes(value)), 'only preparation permissions are supported');
   check(Number.isSafeInteger(task.revision) && task.revision >= 1 && Array.isArray(task.history), 'invalid task revision/history');
+  check(task.approvalNote === undefined || typeof task.approvalNote === 'string', 'invalid approval note');
   if (task.dispatch !== undefined) {
     check(typeof task.dispatch?.id === 'string' && /^[A-Za-z0-9_-]{1,100}$/.test(task.dispatch.id)
       && typeof task.dispatch.approval === 'string' && task.dispatch.approval.length === 64, 'invalid dispatch claim');
@@ -40,16 +41,18 @@ export function readTaskRegister(path: string): TaskRegister {
   return value;
 }
 function scopeFingerprint(task: Task): string {
-  return createHash('sha256').update(JSON.stringify(SCOPE_FIELDS.map((key) => task[key]))).digest('hex');
+  const scope: unknown[] = SCOPE_FIELDS.map((key) => task[key]);
+  if (task.approvalNote) scope.push(task.approvalNote);
+  return createHash('sha256').update(JSON.stringify(scope)).digest('hex');
 }
 function ready(task: Task, register: TaskRegister): void {
   check(['agent', 'agent_preparable', 'verify_first'].includes(task.route), 'task has no agent work route');
-  check(task.readinessConfidence > 90, 'execution readiness must be strictly greater than 90');
   check(task.scope.trim() && task.acceptance.trim() && task.stopCondition.trim() && task.permissions.length, 'scope, acceptance, permissions and stop condition required');
   check(task.dependencies.every((id) => register.tasks.some((entry) => entry.id === id && entry.state === 'completed')), 'dependencies are not completed');
 }
 export function applyTaskCommand(register: TaskRegister, command: TaskCommand, actor: 'agent' | 'user'): TaskRegister {
   check(command.expectedRevision === register.revision, 'stale task register revision; reload before retrying');
+  check(command.note === undefined || typeof command.note === 'string', 'invalid note');
   check(!USER_ACTIONS.includes(command.action) || actor === 'user', 'explicit user action required');
   const next = structuredClone(register);
   const now = new Date().toISOString();
@@ -79,11 +82,13 @@ export function applyTaskCommand(register: TaskRegister, command: TaskCommand, a
         if (patch[key] !== undefined) Object.assign(task, { [key]: patch[key] });
       }
       task.approval = undefined;
+      task.approvalNote = undefined;
       task.dispatch = undefined;
       task.state = ['agent', 'agent_preparable', 'verify_first'].includes(task.route) ? 'awaiting_approval' : 'identified';
     } else if (command.action === 'approve') {
       check(task.state === 'awaiting_approval', 'task is not awaiting approval');
       ready(task, next);
+      task.approvalNote = command.note?.trim() || undefined;
       task.approval = scopeFingerprint(task);
       task.dispatch = undefined;
       task.state = 'ready';
@@ -134,25 +139,26 @@ export function applyTaskCommand(register: TaskRegister, command: TaskCommand, a
       }
     } else if (command.action === 'resume') {
       check(['needs_input', 'blocked'].includes(task.state), 'task is not waiting');
-      check(typeof command.note === 'string' && command.note.trim(), 'answer or unblocking evidence required');
       ready(task, next);
       check(task.approval === scopeFingerprint(task), 'scope approval missing or invalidated');
-      task.progress = command.note;
+      task.approvalNote = command.note?.trim() || undefined;
+      task.approval = scopeFingerprint(task);
+      task.progress = command.note ?? '';
       task.question = '';
       task.dispatch = undefined;
       task.state = 'ready';
     } else if (command.action === 'request_changes') {
-      check(task.state === 'ready_for_review' && typeof command.note === 'string' && command.note.trim(), 'review feedback required');
-      task.progress = command.note;
+      check(task.state === 'ready_for_review', 'task is not ready for review');
+      task.progress = command.note ?? '';
       task.approval = undefined;
+      task.approvalNote = undefined;
       task.state = 'awaiting_approval';
     } else if (command.action === 'accept') {
-      check(command.note?.trim(), 'outcome-level acceptance evidence required');
       task.state = 'completed';
     } else if (command.action === 'cancel') {
-      check(command.note?.trim(), 'cancellation reason required');
       task.state = 'cancelled';
       task.approval = undefined;
+      task.approvalNote = undefined;
     } else {
       throw new Error('unknown task action');
     }

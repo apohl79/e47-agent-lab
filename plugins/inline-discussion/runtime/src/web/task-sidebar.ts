@@ -81,10 +81,6 @@ export function createTaskSidebar(
     };
   }
   async function saveClassification(task: Task, draft: ClassificationDraft): Promise<void> {
-    if (!draft.reason.trim()) {
-      error.textContent = 'A classification reason is required.';
-      return;
-    }
     busy = true;
     render();
     try {
@@ -126,7 +122,7 @@ export function createTaskSidebar(
       const reason = document.createElement('textarea');
       reason.id = `task-quick-classification-reason-${task.id}`;
       reason.setAttribute('aria-label', `Classification reason for ${task.id}`);
-      reason.placeholder = 'Classification reason';
+      reason.placeholder = 'Classification reason (optional)';
       reason.value = draft.reason;
       reason.disabled = busy;
       reason.addEventListener('input', () => { draft.reason = reason.value; });
@@ -189,32 +185,27 @@ export function createTaskSidebar(
   }
   function actionsFor(task: Task): Array<[string, string]> {
     const actions: Array<[string, string]> = [];
-    if (task.state === 'awaiting_approval') actions.push(['approve', 'Approve preparation']);
+    if (task.state === 'awaiting_approval') actions.push(['approve', 'Approve preparation'], ['approve_with_note', 'Ready with note']);
     if (['needs_input', 'blocked'].includes(task.state)) actions.push(['resume', 'Answer / resume']);
     if (task.state === 'ready_for_review') actions.push(['accept', 'Accept outcome'], ['request_changes', 'Request changes']);
     else if (!['completed', 'cancelled'].includes(task.state)) actions.push(['accept', 'Mark outcome complete']);
     if (!['completed', 'cancelled'].includes(task.state)) actions.push(['cancel', 'Cancel task']);
     return actions;
   }
-  async function runAction(task: Task, action: string, expectedRevision: number, note: HTMLTextAreaElement): Promise<void> {
-    let text = notes.get(task.id) ?? '';
-    if (action === 'approve') {
+  async function runAction(task: Task, action: string, expectedRevision: number): Promise<void> {
+    const text = notes.get(task.id) ?? '';
+    if (action === 'approve' || action === 'approve_with_note') {
       const accepted = await modalConfirm({
         title: 'Approve preparation',
-        body: `${task.scope}\n\nPermissions: ${task.permissions.join(', ')}\n\nAcceptance: ${task.acceptance}\n\nStop: ${task.stopCondition}\n\nApproval notifies the owning main session and authorizes its configured workflow to start scoped preparation. External actions and final outcome acceptance remain unauthorized.`,
+        body: `${task.scope}\n\nPermissions: ${task.permissions.join(', ')}\n\nAcceptance: ${task.acceptance}\n\nStop: ${task.stopCondition}\n\nReadiness estimate: ${task.readinessConfidence}% (advisory)\n\n${text.trim() ? `Your note to the worker: ${text.trim()}\n\n` : ''}Approval notifies the owning main session and authorizes its configured workflow to start scoped preparation. External actions and final outcome acceptance remain unauthorized.`,
         primaryLabel: 'Approve preparation',
       });
       if (!accepted) return;
-      text = 'Approved displayed preparation scope';
-    } else if (!text.trim()) {
-      error.textContent = action === 'accept' ? 'Outcome-level acceptance evidence is required.' : 'An answer, feedback, or reason is required.';
-      note.focus();
-      return;
     }
     busy = true;
     render();
     try {
-      snapshot = await command(action, task.id, expectedRevision, text);
+      snapshot = await command(action === 'approve_with_note' ? 'approve' : action, task.id, expectedRevision, text);
       notes.delete(task.id);
       quickActions.delete(task.id);
       error.textContent = snapshot.notification ?? '';
@@ -236,11 +227,10 @@ export function createTaskSidebar(
     current.value = '';
     current.textContent = label(task.state);
     select.append(current);
-    const destinations: Record<string, string> = { approve: 'ready', resume: 'ready', request_changes: 'awaiting approval', accept: 'completed', cancel: 'cancelled' };
+    const destinations: Record<string, string> = { approve: 'ready', approve_with_note: 'ready', resume: 'ready', request_changes: 'awaiting approval', accept: 'completed', cancel: 'cancelled' };
     for (const [action, text] of actions) {
       const option = document.createElement('option');
       option.value = action; option.textContent = `${destinations[action]} · ${text}`;
-      option.disabled = action === 'approve' && task.readinessConfidence <= 90;
       select.append(option);
     }
     select.disabled = busy || !actions.length;
@@ -260,21 +250,21 @@ export function createTaskSidebar(
       const note = document.createElement('textarea');
       note.id = `task-quick-note-${task.id}`;
       note.setAttribute('aria-label', `Quick action evidence for ${task.id}`);
-      note.placeholder = 'Answer, feedback, or outcome evidence';
+      note.placeholder = 'Note to the agent, answer, or feedback (optional)';
       note.value = notes.get(task.id) ?? '';
       note.disabled = busy;
       note.addEventListener('input', () => notes.set(task.id, note.value));
-      if (selected[0] !== 'approve') cell.append(note);
+      cell.append(note);
       const apply = document.createElement('button');
       apply.id = `task-quick-apply-${task.id}`;
       apply.className = 'btn'; apply.textContent = selected[1];
-      apply.disabled = busy || (selected[0] === 'approve' && task.readinessConfidence <= 90);
-      apply.addEventListener('click', () => void runAction(task, selected[0], pending.revision, note));
+      apply.disabled = busy;
+      apply.addEventListener('click', () => void runAction(task, selected[0], pending.revision));
       const cancel = document.createElement('button');
       cancel.className = 'btn'; cancel.textContent = 'Cancel quick action'; cancel.disabled = busy;
       cancel.addEventListener('click', () => { quickActions.delete(task.id); render(); document.getElementById(select.id)?.focus(); });
       const notice = document.createElement('p');
-      notice.textContent = `Current: ${label(task.state)}. ${selected[0] === 'approve' ? 'Review scope in the confirmation. Approval may start scoped preparation through the owning main session.' : 'Evidence or a reason is required before applying.'}`;
+      notice.textContent = `Current: ${label(task.state)}. ${selected[0].startsWith('approve') ? 'Review scope in the confirmation. Approval may start scoped preparation through the owning main session.' : 'Note optional.'}`;
       cell.append(notice, apply, cancel);
     }
     return cell;
@@ -336,7 +326,8 @@ export function createTaskSidebar(
       }
       const reason = document.createElement('textarea');
       reason.value = draft.reason;
-      reason.required = true; reason.disabled = busy;
+      reason.placeholder = 'Classification reason (optional)';
+      reason.disabled = busy;
       reason.addEventListener('input', () => { draft.reason = reason.value; remember(); });
       field('Classification reason', reason);
       const notice = document.createElement('p');
@@ -345,8 +336,8 @@ export function createTaskSidebar(
       const save = document.createElement('button');
       save.className = 'btn'; save.textContent = 'Save classification'; save.disabled = busy;
       save.addEventListener('click', async () => {
-        if (!draft.reason.trim() || !Array.from(editor.querySelectorAll('input')).every((input) => input.reportValidity())) {
-          error.textContent = 'A reason and confidence values from 0 to 100 are required.';
+        if (!Array.from(editor.querySelectorAll('input')).every((input) => input.reportValidity())) {
+          error.textContent = 'Confidence values from 0 to 100 are required.';
           return;
         }
         await saveClassification(task, draft);
@@ -363,6 +354,7 @@ export function createTaskSidebar(
     detail(details, 'Stop', task.stopCondition);
     detail(details, 'Dependencies', task.dependencies.join(', '));
     detail(details, 'Progress', task.progress);
+    detail(details, 'User note to worker', task.approvalNote ?? '');
     detail(details, 'Dispatch claim', task.dispatch?.id ?? '');
     detail(details, 'Question', task.question);
     detail(details, 'First seen', task.firstSeen);
@@ -379,7 +371,7 @@ export function createTaskSidebar(
     const actions = actionsFor(task);
     const note = document.createElement('textarea');
     note.setAttribute('aria-label', `Answer or review evidence for ${task.id}`);
-    note.placeholder = 'Answer, feedback, or outcome evidence';
+    note.placeholder = 'Note to the agent, answer, or feedback (optional)';
     note.value = notes.get(task.id) ?? '';
     note.addEventListener('input', () => notes.set(task.id, note.value));
     if (actions.some(([action]) => action !== 'approve')) details.append(note);
@@ -392,14 +384,14 @@ export function createTaskSidebar(
     for (const [action, text] of actions) {
       const option = document.createElement('option');
       option.value = action; option.textContent = text;
-      option.disabled = busy || (action === 'approve' && task.readinessConfidence <= 90);
+      option.disabled = busy;
       transition.append(option);
       const button = document.createElement('button');
       button.className = 'btn';
       button.textContent = text;
       button.hidden = true;
-      button.disabled = busy || (action === 'approve' && task.readinessConfidence <= 90);
-      button.addEventListener('click', () => void runAction(task, action, snapshot.revision, note));
+      button.disabled = busy;
+      button.addEventListener('click', () => void runAction(task, action, snapshot.revision));
       details.append(button);
       actionButtons.push(button);
     }

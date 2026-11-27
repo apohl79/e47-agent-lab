@@ -1178,7 +1178,6 @@ async function handle(state: ServerState, req: IncomingMessage, res: ServerRespo
       if (!documentPath) throw new Error('Markdown document required');
       if (!['classify', 'approve', 'resume', 'request_changes', 'accept', 'cancel'].includes(body.action)) throw new Error('unsupported user task command');
       if (body.action === 'classify') {
-        if (!body.note?.trim()) throw new Error('classification reason is required');
         const fields = ['route', 'humanDelegable', 'classificationConfidence', 'readinessConfidence'];
         if (!body.task || !Object.keys(body.task).length || Object.keys(body.task).some((key) => !fields.includes(key))) {
           throw new Error('unsupported classification field');

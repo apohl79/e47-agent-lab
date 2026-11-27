@@ -26,6 +26,7 @@ export interface Task {
   deliverable: string;
   evidence: string;
   approval?: string;
+  approvalNote?: string;
   dispatch?: { id: string; approval: string };
   history: Array<{ at: string; actor: string; state: TaskState; note: string }>;
 }

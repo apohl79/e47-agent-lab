@@ -117,9 +117,9 @@ its task. Categories are document-specific and do not mutate the register or
 carry urgency forward independently of the new day's headings.
 
 The state dropdown offers only available user actions. Selecting an action
-does not apply it: use the displayed button and supply outcome evidence,
-feedback, or a reason. Preparation approval has a separate scope confirmation
-and never starts an agent session.
+does not apply it: use the displayed button. Human notes, feedback, and reasons
+are optional. Preparation approval has a separate scope confirmation and
+notifies the owning main agent, which may dispatch scoped preparation.
 
 Each collapsed table row also has a State dropdown. Choose an available
 transition to reveal a compact evidence field and action button in that cell;
@@ -130,9 +130,9 @@ reset it; if the register changed, cancel and reselect rather than retrying a
 stale action. Completed and cancelled rows have read-only status dropdowns.
 
 The Classification dropdown also works in collapsed rows: choose a route,
-enter a reason, and explicitly save or discard it. It does not launch work.
+optionally enter a reason, and explicitly save or discard it. It does not launch work.
 “Edit classification” changes route and both
-confidence scores with a required reason. Saving invalidates prior approval.
+confidence scores with an optional reason. Saving invalidates prior approval.
 It does not transfer ownership or accept a handoff. Active work and outcomes
 under review cannot be reclassified; return review work for changes first.
 Completed and cancelled tasks are read-only. Live updates retain drafts;
@@ -217,11 +217,23 @@ it to `awaiting_approval`. User cancellation ends at `cancelled`.
 
 The CLI runs as an agent. It cannot approve, resume, accept, cancel, or request
 review changes on the user's behalf. Only explicit user actions in Tasks mode do that.
-Approval requires execution readiness **strictly greater than 90**, an agent
-route, complete scope/acceptance/stop instructions, and completed dependencies.
+Readiness scores are advisory; explicit human approval overrides the score.
+Approval requires an agent route, complete scope/acceptance/stop instructions,
+preparation permissions, and completed dependencies.
 Classification confidence is not execution readiness or authorization.
-Changing classification/scope invalidates approval. Start rechecks readiness,
+Changing classification/scope invalidates approval. Start rechecks scope,
 dependencies, and the approved scope fingerprint.
+
+Both collapsed rows and expanded controls offer **Ready with note** alongside
+**Approve preparation**. The optional note is shown in the scope confirmation,
+persisted as `approvalNote`, displayed in task details and history, and covered
+by the approval fingerprint. Blank notes are valid. Approval and resume save the
+current note; reclassification or requested changes clear it with approval.
+The owning main agent must reread it and include it verbatim in the worker
+handoff. The worker uses it as user context/instructions only within approved
+scope and permissions. It cannot authorize external messages or mutations;
+prepare a requested follow-up for review instead. Missing or conflicting scope
+still requires user input. Legacy approvals without notes remain valid.
 
 Allowed preparation permissions are `read_sources`, `write_artifacts`,
 `write_isolated_code`, `run_local_checks`, and `update_task_status`.
@@ -289,8 +301,8 @@ Session references without a navigable URL remain visible text.
 Keep a preparation deliverable separate from a broader obligation. Accepting
 a report does not mean a rollout, decision, or human handoff is complete.
 Create separate linked tasks when those outcomes differ. User acceptance
-requires an explicit outcome-level evidence note. Completed and cancelled
+does not require an evidence note. Completed and cancelled
 records are terminal; create a follow-up rather than silently reopening them.
 For human or externally finished work, use **Mark outcome complete** with
-verified completion evidence; this explicit user action can close any open state.
+optional completion evidence; this explicit user action can close any open state.
 An agent must never invoke the browser's user commands to manufacture approval.

@@ -27,6 +27,8 @@ function fixture() {
 
 test('approval HTTP handoff, atomic claim, binding and worker lifecycle preserve one owner', async () => {
   const { root, path, doc, update } = fixture();
+  update({ action: 'classify', id: 'TASK-1', task: { readinessConfidence: 0 } });
+  const note = 'I started the DevEx conversation; prepare a follow-up for review.';
   const prompts: string[] = [];
   const server = await createServer({
     docPath: doc, projectRoot: root, sessionDir: join(root, 'session'), prefsPath: join(root, 'prefs'),
@@ -36,12 +38,14 @@ test('approval HTTP handoff, atomic claim, binding and worker lifecycle preserve
   try {
     const approve = () => fetch(`http://127.0.0.1:${server.port}/api/tasks/command`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ action: 'approve', id: 'TASK-1', expectedRevision: readTaskRegister(path).revision }),
+      body: JSON.stringify({ action: 'approve', id: 'TASK-1', expectedRevision: readTaskRegister(path).revision, note }),
     });
     const response = await approve();
     assert.equal(response.status, 200);
     assert.match((await response.json() as TaskSnapshot).notification!, /notified/);
     assert.equal(prompts.length, 1);
+    assert.equal(readTaskRegister(path).tasks[0]!.approvalNote, note);
+    assert.match(prompts[0]!, /approvalNote.*verbatim/);
     const event = JSON.parse(prompts[0]!.split('\n').at(-1)!);
     assert.equal(event.type, 'inline-discussion.task-ready');
     assert.equal(event.projectRoot, root);
@@ -72,6 +76,7 @@ test('approval HTTP handoff, atomic claim, binding and worker lifecycle preserve
     const task = readTaskRegister(path).tasks[0]!;
     assert.equal(task.dispatch, undefined);
     assert.equal(task.session, 'worker-1');
+    assert.equal(task.approvalNote, 'The local report');
     assert.throws(() => update({ action: 'start', id: 'TASK-1', claimId: 'claim-a', task: { session: 'worker-1' } }), /claim missing/);
     update({ action: 'claim', id: 'TASK-1', claimId: 'claim-resume', expectedTaskRevision: task.revision });
     update({ action: 'bind', id: 'TASK-1', claimId: 'claim-resume', task: { session: 'worker-1' } });

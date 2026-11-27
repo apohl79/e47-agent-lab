@@ -87,9 +87,6 @@ try {
   assert.equal(await page.locator('.task-detail-row').count(), 0);
   assert.equal(read().revision, beforeQuickClassification);
   await classificationRow.getByRole('button', { name: 'Save classification', exact: true }).click();
-  assert.match(await page.getByRole('alert').innerText(), /reason is required/);
-  await classificationReason.fill('Personal decision in acceptance fixture');
-  await classificationRow.getByRole('button', { name: 'Save classification', exact: true }).click();
   await classificationReason.waitFor({ state: 'detached' });
   assert.equal(await quickClassification.inputValue(), 'you');
   assert.equal(read().tasks[0].route, 'you');
@@ -130,8 +127,6 @@ try {
   await page.screenshot({ path: join(root, 'quick-mobile.png'), fullPage: true });
   await page.setViewportSize({ width: 1440, height: 1000 });
   const secondRow = page.locator('tr').filter({ has: page.locator('#task-toggle-TASK-043') });
-  await secondRow.getByRole('button', { name: 'Mark outcome complete', exact: true }).click();
-  assert.match(await page.getByRole('alert').innerText(), /evidence is required/);
   assert.equal(read().tasks[1].state, 'identified');
   await page.getByLabel('Quick action evidence for TASK-043', { exact: true }).fill('Outcome verified in local acceptance fixture');
   await page.getByRole('button', { name: 'Second task', exact: true }).click();
@@ -174,8 +169,6 @@ try {
     await transition.selectOption(action);
     await page.getByRole('button', { name, exact: true }).click();
   };
-  await applyState('accept', 'Mark outcome complete');
-  assert.match(await page.getByRole('alert').innerText(), /evidence is required/);
   assert.equal(read().tasks[0].state, 'awaiting_approval');
   const quick = page.getByLabel('Quick state for TASK-042', { exact: true });
   await quick.selectOption('approve');
@@ -260,7 +253,7 @@ try {
   assert.equal(await page.locator('#task-TASK-042 input').isChecked(), false, 'unchecked Markdown snapshot must not toggle on a register error');
   assert.equal(await page.locator('#task-sidebar').isVisible(), true);
   assert.notEqual(await page.getByRole('alert').innerText(), '');
-  console.log(`PASS built browser collapsed quick approval/resume/completion, evidence and stale-write guards, expanded workflow and classification; desktop/mobile: ${root}`);
+  console.log(`PASS built browser collapsed quick approval/resume/completion, optional reasons and stale-write guards, expanded workflow and classification; desktop/mobile: ${root}`);
 } finally {
   await browser.close();
   await server.close();
