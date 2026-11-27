@@ -19,9 +19,9 @@ const command = (value) => JSON.parse(execFileSync(process.execPath, [cli, 'upda
 execFileSync(process.execPath, [cli, 'init', register]);
 command({ action: 'create', id: 'TASK-1', task: { title: 'Prepare local review', source: 'Isolated acceptance fixture' } });
 command({ action: 'classify', id: 'TASK-1', task: {
-  route: 'agent_preparable', classificationConfidence: 99, readinessConfidence: 30,
-  scope: 'Prepare a local review', permissions: ['read_sources', 'write_artifacts'],
-  acceptance: 'Local review artifact exists', stopCondition: 'Stop for final user review',
+  route: 'you', classificationConfidence: 99, readinessConfidence: 0,
+  scope: 'Personal security action. No agent execution authorized.', permissions: [],
+  acceptance: 'Authorized owner confirms the outcome', stopCondition: 'Stop for final user review',
 } });
 writeFileSync(doc, '# Acceptance\n\n<!-- task-register: tasks.json -->\n\n- [ ] Prepare local review <!-- task-id: TASK-1 -->\n');
 let notifications = 0;
@@ -38,6 +38,8 @@ const server = await createServer({
     assert.equal(event.type, 'inline-discussion.task-ready');
     assert.match(prompt, /approvalNote.*verbatim/);
     assert.equal(read().tasks[0].approvalNote, approvalNote);
+    assert.deepEqual(read().tasks[0].permissions, ['read_sources', 'write_artifacts', 'update_task_status']);
+    assert.match(read().tasks[0].scope, /context only, not execution authority/);
     command({ action: 'claim', id: event.taskId, expectedTaskRevision: event.taskRevision, claimId: 'browser-claim' });
     assert.throws(() => command({ action: 'claim', id: event.taskId, expectedTaskRevision: read().tasks[0].revision, claimId: 'duplicate-claim' }));
     command({ action: 'bind', id: event.taskId, claimId: 'browser-claim', task: { session: 'isolated-worker-fixture' } });
@@ -51,6 +53,10 @@ try {
   const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
   await page.goto(`http://127.0.0.1:${server.port}/`);
   await page.locator('#task-sidebar-toggle').click();
+  await page.getByLabel('Quick classification for TASK-1', { exact: true }).selectOption('agent_preparable');
+  await page.getByRole('button', { name: 'Save classification', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('#task-quick-select-TASK-1 option')?.textContent === 'awaiting approval');
+  assert.deepEqual(read().tasks[0].permissions, [], 'classification alone grants no permissions');
   const quick = page.getByLabel('Quick state for TASK-1', { exact: true });
   assert.equal(await quick.locator('option[value="approve"]').isDisabled(), false);
   await quick.selectOption('approve_with_note');
@@ -58,6 +64,25 @@ try {
   await page.locator('#task-quick-apply-TASK-1').click();
   await page.locator('#modal-root').getByText(/Approval notifies the owning main session/).waitFor();
   await page.locator('#modal-root').getByText(/I started a DevEx conversation/).waitFor();
+  await page.locator('#modal-root').getByText(/This task has no agent permissions/).waitFor();
+  await page.locator('#modal-root').getByText(/Permissions: read_sources, write_artifacts, update_task_status/).waitFor();
+  await page.screenshot({ path: join(root, 'scope-confirmation.png'), fullPage: true });
+  await page.locator('#modal-root').getByRole('button', { name: 'Cancel', exact: true }).click();
+  assert.deepEqual(read().tasks[0].permissions, [], 'cancel must not save scope or approval');
+  assert.equal(read().tasks[0].state, 'awaiting_approval');
+  assert.equal(await page.getByLabel('Quick action evidence for TASK-1', { exact: true }).inputValue(), approvalNote);
+  await page.locator('#task-quick-apply-TASK-1').click();
+  command({ action: 'classify', id: 'TASK-1', task: { readinessConfidence: 1 } });
+  await page.locator('#modal-root').getByRole('button', { name: 'Approve preparation', exact: true }).click();
+  await page.locator('.task-quick-state .task-action-error').getByText(/stale/).waitFor();
+  await page.screenshot({ path: join(root, 'approval-error.png'), fullPage: true });
+  assert.deepEqual(read().tasks[0].permissions, [], 'stale confirmation cannot partially save scope');
+  assert.equal(notifications, 0);
+  assert.equal(await page.getByLabel('Quick action evidence for TASK-1', { exact: true }).inputValue(), approvalNote);
+  await page.waitForFunction(() => document.querySelector('.task-table')?.textContent.includes('99% / 1%'));
+  await page.getByRole('button', { name: 'Cancel quick action', exact: true }).click();
+  await quick.selectOption('approve_with_note');
+  await page.locator('#task-quick-apply-TASK-1').click();
   assert.equal(notifications, 0, 'Opening confirmation cannot dispatch');
   await page.locator('#modal-root').getByRole('button', { name: 'Approve preparation', exact: true }).click();
   await page.waitForFunction(() => document.querySelector('#task-quick-select-TASK-1 option')?.textContent === 'ready for review');
@@ -69,24 +94,25 @@ try {
   assert.equal(task.history.filter((entry) => entry.note === 'claim').length, 1);
   assert.match(readFileSync(join(root, 'review.md'), 'utf8'), /user acceptance required/);
   assert.ok(readFileSync(join(root, 'review.md'), 'utf8').includes(approvalNote));
+  await page.locator('.task-quick-state .task-action-notification').getByText(/notified/).waitFor();
   await page.getByRole('button', { name: 'Prepare local review', exact: true }).click();
   await page.getByText('User note to worker:', { exact: true }).waitFor();
-  await page.getByLabel('Change state for TASK-1', { exact: true }).selectOption('request_changes');
-  await page.getByRole('button', { name: 'Request changes', exact: true }).click();
-  await page.waitForFunction(() => document.querySelector('.task-status')?.textContent === 'awaiting approval');
+  assert.equal(read().tasks[0].state, 'ready_for_review', 'prepared report does not complete the underlying obligation');
+  await quick.selectOption('request_changes');
+  await page.locator('#task-quick-apply-TASK-1').click();
+  await page.waitForFunction(() => document.querySelector('#task-quick-select-TASK-1 option')?.textContent === 'awaiting approval');
   assert.equal(read().tasks[0].approvalNote, undefined);
-  await page.getByLabel('Change state for TASK-1', { exact: true }).selectOption('approve_with_note');
-  assert.equal(await page.getByRole('button', { name: 'Ready with note', exact: true }).isEnabled(), true);
-  await page.getByRole('button', { name: 'Ready with note', exact: true }).click();
+  await quick.selectOption('approve_with_note');
+  await page.locator('#task-quick-apply-TASK-1').click();
   await page.locator('#modal-root').getByRole('button', { name: 'Cancel', exact: true }).click();
-  assert.equal(notifications, 1, 'cancelled expanded approval cannot dispatch');
+  assert.equal(notifications, 1, 'cancelled approval cannot dispatch');
   await page.getByLabel('Filter tasks by status').selectOption('all');
-  await page.getByLabel('Change state for TASK-1', { exact: true }).selectOption('accept');
-  await page.getByRole('button', { name: 'Mark outcome complete', exact: true }).click();
-  await page.waitForFunction(() => document.querySelector('.task-status')?.textContent === 'completed');
+  await quick.selectOption('accept');
+  await page.locator('#task-quick-apply-TASK-1').click();
+  await page.waitForFunction(() => document.querySelector('#task-quick-select-TASK-1 option')?.textContent === 'completed');
   assert.equal(read().tasks[0].state, 'completed', 'explicit human completion needs no reason');
   assert.equal(await page.locator('#task-quick-select-TASK-1 option[value="approve"]').count(), 0);
-  console.log('PASS: low-confidence ready with note → main notification → CLI claim/bind/start → note in artifact; expanded cancellation; blank review/completion reasons; no live agent.');
+  console.log('PASS: personal→agent classification→displayed preparation scope→approval with note→main notification→claim/bind/start; cancellation/stale writes grant nothing and preserve note; inline errors; no live agent.');
 } finally {
   await browser.close();
   await server.close();

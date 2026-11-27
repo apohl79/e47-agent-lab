@@ -87,6 +87,12 @@ export function applyTaskCommand(register: TaskRegister, command: TaskCommand, a
       task.state = ['agent', 'agent_preparable', 'verify_first'].includes(task.route) ? 'awaiting_approval' : 'identified';
     } else if (command.action === 'approve') {
       check(task.state === 'awaiting_approval', 'task is not awaiting approval');
+      if (command.task !== undefined) {
+        const fields = ['scope', 'permissions', 'acceptance', 'stopCondition'];
+        check(Object.keys(command.task).every((key) => fields.includes(key)), 'unsupported approval scope field');
+        Object.assign(task, command.task);
+        validateTask(task);
+      }
       ready(task, next);
       task.approvalNote = command.note?.trim() || undefined;
       task.approval = scopeFingerprint(task);

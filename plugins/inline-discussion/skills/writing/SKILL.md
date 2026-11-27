@@ -235,6 +235,18 @@ scope and permissions. It cannot authorize external messages or mutations;
 prepare a requested follow-up for review instead. Missing or conflicting scope
 still requires user input. Legacy approvals without notes remain valid.
 
+Changing a personal or human task to an agent route does not itself grant
+permissions. When permissions are empty, the approval confirmation proposes
+a preparation-only scope: read existing sources, write a local report/draft,
+and update task status. It retains the original obligation/outcome as context,
+not execution authority or evidence of completion. Only confirmation saves
+that displayed scope and approval atomically; cancellation changes neither.
+Tasks with existing permissions keep their original scope. Dependencies and
+stale revisions remain enforced. Action failures appear next to the task
+controls and retain the user's note for retry. Dispatch notifications also
+appear in the task row, including queued approval without an owning main
+session or a failed notification; saved approval alone is not a worker start.
+
 Allowed preparation permissions are `read_sources`, `write_artifacts`,
 `write_isolated_code`, `run_local_checks`, and `update_task_status`.
 These never authorize messages, source-system changes, publishing, Git pushes,

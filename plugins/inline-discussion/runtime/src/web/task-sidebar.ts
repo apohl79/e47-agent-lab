@@ -1,4 +1,5 @@
 import { TASK_STATES, type Task, type TaskSnapshot } from '../task-types.ts';
+import { proposedPreparation, type PreparationScope } from '../task-approval.ts';
 import { modalConfirm } from './modal.ts';
 
 const label = (value: string) => value.replaceAll('_', ' ');
@@ -65,6 +66,7 @@ export function createTaskSidebar(
   let expanded = '';
   let busy = false;
   const notes = new Map<string, string>();
+  const actionFeedback = new Map<string, { message: string; failed: boolean }>();
   const quickActions = new Map<string, { action: string; revision: number }>();
   type ClassificationDraft = { revision: number; route: Task['route']; classificationConfidence: number; readinessConfidence: number; reason: string };
   const drafts = new Map<string, ClassificationDraft>();
@@ -88,6 +90,7 @@ export function createTaskSidebar(
       snapshot = await command('classify', task.id, revision, note, patch);
       drafts.delete(task.id);
       quickClassifications.delete(task.id);
+      actionFeedback.delete(task.id);
       error.textContent = '';
     } catch (failure) {
       error.textContent = `${failure instanceof Error ? failure.message : String(failure)}. Discard classification edits to use current values.`;
@@ -192,12 +195,23 @@ export function createTaskSidebar(
     if (!['completed', 'cancelled'].includes(task.state)) actions.push(['cancel', 'Cancel task']);
     return actions;
   }
+  function appendActionFeedback(parent: HTMLElement, task: Task): void {
+    const feedback = actionFeedback.get(task.id);
+    if (!feedback) return;
+    const message = document.createElement('p');
+    message.className = feedback.failed ? 'task-action-error' : 'task-action-notification';
+    message.textContent = feedback.message;
+    parent.append(message);
+  }
   async function runAction(task: Task, action: string, expectedRevision: number): Promise<void> {
     const text = notes.get(task.id) ?? '';
+    let preparation: PreparationScope | undefined;
     if (action === 'approve' || action === 'approve_with_note') {
+      preparation = proposedPreparation(task);
+      const approved = preparation ?? task;
       const accepted = await modalConfirm({
         title: 'Approve preparation',
-        body: `${task.scope}\n\nPermissions: ${task.permissions.join(', ')}\n\nAcceptance: ${task.acceptance}\n\nStop: ${task.stopCondition}\n\nReadiness estimate: ${task.readinessConfidence}% (advisory)\n\n${text.trim() ? `Your note to the worker: ${text.trim()}\n\n` : ''}Approval notifies the owning main session and authorizes its configured workflow to start scoped preparation. External actions and final outcome acceptance remain unauthorized.`,
+        body: `${preparation ? 'This task has no agent permissions. Approve the following preparation-only scope instead of executing the underlying obligation.\n\n' : ''}${approved.scope}\n\nPermissions: ${approved.permissions.join(', ')}\n\nAcceptance: ${approved.acceptance}\n\nStop: ${approved.stopCondition}\n\nReadiness estimate: ${task.readinessConfidence}% (advisory)\n\n${text.trim() ? `Your note to the worker: ${text.trim()}\n\n` : ''}Approval notifies the owning main session and authorizes its configured workflow to start scoped preparation. External actions and final outcome acceptance remain unauthorized.`,
         primaryLabel: 'Approve preparation',
       });
       if (!accepted) return;
@@ -205,12 +219,15 @@ export function createTaskSidebar(
     busy = true;
     render();
     try {
-      snapshot = await command(action === 'approve_with_note' ? 'approve' : action, task.id, expectedRevision, text);
+      snapshot = await command(action === 'approve_with_note' ? 'approve' : action, task.id, expectedRevision, text, preparation);
       notes.delete(task.id);
       quickActions.delete(task.id);
+      actionFeedback.delete(task.id);
       error.textContent = snapshot.notification ?? '';
+      if (snapshot.notification) actionFeedback.set(task.id, { message: snapshot.notification, failed: false });
     } catch (failure) {
       error.textContent = failure instanceof Error ? failure.message : String(failure);
+      actionFeedback.set(task.id, { message: error.textContent, failed: true });
     } finally {
       busy = false;
       render();
@@ -267,6 +284,7 @@ export function createTaskSidebar(
       notice.textContent = `Current: ${label(task.state)}. ${selected[0].startsWith('approve') ? 'Review scope in the confirmation. Approval may start scoped preparation through the owning main session.' : 'Note optional.'}`;
       cell.append(notice, apply, cancel);
     }
+    appendActionFeedback(cell, task);
     return cell;
   }
   function renderTask(task: Task): HTMLElement {
@@ -402,6 +420,7 @@ export function createTaskSidebar(
       });
       details.insertBefore(transition, note);
     }
+    appendActionFeedback(details, task);
     row.append(jump, status, details);
     return row;
   }
